@@ -113,3 +113,30 @@ func TestBuildWorkersUnknownPane(t *testing.T) {
 		t.Fatal("want error for a pane not in the list, got nil")
 	}
 }
+
+func TestBuildWorkersRejectsUnsafeBranch(t *testing.T) {
+	client := fakeClient()
+	_, err := buildWorkers(context.Background(), client, &workerInput{
+		repo:     "/repo",
+		tasks:    []string{"x"},
+		branches: []string{"feat$(whoami)"},
+	})
+	if err == nil {
+		t.Fatal("want error for a branch with shell metacharacters, got nil")
+	}
+}
+
+func TestValidBranch(t *testing.T) {
+	ok := []string{"feat-x", "fix/started-at-144", "release_1.2.3", "a/b/c"}
+	bad := []string{"feat x", "feat$(cmd)", "a;b", "-leading", "/abs", "back`tick", ""}
+	for _, b := range ok {
+		if !validBranch(b) {
+			t.Errorf("validBranch(%q) = false, want true", b)
+		}
+	}
+	for _, b := range bad {
+		if validBranch(b) {
+			t.Errorf("validBranch(%q) = true, want false", b)
+		}
+	}
+}

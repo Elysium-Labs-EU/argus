@@ -102,15 +102,24 @@ const DefaultLauncher = "claude --permission-mode auto"
 // a real agent would submit that at the first newline.
 const initialPrompt = "Read .claude/argus/brief.md and follow it exactly; it is your task brief."
 
-// spawnCommand is the shell line argus runs in a worker's pane: cd into the
-// worktree, then start the launcher with the initial prompt as its argument.
-// launcher is configurable so a smoke test can point argus at a cheap shell
-// instead of a full agent (the shell simply ignores the prompt argument).
-func spawnCommand(worktree, launcher string) string {
+// SpawnCommand is the shell line argus runs in a worker's pane: cd into the
+// worktree, then start the launcher with the initial prompt as its argument. The
+// worktree path is single-quoted because it is data (a path that may contain
+// spaces, and whose final segment is a branch name): interpolating it raw let a
+// branch like feat$(cmd) inject into the pane's shell. launcher is argus-owned
+// config (DefaultLauncher or --launcher) and is left unquoted so a smoke test can
+// pass a multi-word command.
+func SpawnCommand(worktree, launcher string) string {
 	if launcher == "" {
 		launcher = DefaultLauncher
 	}
-	return fmt.Sprintf("cd %s && %s %q", worktree, launcher, initialPrompt)
+	return fmt.Sprintf("cd %s && %s %q", shellQuote(worktree), launcher, initialPrompt)
+}
+
+// shellQuote wraps s in single quotes for POSIX shells, escaping any embedded
+// single quote, so the whole string is treated as one literal argument.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Run is the whole deterministic supervise loop. In dry-run it prints the plan
@@ -276,7 +285,7 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 
 		// One launch: cd + start the agent with a prompt that points it at the
 		// brief file. No second paste — the brief is on disk, not typed in.
-		if err := cfg.Client.PaneRun(ctx, paneID, spawnCommand(p.Worktree, cfg.Launcher)); err != nil {
+		if err := cfg.Client.PaneRun(ctx, paneID, SpawnCommand(p.Worktree, cfg.Launcher)); err != nil {
 			cfg.Log.Fail("spawn", p.Task, err)
 			return nil, fmt.Errorf("spawning worker for %s: %w", p.Task, err)
 		}

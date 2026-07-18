@@ -170,6 +170,12 @@ func buildWorkers(ctx context.Context, client herdr.Client, in *workerInput) ([]
 
 		task := at(in.tasks, i)
 		branch := at(in.branches, i)
+		if branch != "" && !validBranch(branch) {
+			return nil, &ui.UserError{
+				Err:  fmt.Errorf("unsafe branch name %q", branch),
+				Hint: "branches become worktree paths and shell arguments; use only letters, digits, . _ - /",
+			}
+		}
 		if branch == "" {
 			branch = defaultBranch(pane, task, i)
 		}
@@ -253,4 +259,23 @@ func at(s []string, i int) string {
 		return s[i]
 	}
 	return ""
+}
+
+// validBranch accepts only branch names safe to embed in a worktree path and a
+// shell command: letters, digits, and . _ - /, with no leading dash. It rejects
+// spaces and shell metacharacters (e.g. feat$(cmd), a b) before they ever reach a
+// filesystem path or the pane's shell.
+func validBranch(b string) bool {
+	if b == "" || strings.HasPrefix(b, "-") || strings.HasPrefix(b, "/") {
+		return false
+	}
+	for _, r := range b {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-' || r == '/':
+		default:
+			return false
+		}
+	}
+	return true
 }

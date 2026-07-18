@@ -125,6 +125,20 @@ func TestMatchAnyIsSegmentAware(t *testing.T) {
 	}
 }
 
+func TestSpawnCommandSingleQuotesWorktree(t *testing.T) {
+	// A worktree path with a space and a shell-substitution-looking segment must
+	// be a single quoted literal, not something the pane's shell interprets.
+	cmd := SpawnCommand("/repo/.claude/worktrees/feat $(whoami)", "claude")
+	if !strings.Contains(cmd, `cd '/repo/.claude/worktrees/feat $(whoami)'`) {
+		t.Errorf("worktree not single-quoted: %s", cmd)
+	}
+	// An embedded single quote is escaped, not left to close the quote early.
+	got := shellQuote("a'b")
+	if got != `'a'\''b'` {
+		t.Errorf("shellQuote(a'b) = %s", got)
+	}
+}
+
 func hasReasonContaining(reasons []string, sub string) bool {
 	for _, r := range reasons {
 		if strings.Contains(r, sub) {

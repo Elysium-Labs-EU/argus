@@ -77,8 +77,7 @@ conflict resolution itself needs the worker.`,
 			if err := supervisor.WriteBrief(worktree, supervisor.RebaseBrief(branch, base)); err != nil {
 				return err
 			}
-			spawn := fmt.Sprintf("cd %s && %s %q", worktree, launcher, "Read .claude/argus/brief.md and follow it exactly; it is your task brief.")
-			if err := client.PaneRun(ctx, wt.RootPaneID, spawn); err != nil {
+			if err := client.PaneRun(ctx, wt.RootPaneID, supervisor.SpawnCommand(worktree, launcher)); err != nil {
 				return err
 			}
 
