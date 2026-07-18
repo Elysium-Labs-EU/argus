@@ -46,6 +46,7 @@ type Config struct {
 	Base     string
 	Home     string
 	Launcher string
+	ScrubEnv []string // env vars withheld from each worker (e.g. forge tokens it never needs)
 	Interval time.Duration
 	Timeout  time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
 }
@@ -134,11 +135,26 @@ const initialPrompt = "Read .claude/argus/brief.md and follow it exactly; it is 
 // branch like feat$(cmd) inject into the pane's shell. launcher is argus-owned
 // config (DefaultLauncher or --launcher) and is left unquoted so a smoke test can
 // pass a multi-word command.
-func SpawnCommand(worktree, launcher string) string {
+//
+// scrubEnv names environment variables to withhold from the launcher via `env
+// -u`, so a secret the pane inherited from the host (a forge token the worker
+// never needs) is not present in the worker agent's environment or any child it
+// spawns. The names are argus-owned identifiers, not user data, so they are
+// emitted unquoted. An empty list yields the plain command unchanged.
+func SpawnCommand(worktree, launcher string, scrubEnv []string) string {
 	if launcher == "" {
 		launcher = DefaultLauncher
 	}
-	return fmt.Sprintf("cd %s && %s %q", shellQuote(worktree), launcher, initialPrompt)
+	var prefix strings.Builder
+	if len(scrubEnv) > 0 {
+		prefix.WriteString("env")
+		for _, v := range scrubEnv {
+			prefix.WriteString(" -u ")
+			prefix.WriteString(v)
+		}
+		prefix.WriteByte(' ')
+	}
+	return fmt.Sprintf("cd %s && %s%s %q", shellQuote(worktree), prefix.String(), launcher, initialPrompt)
 }
 
 // shellQuote wraps s in single quotes for POSIX shells, escaping any embedded
@@ -159,7 +175,7 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 	}
 
 	if dryRun {
-		renderPlan(cfg.Out, cfg.Base, cfg.Launcher, plans)
+		renderPlan(cfg.Out, cfg.Base, cfg.Launcher, cfg.ScrubEnv, plans)
 		return nil
 	}
 
@@ -354,7 +370,7 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 
 		// One launch: cd + start the agent with a prompt that points it at the
 		// brief file. No second paste — the brief is on disk, not typed in.
-		if err := cfg.Client.PaneRun(ctx, paneID, SpawnCommand(p.Worktree, cfg.Launcher)); err != nil {
+		if err := cfg.Client.PaneRun(ctx, paneID, SpawnCommand(p.Worktree, cfg.Launcher, cfg.ScrubEnv)); err != nil {
 			cfg.Log.Fail("spawn", taskLabel(p.Task), err)
 			return fail(i, fmt.Errorf("spawning worker for %s: %w", p.Task, err))
 		}
