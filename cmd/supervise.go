@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Elysium-Labs-EU/argus/internal/credproxy"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
@@ -33,6 +34,7 @@ func newSuperviseCmd() *cobra.Command {
 		timeout      time.Duration
 		issues       []int
 		dryRun       bool
+		noCredProxy  bool
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -119,6 +121,35 @@ each pane's directory in --panes mode).`,
 			if review {
 				cfg.Reviewer = supervisor.NewCLIReviewer(reviewModel).WithLog(logger)
 			}
+
+			// Front the workers' API traffic with a credential proxy so a worker is
+			// not handed the real key in its own environment. It runs only for a
+			// live spawn (a dry run spawns nothing) and only for API-key auth: when
+			// ANTHROPIC_API_KEY is unset (subscription/OAuth), there is no key to
+			// swap and the proxy stays off — in that mode workers reach the host's
+			// ~/.claude credentials directly and get no credential isolation, so it
+			// only holds for hosts that authenticate with an API key.
+			// --no-cred-proxy opts out entirely.
+			if !dryRun && !noCredProxy {
+				if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+					proxy := credproxy.New(
+						func(agent, method, path string) {
+							logger.Action("credproxy", agent, method, path)
+						},
+						credproxy.Anthropic(key),
+					)
+					if err := proxy.Start(); err != nil {
+						return fmt.Errorf("starting credential proxy: %w", err)
+					}
+					defer func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						_ = proxy.Shutdown(ctx)
+					}()
+					cfg.Broker = proxy
+				}
+			}
+
 			return supervisor.Run(cmd.Context(), cfg, workers, dryRun)
 		},
 	}
@@ -139,6 +170,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan and exit without creating worktrees or spawning workers")
+	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front worker API traffic with the credential proxy; workers inherit the host's real ANTHROPIC_API_KEY")
 	return cmd
 }
 

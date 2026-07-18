@@ -33,6 +33,16 @@ type Worker struct {
 	PaneID   string
 }
 
+// CredentialBroker mints per-worker credentials so a worker never holds a real
+// API key. WorkerEnv registers the worker (identified by agent label and its
+// branch) and returns the environment assignments — a phantom sentinel plus a
+// proxied base URL — that route the worker's API traffic through argus. A nil
+// Broker means no proxy: workers inherit the host's real credentials, which is
+// the prior behavior.
+type CredentialBroker interface {
+	WorkerEnv(agent, branch string) []string
+}
+
 // Config carries the dependencies and knobs for a supervise run. Everything
 // effectful (herdr, the clock, the home dir, output) enters here so the loop
 // stays testable.
@@ -42,6 +52,7 @@ type Config struct {
 	Policy   *ReviewPolicy
 	Reviewer Reviewer
 	Log      *eventlog.Logger
+	Broker   CredentialBroker
 	Client   herdr.Client
 	Base     string
 	Home     string
@@ -135,10 +146,35 @@ const initialPrompt = "Read .claude/argus/brief.md and follow it exactly; it is 
 // config (DefaultLauncher or --launcher) and is left unquoted so a smoke test can
 // pass a multi-word command.
 func SpawnCommand(worktree, launcher string) string {
+	return SpawnCommandEnv(worktree, launcher, nil)
+}
+
+// SpawnCommandEnv is SpawnCommand with per-launcher environment assignments. Each
+// env entry is a "KEY=VALUE" pair placed inline immediately before the launcher,
+// so it applies to the launcher process and every child it spawns but not to the
+// pane's own shell. The value is single-quoted for the same reason the worktree
+// is: it is data (a URL, a token) and must not be re-parsed by the shell. Setting
+// a variable this way shadows any value the launcher would otherwise inherit from
+// the host env, which is how a phantom sentinel takes the place of a real key in
+// the launcher's own environment (it does not scrub the key from ancestor
+// processes — see internal/credproxy for what that boundary does and does not
+// cover).
+func SpawnCommandEnv(worktree, launcher string, env []string) string {
 	if launcher == "" {
 		launcher = DefaultLauncher
 	}
-	return fmt.Sprintf("cd %s && %s %q", shellQuote(worktree), launcher, initialPrompt)
+	var prefix strings.Builder
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		prefix.WriteString(k)
+		prefix.WriteByte('=')
+		prefix.WriteString(shellQuote(v))
+		prefix.WriteByte(' ')
+	}
+	return fmt.Sprintf("cd %s && %s%s %q", shellQuote(worktree), prefix.String(), launcher, initialPrompt)
 }
 
 // shellQuote wraps s in single quotes for POSIX shells, escaping any embedded
@@ -353,8 +389,15 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 		}
 
 		// One launch: cd + start the agent with a prompt that points it at the
-		// brief file. No second paste — the brief is on disk, not typed in.
-		if err := cfg.Client.PaneRun(ctx, paneID, SpawnCommand(p.Worktree, cfg.Launcher)); err != nil {
+		// brief file. No second paste — the brief is on disk, not typed in. When a
+		// broker is configured, the launch line also carries this worker's phantom
+		// credentials inline, so the agent authenticates through argus and is not
+		// handed a real key in its own environment.
+		var workerEnv []string
+		if cfg.Broker != nil {
+			workerEnv = cfg.Broker.WorkerEnv(taskLabel(p.Task), p.Branch)
+		}
+		if err := cfg.Client.PaneRun(ctx, paneID, SpawnCommandEnv(p.Worktree, cfg.Launcher, workerEnv)); err != nil {
 			cfg.Log.Fail("spawn", taskLabel(p.Task), err)
 			return fail(i, fmt.Errorf("spawning worker for %s: %w", p.Task, err))
 		}
