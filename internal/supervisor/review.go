@@ -15,18 +15,22 @@ import (
 // it earns its keep. Glob fields are matched as path substrings — predictable and
 // enough here (e.g. "internal/config", "systemd", "/etc/").
 type ReviewPolicy struct {
-	SharedGlobs  []string // paths that always require review (shared/prod surface)
-	OSPathGlobs  []string // paths whose change needs real-world proof
-	MaxDiffLines int      // insertions+deletions above this escalate; 0 = no limit
+	SharedGlobs       []string // paths that always require review (shared/prod surface)
+	OSPathGlobs       []string // paths whose change needs real-world proof
+	AlwaysReviewGlobs []string // behavior-critical paths that always escalate, even for a small clean diff
+	MaxDiffLines      int      // insertions+deletions above this escalate; 0 = no limit
 }
 
-// DefaultReviewPolicy is a conservative starting gate: modest diff ceiling and
-// the OS-integration surfaces the supervise-agents skill calls out as needing
-// real-world testing, with no shared-path restrictions until the caller sets them.
+// DefaultReviewPolicy is a conservative starting gate: modest diff ceiling, the
+// OS-integration surfaces the supervise-agents skill calls out as needing
+// real-world testing, and the behavior-critical (degraded-mode) surfaces that
+// must never auto-approve on diff size alone. No shared-path restrictions until
+// the caller sets them.
 func DefaultReviewPolicy() ReviewPolicy {
 	return ReviewPolicy{
-		MaxDiffLines: 400,
-		OSPathGlobs:  []string{"systemd", "openrc", "launchd", "install", "/etc/"},
+		MaxDiffLines:      400,
+		OSPathGlobs:       []string{"systemd", "openrc", "launchd", "install", "/etc/"},
+		AlwaysReviewGlobs: []string{"monitor", "daemon", "restart", "health", "liveness"},
 	}
 }
 
@@ -74,6 +78,9 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 	for _, f := range s.FilesTouched {
 		if g, ok := matchAny(f, p.SharedGlobs); ok {
 			reasons = append(reasons, fmt.Sprintf("touches shared path %q (matched %q)", f, g))
+		}
+		if g, ok := matchAny(f, p.AlwaysReviewGlobs); ok {
+			reasons = append(reasons, fmt.Sprintf("touches behavior-critical path %q (matched %q) — always reviewed", f, g))
 		}
 	}
 

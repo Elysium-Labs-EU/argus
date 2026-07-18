@@ -3,6 +3,7 @@ package supervisor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
 	"codeberg.org/Elysium_Labs/argus/internal/herdr"
 	"codeberg.org/Elysium_Labs/argus/internal/protocol"
 )
@@ -142,6 +144,7 @@ func TestRunFullPathToReport(t *testing.T) {
 		return []byte(`{"result":{}}`), nil
 	}
 	var buf bytes.Buffer
+	policy := DefaultReviewPolicy()
 	cfg := &Config{
 		Out:      &buf,
 		Now:      time.Now,
@@ -150,7 +153,7 @@ func TestRunFullPathToReport(t *testing.T) {
 		Home:     t.TempDir(),
 		Interval: 2 * time.Millisecond,
 		Timeout:  time.Second,
-		Policy:   ptrPolicy(DefaultReviewPolicy()),
+		Policy:   &policy,
 	}
 	workers := []Worker{{Task: "t", Branch: "feat", RepoRoot: t.TempDir(), Worktree: wt}}
 	if err := Run(context.Background(), cfg, workers, false); err != nil {
@@ -166,7 +169,40 @@ func TestRunFullPathToReport(t *testing.T) {
 	}
 }
 
-func ptrPolicy(p ReviewPolicy) *ReviewPolicy { return &p }
+func TestExecuteReportsOrphansOnPartialFailure(t *testing.T) {
+	// herdr: worktree create always returns a root pane; the first pane run
+	// succeeds, the second fails — so worker 0 is launched, then worker 1 aborts.
+	runs := 0
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w:p1"}}}`), nil
+		}
+		if len(args) >= 2 && args[0] == "pane" && args[1] == "run" {
+			runs++
+			if runs == 2 {
+				return nil, errors.New("pane run failed")
+			}
+		}
+		return []byte(`{"result":{}}`), nil
+	}
+	var buf bytes.Buffer
+	cfg := &Config{
+		Client: herdr.NewWithRunner(runner),
+		Now:    time.Now,
+		Base:   "main",
+		Log:    eventlog.New(&buf, "supervise", "r", nil),
+	}
+	plans := BuildPlan([]Worker{
+		{Task: "a", Branch: "feat-a", RepoRoot: t.TempDir()},
+		{Task: "b", Branch: "feat-b", RepoRoot: t.TempDir()},
+	})
+	if _, err := execute(context.Background(), cfg, plans); err == nil {
+		t.Fatal("execute should return the spawn error")
+	}
+	if !strings.Contains(buf.String(), `"action":"orphaned"`) {
+		t.Errorf("expected an orphaned event for the already-launched worker:\n%s", buf.String())
+	}
+}
 
 func TestReportTokensKnownAndUnknown(t *testing.T) {
 	home := t.TempDir()

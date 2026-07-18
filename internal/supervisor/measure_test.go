@@ -102,6 +102,35 @@ func TestGateEscalatesWhenDiffUnmeasurable(t *testing.T) {
 	}
 }
 
+func TestGateAlwaysReviewsBehaviorCriticalPaths(t *testing.T) {
+	// A small, clean, passing change — but it touches internal/monitor, a
+	// behavior-critical (degraded-mode) surface, so the gate must escalate.
+	st := &workerState{
+		hasFile:       true,
+		measuredOK:    true,
+		measured:      protocol.DiffStat{Files: 1, Insertions: 4},
+		measuredFiles: []string{"internal/monitor/health_monitor.go"},
+		plan:          &WorkerPlan{Worker: Worker{Task: "restart backoff"}},
+		status: protocol.Status{
+			Phase: protocol.PhaseAwaitingReview,
+			Tests: []protocol.TestRun{{Cmd: "make ci", Result: protocol.ResultPass}},
+		},
+	}
+	v := gateVerdict(st, nil) // nil -> DefaultReviewPolicy, which includes monitor/health
+	if v.AutoApprove {
+		t.Fatal("a change to a behavior-critical path must not auto-approve")
+	}
+	if !hasReasonContaining(v.Reasons, "behavior-critical") {
+		t.Errorf("expected a behavior-critical reason, got %v", v.Reasons)
+	}
+
+	// The same diff elsewhere still auto-approves.
+	st.measuredFiles = []string{"internal/textutil/wrap.go"}
+	if v := gateVerdict(st, nil); !v.AutoApprove {
+		t.Errorf("a benign small clean change should auto-approve, got %v", v.Reasons)
+	}
+}
+
 func TestMatchAnyIsSegmentAware(t *testing.T) {
 	cases := []struct {
 		path, glob string

@@ -25,6 +25,7 @@ func newSuperviseCmd() *cobra.Command {
 		launcher     string
 		sharedGlobs  []string
 		osGlobs      []string
+		reviewGlobs  []string
 		reviewModel  string
 		review       bool
 		maxDiffLines int
@@ -109,9 +110,10 @@ each pane's directory in --panes mode).`,
 				Interval: interval,
 				Timeout:  timeout,
 				Policy: &supervisor.ReviewPolicy{
-					MaxDiffLines: maxDiffLines,
-					SharedGlobs:  sharedGlobs,
-					OSPathGlobs:  osGlobs,
+					MaxDiffLines:      maxDiffLines,
+					SharedGlobs:       sharedGlobs,
+					OSPathGlobs:       osGlobs,
+					AlwaysReviewGlobs: reviewGlobs,
 				},
 			}
 			if review {
@@ -133,6 +135,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables")
 	cmd.Flags().StringSliceVar(&sharedGlobs, "shared-glob", nil, "review gate: path substrings that always require review (shared/prod surface)")
 	cmd.Flags().StringSliceVar(&osGlobs, "os-glob", policyDefaults.OSPathGlobs, "review gate: path substrings whose change requires real-world proof")
+	cmd.Flags().StringSliceVar(&reviewGlobs, "always-review-glob", policyDefaults.AlwaysReviewGlobs, "review gate: behavior-critical path words that always escalate, even for a small clean diff")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan and exit without creating worktrees or spawning workers")
