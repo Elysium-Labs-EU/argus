@@ -7,7 +7,7 @@ import (
 )
 
 func fakeReviewRunner(reply string) reviewRunner {
-	return func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
 		return []byte(reply), nil
 	}
 }
@@ -61,6 +61,17 @@ func TestReviewPromptCarriesReasonsAndDiff(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}
+	}
+}
+
+func TestReviewPromptVerifiesInCheckoutWhenWorktreeSet(t *testing.T) {
+	with := reviewPrompt(&ReviewRequest{Task: "t", Worktree: "/wt", Diff: "d"})
+	if !strings.Contains(with, "inside the change's worktree") || !strings.Contains(with, "do not judge from the diff alone") {
+		t.Errorf("worktree prompt should instruct in-checkout verification:\n%s", with)
+	}
+	without := reviewPrompt(&ReviewRequest{Task: "t", Diff: "d"})
+	if strings.Contains(without, "inside the change's worktree") {
+		t.Errorf("no-worktree prompt should not claim checkout access")
 	}
 }
 

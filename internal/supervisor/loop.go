@@ -151,10 +151,11 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 			continue
 		}
 		res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
-			Task:    st.plan.Task,
-			Branch:  st.plan.Branch,
-			Diff:    diff,
-			Reasons: Assess(&st.status, cfg.Policy).Reasons,
+			Task:     st.plan.Task,
+			Branch:   st.plan.Branch,
+			Worktree: st.plan.Worktree,
+			Diff:     diff,
+			Reasons:  Assess(&st.status, cfg.Policy).Reasons,
 		})
 		if err != nil {
 			st.reviewErr = err

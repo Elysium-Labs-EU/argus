@@ -46,9 +46,10 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 			err = ui.WithSpinner("claude reviewing...", func() error {
 				var rerr error
 				res, rerr = reviewer.Review(ctx, &supervisor.ReviewRequest{
-					Task:    task,
-					Reasons: reasons,
-					Diff:    diff,
+					Task:     task,
+					Worktree: worktree,
+					Reasons:  reasons,
+					Diff:     diff,
 				})
 				return rerr
 			})

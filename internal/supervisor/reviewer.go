@@ -13,10 +13,11 @@ import (
 // deterministic gate escalates. It is deliberately small: the task, why the gate
 // flagged it, and the actual diff — not the worker's whole scrollback.
 type ReviewRequest struct {
-	Task    string
-	Branch  string
-	Diff    string
-	Reasons []string
+	Task     string
+	Branch   string
+	Worktree string
+	Diff     string
+	Reasons  []string
 }
 
 // ReviewResult is a reviewer's verdict. Decision is one of "approve",
@@ -34,9 +35,11 @@ type Reviewer interface {
 	Review(ctx context.Context, req *ReviewRequest) (ReviewResult, error)
 }
 
-// reviewRunner execs a command with stdin and returns stdout. The one effectful
-// seam in the CLI reviewer; tests substitute a fake.
-type reviewRunner func(ctx context.Context, stdin string, args ...string) ([]byte, error)
+// reviewRunner execs a command in workdir with stdin and returns stdout. The one
+// effectful seam in the CLI reviewer; tests substitute a fake. workdir is the
+// worktree the reviewer runs inside, so it can read the real files (not just the
+// diff); an empty workdir runs in the current directory.
+type reviewRunner func(ctx context.Context, workdir, stdin string, args ...string) ([]byte, error)
 
 // CLIReviewer asks a headless `claude -p` for a verdict. It is the default
 // Milestone-B reviewer: a one-shot, not a session.
@@ -71,8 +74,9 @@ func DiffFor(ctx context.Context, worktree, base string) (string, error) {
 }
 
 func claudeRunner() reviewRunner {
-	return func(ctx context.Context, stdin string, args ...string) ([]byte, error) {
+	return func(ctx context.Context, workdir, stdin string, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, "claude", args...) //nolint:gosec // fixed "claude" binary, argus-composed args
+		cmd.Dir = workdir                                  // review inside the worktree so read tools see the real files
 		cmd.Stdin = strings.NewReader(stdin)
 		var out bytes.Buffer
 		cmd.Stdout = &out
@@ -87,11 +91,13 @@ func claudeRunner() reviewRunner {
 // JSON envelope wraps the model's text in .result; the model is instructed to
 // answer with only our verdict JSON, which we then extract from that text.
 func (r CLIReviewer) Review(ctx context.Context, req *ReviewRequest) (ReviewResult, error) {
-	args := []string{"-p", "--output-format", "json"}
+	// Read-only tools only: the reviewer inspects the checkout to verify symbols
+	// and behavior, but must not edit — its job is a verdict, not a change.
+	args := []string{"-p", "--output-format", "json", "--allowedTools", "Read,Grep,Glob"}
 	if r.model != "" {
 		args = append(args, "--model", r.model)
 	}
-	out, err := r.run(ctx, reviewPrompt(req), args...)
+	out, err := r.run(ctx, req.Worktree, reviewPrompt(req), args...)
 	if err != nil {
 		return ReviewResult{}, err
 	}
@@ -102,6 +108,12 @@ func reviewPrompt(req *ReviewRequest) string {
 	var b strings.Builder
 	b.WriteString("You are a code reviewer. A deterministic gate flagged this change for review.\n")
 	b.WriteString("Judge only correctness, parity with existing code, and test adequacy.\n\n")
+	if req.Worktree != "" {
+		b.WriteString("You are running inside the change's worktree. Use your Read/Grep/Glob tools\n")
+		b.WriteString("to verify the diff against the ACTUAL files: confirm referenced symbols and\n")
+		b.WriteString("imports exist, that call sites match, and that the change fits the surrounding\n")
+		b.WriteString("code — do not judge from the diff alone. Do not edit anything.\n\n")
+	}
 	fmt.Fprintf(&b, "Task: %s\nBranch: %s\n\n", req.Task, req.Branch)
 	b.WriteString("The gate escalated for these reasons:\n")
 	for _, reason := range req.Reasons {
@@ -110,7 +122,7 @@ func reviewPrompt(req *ReviewRequest) string {
 	b.WriteString("\nDiff:\n```diff\n")
 	b.WriteString(req.Diff)
 	b.WriteString("\n```\n\n")
-	b.WriteString(`Reply with ONLY a JSON object, no prose, of the form:
+	b.WriteString(`When done, reply with ONLY a JSON object, no prose, of the form:
 {"decision":"approve|request-changes|needs-human","summary":"one sentence","findings":["..."]}
 Use "approve" only if the change is correct and adequately tested; "request-changes" for a concrete defect; "needs-human" if you cannot tell.`)
 	return b.String()
