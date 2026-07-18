@@ -167,11 +167,38 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 	if err != nil {
 		return err
 	}
+	return superviseStates(ctx, cfg, states)
+}
+
+// superviseStates runs the observe→judge→report tail shared by a fresh spawn
+// (Run) and an attach to already-running workers (Attach): watch each worker's
+// typed status until a terminal phase, measure its real diff from git, gate or
+// escalate, and print the report. No terminal scrollback is read in any step.
+func superviseStates(ctx context.Context, cfg *Config, states []*workerState) error {
 	watch(ctx, cfg, states)
 	reconcile(ctx, cfg, states)
 	reviewEscalations(ctx, cfg, states)
 	renderReport(ctx, cfg, states)
 	return nil
+}
+
+// Attach supervises workers that are already running in their worktrees: it
+// creates no worktree and spawns no agent, it only watches each worker's typed
+// status file and takes it through the same gate and report as a fresh run. This
+// is how an operator brings a worker argus did not launch — one started by hand,
+// or grinding on an existing PR branch — under the same deterministic observation
+// instead of eyeballing its pane scrollback.
+func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
+	plans := BuildPlan(workers)
+	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
+		return err
+	}
+	states := make([]*workerState, len(plans))
+	for i := range plans {
+		states[i] = &workerState{plan: &plans[i], paneID: plans[i].PaneID, started: cfg.Now()}
+		cfg.Log.Action("attach", taskLabel(plans[i].Task), "watching", plans[i].Worktree)
+	}
+	return superviseStates(ctx, cfg, states)
 }
 
 // reconcile computes each worker's real diff from git so the gate and report use
