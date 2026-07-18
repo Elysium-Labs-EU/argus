@@ -126,6 +126,18 @@ func TestReviewPromptVerifiesInCheckoutWhenWorktreeSet(t *testing.T) {
 	}
 }
 
+func TestNewCLIReviewerAndWithLog(t *testing.T) {
+	r := NewCLIReviewer("sonnet")
+	if r.model != "sonnet" || r.run == nil {
+		t.Fatalf("NewCLIReviewer did not wire model/runner: %+v", r)
+	}
+	// WithLog returns a copy carrying the logger; the original is unchanged.
+	withLog := r.WithLog(nil)
+	if withLog.model != "sonnet" {
+		t.Errorf("WithLog dropped the model")
+	}
+}
+
 func TestExtractJSONObjectBalances(t *testing.T) {
 	in := `noise {"a":{"b":"}"},"c":1} trailing`
 	got := extractJSONObject(in)

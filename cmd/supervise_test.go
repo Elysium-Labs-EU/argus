@@ -114,6 +114,23 @@ func TestBuildWorkersUnknownPane(t *testing.T) {
 	}
 }
 
+func TestBuildWorkersPanesDefaultBranchAndTask(t *testing.T) {
+	client := fakeClient()
+	// A pane with no explicit task/branch: both default off the pane id.
+	workers, err := buildWorkers(context.Background(), client, &workerInput{
+		panes: []string{"1-2"},
+	})
+	if err != nil {
+		t.Fatalf("buildWorkers: %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("want 1 worker, got %d", len(workers))
+	}
+	if workers[0].Task != "1-2" || workers[0].Branch != "argus-1-2" {
+		t.Errorf("pane defaults: got task=%q branch=%q", workers[0].Task, workers[0].Branch)
+	}
+}
+
 func TestBuildWorkersRejectsUnsafeBranch(t *testing.T) {
 	client := fakeClient()
 	_, err := buildWorkers(context.Background(), client, &workerInput{

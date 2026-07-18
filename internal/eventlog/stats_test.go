@@ -77,6 +77,28 @@ func TestReadDirReadsJSONL(t *testing.T) {
 	}
 }
 
+func TestRatesHandleZeroDenominators(t *testing.T) {
+	var empty Stats
+	if empty.EscalationRate() != 0 {
+		t.Error("escalation rate with no gate decisions should be 0")
+	}
+	if empty.ReAskRate() != 0 {
+		t.Error("re-ask rate with no reviews should be 0")
+	}
+}
+
+func TestInt64FieldMissingAndNonNumeric(t *testing.T) {
+	if int64Field(nil, "x") != 0 {
+		t.Error("missing key should yield 0")
+	}
+	if int64Field(map[string]any{"x": "not a number"}, "x") != 0 {
+		t.Error("non-numeric value should yield 0")
+	}
+	if int64Field(map[string]any{"x": float64(42)}, "x") != 42 {
+		t.Error("float64 value should decode to its int64")
+	}
+}
+
 func TestReadDirMissingIsEmpty(t *testing.T) {
 	events, err := ReadDir(filepath.Join(t.TempDir(), "nope"))
 	if err != nil {

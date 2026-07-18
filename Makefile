@@ -1,6 +1,6 @@
 .PHONY: help build test test-coverage-check lint nilcheck fix setup ci clean release pre-release changelog changelog-preview
 
-COVERAGE_THRESHOLD ?= 49
+COVERAGE_THRESHOLD ?= 75
 BINARY_NAME=argus
 GOBIN=./bin
 
