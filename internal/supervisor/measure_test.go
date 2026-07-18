@@ -54,6 +54,34 @@ func bigGitWorktree(t *testing.T, path string, lines int) string {
 	return wt
 }
 
+func TestMeasureDiffCountsUntrackedFiles(t *testing.T) {
+	// A worker that ADDS a new file: git diff misses it, but MeasureDiff must not.
+	wt := gitWorktreeWithDiff(t) // has a tracked edit (+2) vs HEAD
+	newFile := filepath.Join(wt, "cmd", "new_e2e_test.go")
+	if err := os.MkdirAll(filepath.Dir(newFile), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newFile, []byte(strings.Repeat("line\n", 40)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	if ds.Insertions < 40 {
+		t.Errorf("untracked new file not counted: insertions=%d", ds.Insertions)
+	}
+	found := false
+	for _, f := range files {
+		if strings.HasSuffix(f, "new_e2e_test.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("untracked file not in file list: %v", files)
+	}
+}
+
 func TestGateEscalatesWhenWorkerUnderReportsDiff(t *testing.T) {
 	wt := bigGitWorktree(t, "cmd/root.go", 50)
 	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
