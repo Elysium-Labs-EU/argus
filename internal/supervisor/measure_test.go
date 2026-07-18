@@ -185,7 +185,7 @@ func TestMatchAnyIsSegmentAware(t *testing.T) {
 func TestSpawnCommandSingleQuotesWorktree(t *testing.T) {
 	// A worktree path with a space and a shell-substitution-looking segment must
 	// be a single quoted literal, not something the pane's shell interprets.
-	cmd := SpawnCommand("/repo/.claude/worktrees/feat $(whoami)", "claude")
+	cmd := SpawnCommand("/repo/.claude/worktrees/feat $(whoami)", "claude", nil)
 	if !strings.Contains(cmd, `cd '/repo/.claude/worktrees/feat $(whoami)'`) {
 		t.Errorf("worktree not single-quoted: %s", cmd)
 	}
@@ -193,6 +193,20 @@ func TestSpawnCommandSingleQuotesWorktree(t *testing.T) {
 	got := shellQuote("a'b")
 	if got != `'a'\''b'` {
 		t.Errorf("shellQuote(a'b) = %s", got)
+	}
+}
+
+func TestSpawnCommandScrubsEnv(t *testing.T) {
+	// With scrub vars, the launcher runs under `env -u` for each, so a forge token
+	// the pane inherited is not in the worker's environment. Without them, the
+	// command is byte-for-byte the plain form.
+	plain := SpawnCommand("/wt", "claude", nil)
+	if strings.Contains(plain, "env -u") {
+		t.Errorf("nil scrub must not add env -u: %s", plain)
+	}
+	scrubbed := SpawnCommand("/wt", "claude", []string{"CODEBERG_TOKEN", "GH_TOKEN"})
+	if !strings.Contains(scrubbed, "&& env -u CODEBERG_TOKEN -u GH_TOKEN claude ") {
+		t.Errorf("scrub not applied before launcher: %s", scrubbed)
 	}
 }
 

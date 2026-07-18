@@ -14,7 +14,7 @@ import (
 // renderPlan prints what a real run would do, without doing it. This is the
 // dry-run surface: worktrees to create, the settings each worker gets, and the
 // brief that will be injected.
-func renderPlan(out io.Writer, base, launcher string, plans []WorkerPlan) {
+func renderPlan(out io.Writer, base, launcher string, scrubEnv []string, plans []WorkerPlan) {
 	_, _ = fmt.Fprintf(out, "%s supervise plan — %d worker(s), base %s\n\n",
 		ui.LabelInfo.Render("i"), len(plans), base)
 
@@ -28,7 +28,7 @@ func renderPlan(out io.Writer, base, launcher string, plans []WorkerPlan) {
 		_, _ = fmt.Fprintf(out, "  branch:   %s\n", p.Branch)
 		_, _ = fmt.Fprintf(out, "  worktree: %s\n", p.Worktree)
 		_, _ = fmt.Fprintf(out, "  pane:     %s\n", pane)
-		_, _ = fmt.Fprintf(out, "  spawn:    %s\n", ui.TextCommand.Render(SpawnCommand(p.Worktree, launcher)))
+		_, _ = fmt.Fprintf(out, "  spawn:    %s\n", ui.TextCommand.Render(SpawnCommand(p.Worktree, launcher, scrubEnv)))
 
 		settings, _ := json.MarshalIndent(p.Settings, "    ", "  ")
 		_, _ = fmt.Fprintf(out, "  settings.local.json:\n    %s\n", settings)
