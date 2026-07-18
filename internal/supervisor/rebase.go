@@ -62,6 +62,6 @@ supervisor can make.
 // rebase that dispatch one worker.
 func WaitForStatus(ctx context.Context, worktree string, interval time.Duration) (protocol.Status, bool) {
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Worktree: worktree}}}
-	pollStatus(ctx, interval, st)
+	pollStatus(ctx, interval, nil, st)
 	return st.status, st.hasFile
 }

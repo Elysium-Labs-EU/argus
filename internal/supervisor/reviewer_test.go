@@ -12,6 +12,21 @@ func fakeReviewRunner(reply string) reviewRunner {
 	}
 }
 
+// sequenceReviewRunner returns each reply in turn on successive calls, and the
+// last reply for any calls beyond the list. It also records how many times it ran.
+func sequenceReviewRunner(replies ...string) (reviewRunner, *int) {
+	calls := 0
+	run := func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		i := calls
+		calls++
+		if i >= len(replies) {
+			i = len(replies) - 1
+		}
+		return []byte(replies[i]), nil
+	}
+	return run, &calls
+}
+
 func TestCLIReviewerParsesEnvelopeVerdict(t *testing.T) {
 	// claude -p --output-format json wraps the model text in .result; the model
 	// replied with a fenced JSON verdict.
@@ -47,6 +62,42 @@ func TestCLIReviewerErrorsOnNoVerdict(t *testing.T) {
 	_, err := r.Review(context.Background(), &ReviewRequest{Task: "t"})
 	if err == nil {
 		t.Fatal("want error when output has no JSON verdict")
+	}
+}
+
+func TestCLIReviewerReAsksOnceThenParses(t *testing.T) {
+	// First reply has unquoted keys (the real #148 failure: 'S' from {Summary:...});
+	// the re-ask returns strict JSON. Review must recover without erroring.
+	run, calls := sequenceReviewRunner(
+		`{decision: approve, Summary: looks fine}`,
+		`{"decision":"approve","summary":"looks fine","findings":[]}`,
+	)
+	r := NewReviewerWithRunner(run)
+	res, err := r.Review(context.Background(), &ReviewRequest{Task: "t", Diff: "x"})
+	if err != nil {
+		t.Fatalf("Review after re-ask: %v", err)
+	}
+	if res.Decision != "approve" {
+		t.Errorf("decision: got %q", res.Decision)
+	}
+	if *calls != 2 {
+		t.Errorf("want exactly one re-ask (2 runs), got %d", *calls)
+	}
+}
+
+func TestCLIReviewerErrorsAfterFailedReAsk(t *testing.T) {
+	// Both the initial reply and the re-ask are unparseable: Review gives up with
+	// an error and does not loop forever.
+	run, calls := sequenceReviewRunner(
+		`{decision: approve}`,
+		`still not json`,
+	)
+	r := NewReviewerWithRunner(run)
+	if _, err := r.Review(context.Background(), &ReviewRequest{Task: "t"}); err == nil {
+		t.Fatal("want error when re-ask also fails to parse")
+	}
+	if *calls != 2 {
+		t.Errorf("want exactly 2 runs (one re-ask, no more), got %d", *calls)
 	}
 }
 

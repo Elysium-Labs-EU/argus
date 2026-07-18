@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -166,6 +167,89 @@ func TestExecuteWritesSettingsBriefAndSpawnsInRootPane(t *testing.T) {
 	}
 }
 
+// gitWorktreeWithDiff makes a temp git repo with one committed file and an
+// uncommitted edit, so DiffFor(wt, "HEAD") returns a non-empty diff.
+func gitWorktreeWithDiff(t *testing.T) string {
+	t.Helper()
+	wt := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "base")
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n\nvar Added = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return wt
+}
+
+func TestReviewEscalationsAutoApprovesCleanAndReviewsEscalated(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	policy := DefaultReviewPolicy()
+
+	clean := &workerState{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "clean", Branch: "b", Worktree: wt}},
+		status: protocol.Status{
+			Phase:    protocol.PhaseAwaitingReview,
+			DiffStat: protocol.DiffStat{Files: 1, Insertions: 3},
+			Tests:    []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
+		},
+	}
+	escalated := &workerState{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "bad", Branch: "b", Worktree: wt}},
+		status: protocol.Status{
+			Phase: protocol.PhaseAwaitingReview,
+			Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
+		},
+	}
+
+	cfg := &Config{
+		Base:     "HEAD",
+		Policy:   &policy,
+		Reviewer: NewReviewerWithRunner(fakeReviewRunner(`{"decision":"approve","summary":"ok","findings":[]}`)),
+	}
+	reviewEscalations(context.Background(), cfg, []*workerState{clean, escalated})
+
+	if clean.review != nil {
+		t.Error("auto-approved worker must not be reviewed")
+	}
+	if escalated.review == nil {
+		t.Fatal("escalated worker should have a review verdict")
+	}
+	if escalated.review.Decision != "approve" {
+		t.Errorf("decision: got %q want approve", escalated.review.Decision)
+	}
+	if escalated.reviewErr != nil {
+		t.Errorf("unexpected review error: %v", escalated.reviewErr)
+	}
+}
+
+func TestReviewEscalationsWithoutReviewerJustGates(t *testing.T) {
+	// No reviewer configured: an escalated worker is surfaced (no verdict, no
+	// error), never sent to an LLM.
+	escalated := &workerState{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "bad", Worktree: t.TempDir()}},
+		status:  protocol.Status{Phase: protocol.PhaseBlocked, BlockedReason: "needs a decision"},
+	}
+	cfg := &Config{Base: "HEAD", Policy: nil}
+	reviewEscalations(context.Background(), cfg, []*workerState{escalated})
+	if escalated.review != nil || escalated.reviewErr != nil {
+		t.Errorf("no reviewer should mean no verdict and no error: review=%v err=%v", escalated.review, escalated.reviewErr)
+	}
+}
+
 func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 	wt := t.TempDir()
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}}
@@ -181,7 +265,7 @@ func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	pollStatus(ctx, 10*time.Millisecond, st)
+	pollStatus(ctx, 10*time.Millisecond, nil, st)
 
 	if !st.hasFile {
 		t.Fatal("pollStatus should have read the status file")

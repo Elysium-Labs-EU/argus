@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
 	"codeberg.org/Elysium_Labs/argus/internal/herdr"
 	"codeberg.org/Elysium_Labs/argus/internal/protocol"
 )
@@ -37,6 +39,7 @@ type Config struct {
 	Now      func() time.Time
 	Policy   *ReviewPolicy
 	Reviewer Reviewer
+	Log      *eventlog.Logger
 	Client   herdr.Client
 	Base     string
 	Home     string
@@ -138,16 +141,26 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 // gate verdict) means no call, so the LLM cost tracks the escalation rate, not the
 // worker count.
 func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) {
-	if cfg.Reviewer == nil {
-		return
-	}
 	for _, st := range states {
-		if !st.hasFile || Assess(&st.status, cfg.Policy).AutoApprove {
+		if !st.hasFile {
+			continue
+		}
+		verdict := Assess(&st.status, cfg.Policy)
+		if verdict.AutoApprove {
+			cfg.Log.Action("gate", st.plan.Task, "auto-approve", "")
+			continue
+		}
+		cfg.Log.Action("gate", st.plan.Task, "escalate", strings.Join(verdict.Reasons, "; "))
+
+		// The gate escalated. Only spend an LLM review when one is configured;
+		// otherwise the escalation is surfaced to the human in the report.
+		if cfg.Reviewer == nil {
 			continue
 		}
 		diff, err := DiffFor(ctx, st.plan.Worktree, cfg.Base)
 		if err != nil {
 			st.reviewErr = err
+			cfg.Log.Fail("review", st.plan.Task, err)
 			continue
 		}
 		res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
@@ -155,13 +168,15 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 			Branch:   st.plan.Branch,
 			Worktree: st.plan.Worktree,
 			Diff:     diff,
-			Reasons:  Assess(&st.status, cfg.Policy).Reasons,
+			Reasons:  verdict.Reasons,
 		})
 		if err != nil {
 			st.reviewErr = err
+			cfg.Log.Fail("review", st.plan.Task, err)
 			continue
 		}
 		st.review = &res
+		cfg.Log.Action("review", st.plan.Task, res.Decision, res.Summary)
 	}
 }
 
@@ -219,8 +234,10 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 		// One launch: cd + start the agent with a prompt that points it at the
 		// brief file. No second paste — the brief is on disk, not typed in.
 		if err := cfg.Client.PaneRun(ctx, paneID, spawnCommand(p.Worktree, cfg.Launcher)); err != nil {
+			cfg.Log.Fail("spawn", p.Task, err)
 			return nil, fmt.Errorf("spawning worker for %s: %w", p.Task, err)
 		}
+		cfg.Log.Action("spawn", p.Task, "ok", paneID)
 
 		states[i] = &workerState{plan: p, paneID: paneID, started: cfg.Now()}
 	}
@@ -236,25 +253,27 @@ func watch(ctx context.Context, cfg *Config, states []*workerState) {
 		wg.Add(1)
 		go func(st *workerState) {
 			defer wg.Done()
-			pollStatus(ctx, cfg.Interval, st)
+			pollStatus(ctx, cfg.Interval, cfg.Log, st)
 		}(st)
 	}
 	wg.Wait()
 }
 
-func pollStatus(ctx context.Context, interval time.Duration, st *workerState) {
+func pollStatus(ctx context.Context, interval time.Duration, log *eventlog.Logger, st *workerState) {
 	path := protocol.StatusPath(st.plan.Worktree)
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			log.Action("watch", st.plan.Task, "canceled", string(st.status.Phase))
 			return
 		case <-timer.C:
 			if s, err := protocol.Load(path); err == nil {
 				st.status = s
 				st.hasFile = true
 				if protocol.IsTerminal(s.Phase) {
+					log.Action("phase", st.plan.Task, string(s.Phase), s.BlockedReason)
 					return
 				}
 			}

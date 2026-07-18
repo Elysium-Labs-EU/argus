@@ -77,10 +77,14 @@ each pane's directory in --panes mode).`,
 				return fmt.Errorf("resolving home dir: %w", err)
 			}
 
+			logger, closeLog := openRunLog(cmd, "supervise")
+			defer closeLog()
+
 			cfg := &supervisor.Config{
 				Out:      cmd.OutOrStdout(),
 				Now:      time.Now,
 				Client:   client,
+				Log:      logger,
 				Base:     base,
 				Home:     home,
 				Launcher: launcher,
@@ -92,7 +96,7 @@ each pane's directory in --panes mode).`,
 				},
 			}
 			if review {
-				cfg.Reviewer = supervisor.NewCLIReviewer(reviewModel)
+				cfg.Reviewer = supervisor.NewCLIReviewer(reviewModel).WithLog(logger)
 			}
 			return supervisor.Run(cmd.Context(), cfg, workers, dryRun)
 		},

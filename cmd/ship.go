@@ -59,10 +59,15 @@ from the worktree unless overridden. Requires CODEBERG_TOKEN in the environment.
 				return &ui.UserError{Err: fmt.Errorf("CODEBERG_TOKEN not set"), Hint: "export CODEBERG_TOKEN=<token>"}
 			}
 
+			logger, closeLog := openRunLog(cmd, "ship")
+			defer closeLog()
+
 			if cerr := supervisor.CommitAll(ctx, worktree, commitMsg); cerr != nil && !errors.Is(cerr, supervisor.ErrNothingToCommit) {
+				logger.Fail("commit", branch, cerr)
 				return cerr
 			}
 			if perr := supervisor.Push(ctx, worktree, branch); perr != nil {
+				logger.Fail("push", branch, perr)
 				return perr
 			}
 
@@ -72,8 +77,10 @@ from the worktree unless overridden. Requires CODEBERG_TOKEN in the environment.
 				Head: branch, Base: base,
 			})
 			if err != nil {
+				logger.Fail("open_pr", branch, err)
 				return err
 			}
+			logger.Action("open_pr", branch, "ok", pr.HTMLURL)
 			_, _ = fmt.Fprintf(out, "%s opened PR #%d: %s\n", ui.LabelSuccess.Render("✓"), pr.Number, pr.HTMLURL)
 			return nil
 		},

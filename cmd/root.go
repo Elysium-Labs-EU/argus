@@ -34,6 +34,7 @@ func Execute() error {
 
 func init() {
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
+	rootCmd.PersistentFlags().BoolVar(&debugLog, "debug", false, "tee the run-log events to stderr as they happen (the log is always written under ~/.argus/runs)")
 	rootCmd.AddCommand(superviseCmd)
 	rootCmd.AddCommand(reviewCmd)
 	rootCmd.AddCommand(shipCmd)
