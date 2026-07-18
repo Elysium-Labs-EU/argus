@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"codeberg.org/Elysium_Labs/argus/internal/forge"
 	"codeberg.org/Elysium_Labs/argus/internal/herdr"
 	"codeberg.org/Elysium_Labs/argus/internal/protocol"
 	"codeberg.org/Elysium_Labs/argus/internal/supervisor"
@@ -77,7 +78,7 @@ conflict resolution itself needs the worker.`,
 			if err := supervisor.WriteBrief(worktree, supervisor.RebaseBrief(branch, base)); err != nil {
 				return err
 			}
-			if err := client.PaneRun(ctx, wt.RootPaneID, supervisor.SpawnCommand(worktree, launcher)); err != nil {
+			if err := client.PaneRun(ctx, wt.RootPaneID, supervisor.SpawnCommand(worktree, launcher, forge.StandardTokenVars())); err != nil {
 				return err
 			}
 

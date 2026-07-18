@@ -91,6 +91,7 @@ each pane's directory in --panes mode).`,
 				Base:     base,
 				Home:     home,
 				Launcher: launcher,
+				ScrubEnv: forge.StandardTokenVars(),
 				Interval: interval,
 				Timeout:  timeout,
 				Policy: &supervisor.ReviewPolicy{

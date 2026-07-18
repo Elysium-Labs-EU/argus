@@ -68,21 +68,38 @@ func splitOwnerRepo(path string) (owner, repo string, err error) {
 // GITHUB_TOKEN or GH_TOKEN; codeberg.org uses CODEBERG_TOKEN; any other host
 // uses <HOST>_TOKEN (non-alphanumerics as underscores) then FORGE_TOKEN.
 func TokenForHost(host string) string {
-	var candidates []string
-	switch host {
-	case "github.com":
-		candidates = []string{"GITHUB_TOKEN", "GH_TOKEN"}
-	case "codeberg.org":
-		candidates = []string{"CODEBERG_TOKEN"}
-	default:
-		candidates = []string{envKey(host) + "_TOKEN", "FORGE_TOKEN"}
-	}
-	for _, key := range candidates {
+	for _, key := range tokenVarsForHost(host) {
 		if v := os.Getenv(key); v != "" {
 			return v
 		}
 	}
 	return ""
+}
+
+// tokenVarsForHost is the ordered list of environment variables TokenForHost
+// consults for host — the single place that knows which variables hold a forge
+// token.
+func tokenVarsForHost(host string) []string {
+	switch host {
+	case "github.com":
+		return []string{"GITHUB_TOKEN", "GH_TOKEN"}
+	case "codeberg.org":
+		return []string{"CODEBERG_TOKEN"}
+	default:
+		return []string{envKey(host) + "_TOKEN", "FORGE_TOKEN"}
+	}
+}
+
+// StandardTokenVars are the forge API-token environment variables argus knows by
+// name for the hosts it supports. It is the authority the supervisor uses to
+// scrub these secrets from a worker's environment: a worker never needs a forge
+// token (argus fetches issues and ships on the host, never in the worker pane),
+// so the safe default is to withhold them. Host-specific custom variables
+// (<HOST>_TOKEN for a self-hosted Gitea) are deliberately not included — they are
+// unknowable here without the remote, and the generic FORGE_TOKEN covers the
+// common self-hosted case.
+func StandardTokenVars() []string {
+	return []string{"CODEBERG_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "FORGE_TOKEN"}
 }
 
 // envKey turns a host into an environment-variable-safe upper-case fragment:
