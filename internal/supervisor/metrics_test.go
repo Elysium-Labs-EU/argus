@@ -46,7 +46,9 @@ func TestTokensForSessionSumsTranscript(t *testing.T) {
 	if usage.Input != 300 || usage.Output != 30 || usage.CacheCreation != 5 || usage.CacheRead != 150 {
 		t.Errorf("sum wrong: %+v", usage)
 	}
-	if got, want := usage.Total(), 485; got != want {
+	// Total excludes cumulative cache reads (300+30+5), which would otherwise be
+	// inflated by the 150 repeated cache-read tokens.
+	if got, want := usage.Total(), 335; got != want {
 		t.Errorf("Total: got %d want %d", got, want)
 	}
 }

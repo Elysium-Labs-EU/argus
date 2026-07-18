@@ -94,6 +94,31 @@ the supervisor can make.
 %s`, w.Task, w.Branch, w.Worktree, protocol.WriterBrief)
 }
 
+// taskLabel is a short, log-friendly identifier for a worker task: the first
+// "#<n>" issue reference when present, otherwise the first line trimmed to 60
+// characters. It keeps the run log and `argus stats` keyed by something readable
+// instead of the entire multi-line brief.
+func taskLabel(task string) string {
+	if i := strings.IndexByte(task, '#'); i >= 0 {
+		j := i + 1
+		for j < len(task) && task[j] >= '0' && task[j] <= '9' {
+			j++
+		}
+		if j > i+1 {
+			return task[i:j]
+		}
+	}
+	line := task
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	line = strings.TrimSpace(line)
+	if len(line) > 60 {
+		line = strings.TrimSpace(line[:60])
+	}
+	return line
+}
+
 // DefaultLauncher is the agent argus starts in each worker pane.
 const DefaultLauncher = "claude --permission-mode auto"
 
@@ -317,10 +342,10 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 		// One launch: cd + start the agent with a prompt that points it at the
 		// brief file. No second paste — the brief is on disk, not typed in.
 		if err := cfg.Client.PaneRun(ctx, paneID, SpawnCommand(p.Worktree, cfg.Launcher)); err != nil {
-			cfg.Log.Fail("spawn", p.Task, err)
+			cfg.Log.Fail("spawn", taskLabel(p.Task), err)
 			return nil, fmt.Errorf("spawning worker for %s: %w", p.Task, err)
 		}
-		cfg.Log.Action("spawn", p.Task, "ok", paneID)
+		cfg.Log.Action("spawn", taskLabel(p.Task), "ok", paneID)
 
 		states[i] = &workerState{plan: p, paneID: paneID, started: cfg.Now()}
 	}

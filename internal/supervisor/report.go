@@ -110,7 +110,7 @@ func reportTokens(cfg *Config, st *workerState, sessionID string) string {
 	}
 	cfg.Log.Emit(&eventlog.Event{
 		Action: "tokens",
-		Target: st.plan.Task,
+		Target: taskLabel(st.plan.Task),
 		Fields: map[string]any{
 			"total":          usage.Total(),
 			"input":          usage.Input,

@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
-	"codeberg.org/Elysium_Labs/argus/internal/codeberg"
+	"codeberg.org/Elysium_Labs/argus/internal/forge"
 	"codeberg.org/Elysium_Labs/argus/internal/protocol"
 	"codeberg.org/Elysium_Labs/argus/internal/supervisor"
 	"codeberg.org/Elysium_Labs/argus/internal/ui"
@@ -27,11 +27,13 @@ func newShipCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "ship",
-		Short: "Commit a worktree's change, push it, and open a Codeberg PR",
+		Short: "Commit a worktree's change, push it, and open a pull request",
 		Long: `Ship commits any uncommitted change in a worktree, pushes the branch to origin,
-and opens a Codeberg pull request. It is Milestone C of argus: the deterministic
-final step once a change has been reviewed. Repo owner/name and branch are derived
-from the worktree unless overridden. Requires CODEBERG_TOKEN in the environment.`,
+and opens a pull request. It is Milestone C of argus: the deterministic final step
+once a change has been reviewed. The forge (Codeberg/Gitea or GitHub) is detected
+from the worktree's origin remote and the matching token is read from the
+environment (CODEBERG_TOKEN, GITHUB_TOKEN, ...). Repo owner/name and branch are
+derived from the worktree unless overridden.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if worktree == "" {
 				return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus ship --worktree <path> --issue <n>"}
@@ -46,23 +48,28 @@ from the worktree unless overridden. Requires CODEBERG_TOKEN in the environment.
 			if verr := checkApproved(worktree, force); verr != nil {
 				return verr
 			}
-			owner, name, err := resolveRepo(ctx, repo, worktree)
+			host, owner, name, err := resolveRepo(ctx, repo, worktree)
 			if err != nil {
 				return err
 			}
-			commitMsg, prTitle, prBody := shipText(title, issue, branch)
+			prTitle := prTitleFor(title, issue, branch)
+			commitMsg := prTitle + closesLine(issue)
 
 			if dryRun {
 				_, _ = fmt.Fprintf(out, "%s ship plan (dry run)\n", ui.LabelInfo.Render("i"))
-				_, _ = fmt.Fprintf(out, "  repo:   %s/%s\n  branch: %s -> %s\n  commit: %s\n  PR:     %s\n",
-					owner, name, branch, base, commitMsg, prTitle)
+				_, _ = fmt.Fprintf(out, "  forge:  %s\n  repo:   %s/%s\n  branch: %s -> %s\n  commit: %s\n  PR:     %s\n",
+					host, owner, name, branch, base, commitMsg, prTitle)
 				return nil
 			}
 
-			token := os.Getenv("CODEBERG_TOKEN")
+			token := forge.TokenForHost(host)
 			if token == "" {
-				return &ui.UserError{Err: fmt.Errorf("CODEBERG_TOKEN not set"), Hint: "export CODEBERG_TOKEN=<token>"}
+				return &ui.UserError{
+					Err:  fmt.Errorf("no API token for %s", host),
+					Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN or GITHUB_TOKEN)",
+				}
 			}
+			f := forge.New(host, token, nil)
 
 			logger, closeLog := openRunLog(cmd, "ship")
 			defer closeLog()
@@ -76,7 +83,8 @@ from the worktree unless overridden. Requires CODEBERG_TOKEN in the environment.
 				return perr
 			}
 
-			pr, err := codeberg.New(token).OpenPR(ctx, &codeberg.PRRequest{
+			prBody := buildPRBody(ctx, f, worktree, base, issue, owner, name)
+			pr, err := f.OpenPR(ctx, &forge.PRRequest{
 				Owner: owner, Repo: name,
 				Title: prTitle, Body: prBody,
 				Head: branch, Base: base,
@@ -130,15 +138,26 @@ func checkApproved(worktree string, force bool) error {
 	return nil
 }
 
-func resolveRepo(ctx context.Context, override, worktree string) (owner, name string, err error) {
-	if override != "" {
-		owner, name, ok := splitOwnerRepo(override)
-		if !ok {
-			return "", "", &ui.UserError{Err: fmt.Errorf("--repo must be owner/name, got %q", override)}
-		}
-		return owner, name, nil
+// resolveRepo detects the forge host and owner/repo from the worktree's origin
+// remote. --repo overrides only the owner/name; the host still comes from the
+// remote, so argus ships to whichever forge the worktree actually points at.
+func resolveRepo(ctx context.Context, override, worktree string) (host, owner, name string, err error) {
+	remote, err := supervisor.RemoteURL(ctx, worktree)
+	if err != nil {
+		return "", "", "", err
 	}
-	return supervisor.RemoteOwnerRepo(ctx, worktree)
+	host, owner, name, err = forge.Detect(remote)
+	if err != nil {
+		return "", "", "", err
+	}
+	if override != "" {
+		o, n, ok := splitOwnerRepo(override)
+		if !ok {
+			return "", "", "", &ui.UserError{Err: fmt.Errorf("--repo must be owner/name, got %q", override)}
+		}
+		owner, name = o, n
+	}
+	return host, owner, name, nil
 }
 
 func splitOwnerRepo(s string) (owner, name string, ok bool) {
@@ -153,17 +172,79 @@ func splitOwnerRepo(s string) (owner, name string, ok bool) {
 	return "", "", false
 }
 
-func shipText(title string, issue int, branch string) (commitMsg, prTitle, prBody string) {
-	subject := title
-	if subject == "" {
-		subject = "fix: " + branch
+func prTitleFor(title string, issue int, branch string) string {
+	if title != "" {
+		return title
 	}
-	closes := ""
 	if issue > 0 {
-		closes = fmt.Sprintf("\n\nCloses #%d", issue)
+		return fmt.Sprintf("fix: %s (#%d)", branch, issue)
 	}
-	commitMsg = subject + closes
-	prTitle = subject
-	prBody = "Reviewed and shipped by argus." + closes
-	return commitMsg, prTitle, prBody
+	return "fix: " + branch
+}
+
+func closesLine(issue int) string {
+	if issue > 0 {
+		return fmt.Sprintf("\n\nCloses #%d", issue)
+	}
+	return ""
+}
+
+// buildPRBody assembles an informative PR description instead of a one-liner: what
+// the change targets (the issue title, fetched from the forge when --issue is
+// set), the measured diff, the worker's test result, and argus's verdict. Every
+// part is best-effort; a missing piece is simply omitted so ship never fails on
+// reporting.
+func buildPRBody(ctx context.Context, f forge.Forge, worktree, base string, issue int, owner, repo string) string {
+	var b strings.Builder
+
+	b.WriteString("## Target\n\n")
+	if issue > 0 {
+		line := fmt.Sprintf("Closes #%d", issue)
+		if iss, err := f.FetchIssue(ctx, owner, repo, issue); err == nil && iss.Title != "" {
+			line += " — " + iss.Title
+		}
+		b.WriteString(line + "\n\n")
+	} else {
+		b.WriteString("General fix (no linked issue).\n\n")
+	}
+
+	b.WriteString("## Change\n\n")
+	if ds, files, err := supervisor.MeasureDiff(ctx, worktree, "origin/"+base); err == nil {
+		fmt.Fprintf(&b, "%d file(s), +%d/-%d\n", ds.Files, ds.Insertions, ds.Deletions)
+		for _, fp := range files {
+			fmt.Fprintf(&b, "- `%s`\n", fp)
+		}
+		b.WriteString("\n")
+	}
+
+	if status, err := protocol.Load(protocol.StatusPath(worktree)); err == nil {
+		passed, total := 0, 0
+		for i := range status.Tests {
+			total++
+			if status.Tests[i].Result == protocol.ResultPass {
+				passed++
+			}
+		}
+		if total > 0 {
+			fmt.Fprintf(&b, "## Verification\n\nTests: %d/%d passed (worker-reported).\n", passed, total)
+		}
+		if status.RealWorldProof != "" {
+			fmt.Fprintf(&b, "Real-world proof: %s\n", status.RealWorldProof)
+		}
+		b.WriteString("\n")
+	}
+
+	if approval, found, err := protocol.LoadApproval(worktree); err == nil && found {
+		verdict := "not approved"
+		if approval.Approved {
+			verdict = "approved"
+		}
+		fmt.Fprintf(&b, "## Verdict\n\nargus %s via %s", verdict, approval.Source)
+		if approval.Summary != "" {
+			fmt.Fprintf(&b, ": %s", approval.Summary)
+		}
+		b.WriteString("\n")
+	}
+
+	return strings.TrimSpace(b.String())
 }

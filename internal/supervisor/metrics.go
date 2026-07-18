@@ -22,9 +22,13 @@ type TokenUsage struct {
 	CacheRead     int `json:"cache_read"`
 }
 
-// Total is every token billed for the session, cache included.
+// Total is the session's new-token spend: fresh input, output, and cache
+// creation. It deliberately excludes CacheRead, which is reported per assistant
+// turn and re-counts the same cached prefix on every turn, so summing it across a
+// long session massively overcounts. CacheRead stays available as its own field
+// for callers that want the cache-hit volume.
 func (u TokenUsage) Total() int {
-	return u.Input + u.Output + u.CacheCreation + u.CacheRead
+	return u.Input + u.Output + u.CacheCreation
 }
 
 // transcriptLine is the subset of a Claude Code session JSONL record argus reads:

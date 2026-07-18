@@ -185,8 +185,9 @@ func TestReportTokensKnownAndUnknown(t *testing.T) {
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}}
 
 	got := reportTokens(cfg, st, session)
-	if !strings.Contains(got, "165 total") {
-		t.Errorf("token line: got %q want total 165", got)
+	// Total excludes cache-read (100+50+10 = 160), not 165.
+	if !strings.Contains(got, "160 total") {
+		t.Errorf("token line: got %q want total 160", got)
 	}
 	if unknown := reportTokens(cfg, st, ""); !strings.Contains(unknown, "unknown") {
 		t.Errorf("no session should be unknown, got %q", unknown)
