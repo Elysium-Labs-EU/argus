@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
 	"codeberg.org/Elysium_Labs/argus/internal/herdr"
 	"codeberg.org/Elysium_Labs/argus/internal/protocol"
 )
@@ -250,6 +251,61 @@ func TestReviewEscalationsWithoutReviewerJustGates(t *testing.T) {
 	}
 }
 
+func TestPollStatusReturnsOnDeadlineWhenWorkerNeverTerminates(t *testing.T) {
+	wt := t.TempDir()
+	// A worker stuck in a non-terminal phase: without a deadline pollStatus would
+	// loop forever. The status file exists but never reaches a terminal phase.
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task:  "stuck",
+		Phase: protocol.PhaseWorking,
+	}); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "stuck", Worktree: wt}}}
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		// No parent cancel; only the 40ms deadline should stop it.
+		pollStatus(context.Background(), 5*time.Millisecond, 40*time.Millisecond, nil, st)
+		close(done)
+	}()
+	select {
+	case <-done:
+		if time.Since(start) > time.Second {
+			t.Error("pollStatus took too long; deadline did not fire promptly")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pollStatus did not return on its deadline — a hung worker would block forever")
+	}
+	if st.status.Phase != protocol.PhaseWorking {
+		t.Errorf("phase: got %q want working", st.status.Phase)
+	}
+}
+
+func TestPollStatusLogsUnreadableStatus(t *testing.T) {
+	wt := t.TempDir()
+	// Write a malformed (non-JSON) status file: previously swallowed silently.
+	if err := os.MkdirAll(filepath.Dir(protocol.StatusPath(wt)), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(protocol.StatusPath(wt), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	logger := eventlog.New(&buf, "supervise", "run1", nil)
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "broken", Worktree: wt}}}
+
+	pollStatus(context.Background(), 5*time.Millisecond, 30*time.Millisecond, logger, st)
+
+	if !strings.Contains(buf.String(), "status_unreadable") {
+		t.Errorf("expected a status_unreadable event, got:\n%s", buf.String())
+	}
+	if st.hasFile {
+		t.Error("a malformed status must not be treated as a valid report")
+	}
+}
+
 func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 	wt := t.TempDir()
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}}
@@ -265,7 +321,7 @@ func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	pollStatus(ctx, 10*time.Millisecond, nil, st)
+	pollStatus(ctx, 10*time.Millisecond, 0, nil, st)
 
 	if !st.hasFile {
 		t.Fatal("pollStatus should have read the status file")

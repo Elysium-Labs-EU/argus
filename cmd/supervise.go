@@ -28,6 +28,7 @@ func newSuperviseCmd() *cobra.Command {
 		review       bool
 		maxDiffLines int
 		interval     time.Duration
+		timeout      time.Duration
 		dryRun       bool
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
@@ -89,6 +90,7 @@ each pane's directory in --panes mode).`,
 				Home:     home,
 				Launcher: launcher,
 				Interval: interval,
+				Timeout:  timeout,
 				Policy: &supervisor.ReviewPolicy{
 					MaxDiffLines: maxDiffLines,
 					SharedGlobs:  sharedGlobs,
@@ -109,6 +111,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref new worktrees branch from")
 	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in each worker pane after cd into its worktree")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "how often to poll each worker's status file")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "per-worker wall-clock deadline before argus stops waiting on it (0 = wait indefinitely)")
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables")
 	cmd.Flags().StringSliceVar(&sharedGlobs, "shared-glob", nil, "review gate: path substrings that always require review (shared/prod surface)")
 	cmd.Flags().StringSliceVar(&osGlobs, "os-glob", policyDefaults.OSPathGlobs, "review gate: path substrings whose change requires real-world proof")

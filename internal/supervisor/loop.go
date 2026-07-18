@@ -8,8 +8,10 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -45,6 +47,7 @@ type Config struct {
 	Home     string
 	Launcher string
 	Interval time.Duration
+	Timeout  time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
 }
 
 // WorkerPlan is the fully-resolved intent for one worker: the concrete worktree
@@ -284,38 +287,63 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 	return states, nil
 }
 
-// watch polls every worker's status file until it reaches a terminal phase or
-// ctx is canceled. One goroutine per worker; a timer (not time.After) drives
-// the poll so we don't leak a timer per tick.
+// watch polls every worker's status file until it reaches a terminal phase, its
+// deadline passes, or ctx is canceled. One goroutine per worker; a timer (not
+// time.After) drives the poll so we don't leak a timer per tick. The deadline is
+// what stops a hung or dead worker from blocking the whole run forever.
 func watch(ctx context.Context, cfg *Config, states []*workerState) {
 	var wg sync.WaitGroup
 	for _, st := range states {
 		wg.Add(1)
 		go func(st *workerState) {
 			defer wg.Done()
-			pollStatus(ctx, cfg.Interval, cfg.Log, st)
+			pollStatus(ctx, cfg.Interval, cfg.Timeout, cfg.Log, st)
 		}(st)
 	}
 	wg.Wait()
 }
 
-func pollStatus(ctx context.Context, interval time.Duration, log *eventlog.Logger, st *workerState) {
+func pollStatus(ctx context.Context, interval, timeout time.Duration, log *eventlog.Logger, st *workerState) {
 	path := protocol.StatusPath(st.plan.Worktree)
+
+	// A per-worker wall-clock deadline: without it a worker that dies in a
+	// non-terminal phase (crash, exit, never writes awaiting_review) would hang
+	// watch/wg.Wait indefinitely. 0 disables the deadline.
+	var deadline <-chan time.Time
+	if timeout > 0 {
+		dt := time.NewTimer(timeout)
+		defer dt.Stop()
+		deadline = dt.C
+	}
+
 	timer := time.NewTimer(0)
 	defer timer.Stop()
+	var lastErr string
 	for {
 		select {
 		case <-ctx.Done():
 			log.Action("watch", st.plan.Task, "canceled", string(st.status.Phase))
 			return
+		case <-deadline:
+			log.Action("watch", st.plan.Task, "timeout", string(st.status.Phase))
+			return
 		case <-timer.C:
-			if s, err := protocol.Load(path); err == nil {
+			s, err := protocol.Load(path)
+			switch {
+			case err == nil:
 				st.status = s
 				st.hasFile = true
+				lastErr = ""
 				if protocol.IsTerminal(s.Phase) {
 					log.Action("phase", st.plan.Task, string(s.Phase), s.BlockedReason)
 					return
 				}
+			case !errors.Is(err, os.ErrNotExist) && err.Error() != lastErr:
+				// A malformed (not merely absent) status file was silently
+				// swallowed before, so a lying/broken writer looked identical to
+				// one that never started. Log it once per distinct error.
+				lastErr = err.Error()
+				log.Fail("status_unreadable", st.plan.Task, err)
 			}
 			timer.Reset(interval)
 		}
