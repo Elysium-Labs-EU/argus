@@ -69,16 +69,27 @@ func renderReport(ctx context.Context, cfg *Config, states []*workerState) {
 		wall := elapsed(st.started, cfg.Now())
 		passed, total := testCounts(&st.status)
 
+		// Show the measured diff (ground truth) when we have it; fall back to the
+		// worker's self-report only when the measurement failed. Tests remain
+		// self-reported and are labeled as a worker claim.
+		diff := st.status.DiffStat
+		diffSrc := "reported"
+		if st.measuredOK {
+			diff = st.measured
+			diffSrc = "measured"
+		}
 		_, _ = fmt.Fprintf(out, "%s %s  [%s]\n", mark, ui.TextBold.Render(st.plan.Task), phase)
-		_, _ = fmt.Fprintf(out, "    diff: %d file(s) +%d/-%d   tests: %d/%d passed   wall: %s\n",
-			st.status.DiffStat.Files, st.status.DiffStat.Insertions, st.status.DiffStat.Deletions,
-			passed, total, wall)
+		_, _ = fmt.Fprintf(out, "    diff (%s): %d file(s) +%d/-%d   tests (reported): %d/%d passed   wall: %s\n",
+			diffSrc, diff.Files, diff.Insertions, diff.Deletions, passed, total, wall)
+		if st.diffErr != nil {
+			_, _ = fmt.Fprintf(out, "    %s could not measure diff: %v\n", ui.LabelWarning.Render("○"), st.diffErr)
+		}
 
 		tokenLine := renderTokens(cfg.Home, sessionByPane[st.paneID])
 		_, _ = fmt.Fprintf(out, "    tokens: %s\n", tokenLine)
 
 		if st.hasFile {
-			renderVerdict(out, Assess(&st.status, cfg.Policy))
+			renderVerdict(out, gateVerdict(st, cfg.Policy))
 			renderReview(out, st)
 		}
 		if st.hasFile && st.status.PRURL != "" {

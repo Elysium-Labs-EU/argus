@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"codeberg.org/Elysium_Labs/argus/internal/protocol"
@@ -85,6 +86,37 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 	return Verdict{AutoApprove: len(reasons) == 0, Reasons: reasons}
 }
 
+// diffMismatchTolerance is how many more lines the real diff may exceed the
+// worker's self-reported count before the gate treats it as an under-report and
+// escalates. A small slack absorbs benign accounting differences (trailing
+// newline, generated file) without letting a materially larger change auto-approve.
+const diffMismatchTolerance = 10
+
+// gateVerdict is Assess applied to a worker's *measured* state plus two checks the
+// pure gate can't make: it escalates when argus could not measure the diff (so the
+// self-report is unverifiable) and when the real diff materially exceeds what the
+// worker claimed (a buggy or dishonest status.json). This is where "trust typed
+// self-report" becomes "trust it only where it matches git."
+func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
+	eff := st.effective()
+	v := Assess(&eff, policy)
+	if st.diffErr != nil {
+		v.AutoApprove = false
+		v.Reasons = append(v.Reasons, "could not measure diff to verify worker report: "+st.diffErr.Error())
+		return v
+	}
+	if st.measuredOK {
+		reported := st.status.DiffStat.Insertions + st.status.DiffStat.Deletions
+		measured := st.measured.Insertions + st.measured.Deletions
+		if measured-reported > diffMismatchTolerance {
+			v.AutoApprove = false
+			v.Reasons = append(v.Reasons,
+				fmt.Sprintf("worker under-reported diff: claimed %d lines, git measured %d", reported, measured))
+		}
+	}
+	return v
+}
+
 func blockedText(s *protocol.Status) string {
 	if s.BlockedReason != "" {
 		return s.BlockedReason
@@ -92,13 +124,54 @@ func blockedText(s *protocol.Status) string {
 	return "no reason given"
 }
 
+// matchAny reports whether path matches any glob on a word boundary, so "install"
+// matches cmd/install.go and install/main.go but not uninstall.go or reinstaller/,
+// and "systemd" matches pkg/systemd/unit.go but not mysystemdemo/. Each path
+// segment is tokenized into alphanumeric words (splitting on ., -, _, /), and a
+// single-word glob matches when it equals one of those words. A multi-segment glob
+// (one containing a separator, e.g. "internal/config") is matched as a path
+// substring instead, since it is already a path fragment.
 func matchAny(path string, globs []string) (string, bool) {
+	slash := filepath.ToSlash(path)
+	words := tokenizePath(slash)
 	for _, g := range globs {
-		if g != "" && strings.Contains(path, g) {
+		if g == "" {
+			continue
+		}
+		needle := strings.Trim(g, "/")
+		if strings.Contains(needle, "/") {
+			if strings.Contains(slash, needle) {
+				return g, true
+			}
+			continue
+		}
+		if _, ok := words[needle]; ok {
 			return g, true
 		}
 	}
 	return "", false
+}
+
+// tokenizePath returns the set of alphanumeric words in a path, breaking on any
+// non-alphanumeric byte (/, ., -, _). "cmd/install.go" -> {cmd, install, go}.
+func tokenizePath(path string) map[string]struct{} {
+	words := map[string]struct{}{}
+	cur := strings.Builder{}
+	flush := func() {
+		if cur.Len() > 0 {
+			words[cur.String()] = struct{}{}
+			cur.Reset()
+		}
+	}
+	for _, r := range path {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			cur.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return words
 }
 
 func firstOSPath(files, globs []string) (file, glob string, ok bool) {

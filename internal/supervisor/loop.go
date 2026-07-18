@@ -131,9 +131,30 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 		return err
 	}
 	watch(ctx, cfg, states)
+	reconcile(ctx, cfg, states)
 	reviewEscalations(ctx, cfg, states)
 	renderReport(ctx, cfg, states)
 	return nil
+}
+
+// reconcile computes each worker's real diff from git so the gate and report use
+// ground truth rather than the worker's self-report. A measurement failure is
+// recorded (and later surfaced) rather than silently trusting status.json.
+func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ds, files, err := MeasureDiff(ctx, st.plan.Worktree, cfg.Base)
+		if err != nil {
+			st.diffErr = err
+			cfg.Log.Fail("measure_diff", st.plan.Task, err)
+			continue
+		}
+		st.measured = ds
+		st.measuredFiles = files
+		st.measuredOK = true
+	}
 }
 
 // reviewEscalations runs the LLM reviewer on exactly the workers the deterministic
@@ -145,7 +166,7 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 		if !st.hasFile {
 			continue
 		}
-		verdict := Assess(&st.status, cfg.Policy)
+		verdict := gateVerdict(st, cfg.Policy)
 		if verdict.AutoApprove {
 			cfg.Log.Action("gate", st.plan.Task, "auto-approve", "")
 			continue
@@ -188,15 +209,34 @@ func worktreePaths(plans []WorkerPlan) []string {
 	return paths
 }
 
-// workerState tracks one worker across the watch loop.
+// workerState tracks one worker across the watch loop. status is what the worker
+// reported; measured is the ground truth argus computed from git. The gate trusts
+// measured, not status, for diff size and files touched.
 type workerState struct {
-	started   time.Time
-	plan      *WorkerPlan
-	review    *ReviewResult
-	reviewErr error
-	paneID    string
-	status    protocol.Status
-	hasFile   bool
+	started       time.Time
+	reviewErr     error
+	diffErr       error
+	plan          *WorkerPlan
+	review        *ReviewResult
+	paneID        string
+	measuredFiles []string
+	status        protocol.Status
+	measured      protocol.DiffStat
+	hasFile       bool
+	measuredOK    bool
+}
+
+// effective returns the status the gate should judge: the worker's reported phase,
+// tests, and proof, but with diff size and files-touched replaced by argus's own
+// measurement when it succeeded. This is the trust boundary — self-report is a
+// hint; git is the truth.
+func (st *workerState) effective() protocol.Status {
+	s := st.status
+	if st.measuredOK {
+		s.DiffStat = st.measured
+		s.FilesTouched = st.measuredFiles
+	}
+	return s
 }
 
 func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerState, error) {
