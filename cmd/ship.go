@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"codeberg.org/Elysium_Labs/argus/internal/codeberg"
+	"codeberg.org/Elysium_Labs/argus/internal/protocol"
 	"codeberg.org/Elysium_Labs/argus/internal/supervisor"
 	"codeberg.org/Elysium_Labs/argus/internal/ui"
 )
@@ -20,6 +21,7 @@ func newShipCmd() *cobra.Command {
 		title    string
 		repo     string
 		issue    int
+		force    bool
 		dryRun   bool
 	)
 
@@ -40,6 +42,9 @@ from the worktree unless overridden. Requires CODEBERG_TOKEN in the environment.
 			branch, err := supervisor.CurrentBranch(ctx, worktree)
 			if err != nil {
 				return err
+			}
+			if verr := checkApproved(worktree, force); verr != nil {
+				return verr
 			}
 			owner, name, err := resolveRepo(ctx, repo, worktree)
 			if err != nil {
@@ -91,11 +96,39 @@ from the worktree unless overridden. Requires CODEBERG_TOKEN in the environment.
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number this change closes")
 	cmd.Flags().StringVar(&title, "title", "", "PR title (default derived from the branch/issue)")
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/name override (default: parsed from the worktree's origin remote)")
+	cmd.Flags().BoolVar(&force, "force", false, "ship even without an approving argus verdict (skips the gate/review check)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be committed and opened, without doing it")
 	return cmd
 }
 
 var shipCmd = newShipCmd()
+
+// checkApproved refuses to ship a worktree that argus never cleared. supervise
+// records a verdict.json per worker; ship enforces it so a gate escalation or a
+// reviewer's request-changes actually blocks the PR instead of being advisory.
+// --force overrides for the human who has decided to ship anyway.
+func checkApproved(worktree string, force bool) error {
+	if force {
+		return nil
+	}
+	approval, found, err := protocol.LoadApproval(worktree)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return &ui.UserError{
+			Err:  fmt.Errorf("no argus verdict for this worktree"),
+			Hint: "run `argus supervise --review` (or `argus review`) first, or pass --force to ship anyway",
+		}
+	}
+	if !approval.Approved {
+		return &ui.UserError{
+			Err:  fmt.Errorf("argus did not approve this change (%s): %s", approval.Source, approval.Summary),
+			Hint: "address the findings and re-review, or pass --force to override",
+		}
+	}
+	return nil
+}
 
 func resolveRepo(ctx context.Context, override, worktree string) (owner, name string, err error) {
 	if override != "" {

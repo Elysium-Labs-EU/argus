@@ -181,19 +181,22 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 		verdict := gateVerdict(st, cfg.Policy)
 		if verdict.AutoApprove {
 			cfg.Log.Action("gate", st.plan.Task, "auto-approve", "")
+			recordApproval(cfg, st, true, "gate", "auto-approved: clean within policy", nil)
 			continue
 		}
 		cfg.Log.Action("gate", st.plan.Task, "escalate", strings.Join(verdict.Reasons, "; "))
 
 		// The gate escalated. Only spend an LLM review when one is configured;
-		// otherwise the escalation is surfaced to the human in the report.
+		// otherwise the escalation is surfaced to the human — not approved.
 		if cfg.Reviewer == nil {
+			recordApproval(cfg, st, false, "gate", "escalated, awaiting human decision", verdict.Reasons)
 			continue
 		}
 		diff, err := DiffFor(ctx, st.plan.Worktree, cfg.Base)
 		if err != nil {
 			st.reviewErr = err
 			cfg.Log.Fail("review", st.plan.Task, err)
+			recordApproval(cfg, st, false, "gate", "review could not run: "+err.Error(), verdict.Reasons)
 			continue
 		}
 		res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
@@ -206,10 +209,38 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 		if err != nil {
 			st.reviewErr = err
 			cfg.Log.Fail("review", st.plan.Task, err)
+			recordApproval(cfg, st, false, "gate", "review errored: "+err.Error(), verdict.Reasons)
 			continue
 		}
 		st.review = &res
 		cfg.Log.Action("review", st.plan.Task, res.Decision, res.Summary)
+		recordApproval(cfg, st, res.Decision == "approve", "review", res.Summary, res.Findings)
+	}
+}
+
+// recordApproval writes the worker's disposition to its worktree so ship can
+// enforce it, and logs a verdict event for the run log. A write failure is logged
+// but does not abort the run — ship will then see "no verdict" and refuse, which
+// is the safe default.
+func recordApproval(cfg *Config, st *workerState, approved bool, source, summary string, reasons []string) {
+	now := time.Now
+	if cfg.Now != nil {
+		now = cfg.Now
+	}
+	a := protocol.Approval{
+		Approved:  approved,
+		Source:    source,
+		Summary:   summary,
+		Reasons:   reasons,
+		UpdatedAt: now(),
+	}
+	outcome := "approved"
+	if !approved {
+		outcome = "not-approved"
+	}
+	cfg.Log.Action("verdict", st.plan.Task, outcome, summary)
+	if err := protocol.WriteApproval(st.plan.Worktree, &a); err != nil {
+		cfg.Log.Fail("verdict_write", st.plan.Task, err)
 	}
 }
 

@@ -32,19 +32,33 @@ func git(ctx context.Context, worktree string, args ...string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
+// controlPlanePaths are the argus-written files that must never land in a PR: the
+// worker's brief/status/verdict and the generated permission file.
+var controlPlanePaths = []string{".claude/argus", ".claude/settings.local.json"}
+
 // CommitAll stages every change in the worktree and commits it. It returns
-// ErrNothingToCommit when the tree is clean, so shipping a worktree the worker
-// already committed (or didn't touch) fails loudly rather than opening an empty PR.
+// ErrNothingToCommit when nothing worth shipping remains, so shipping a worktree
+// the worker already committed (or didn't touch) fails loudly rather than opening
+// an empty PR. argus's own control-plane files are unstaged before the commit so
+// they never reach the PR, even in a repo that doesn't gitignore .claude. (We
+// stage-then-unstage rather than exclude via pathspec because naming an ignored
+// path in a git pathspec is itself a fatal error.)
 func CommitAll(ctx context.Context, worktree, message string) error {
-	status, err := git(ctx, worktree, "status", "--porcelain")
+	if _, err := git(ctx, worktree, "add", "-A"); err != nil {
+		return err
+	}
+	// Unstage the control plane. reset of a path that isn't staged is a harmless
+	// no-op, so this is safe whether or not the repo ignores .claude.
+	resetArgs := append([]string{"reset", "-q", "--"}, controlPlanePaths...)
+	if _, err := git(ctx, worktree, resetArgs...); err != nil {
+		return err
+	}
+	staged, err := git(ctx, worktree, "diff", "--cached", "--name-only")
 	if err != nil {
 		return err
 	}
-	if status == "" {
+	if staged == "" {
 		return ErrNothingToCommit
-	}
-	if _, err := git(ctx, worktree, "add", "-A"); err != nil {
-		return err
 	}
 	if _, err := git(ctx, worktree, "commit", "-m", message); err != nil {
 		return err
