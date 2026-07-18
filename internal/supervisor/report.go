@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
 	"codeberg.org/Elysium_Labs/argus/internal/protocol"
 	"codeberg.org/Elysium_Labs/argus/internal/ui"
 )
@@ -27,7 +28,7 @@ func renderPlan(out io.Writer, base, launcher string, plans []WorkerPlan) {
 		_, _ = fmt.Fprintf(out, "  branch:   %s\n", p.Branch)
 		_, _ = fmt.Fprintf(out, "  worktree: %s\n", p.Worktree)
 		_, _ = fmt.Fprintf(out, "  pane:     %s\n", pane)
-		_, _ = fmt.Fprintf(out, "  spawn:    %s\n", ui.TextCommand.Render(spawnCommand(p.Worktree, launcher)))
+		_, _ = fmt.Fprintf(out, "  spawn:    %s\n", ui.TextCommand.Render(SpawnCommand(p.Worktree, launcher)))
 
 		settings, _ := json.MarshalIndent(p.Settings, "    ", "  ")
 		_, _ = fmt.Fprintf(out, "  settings.local.json:\n    %s\n", settings)
@@ -69,22 +70,89 @@ func renderReport(ctx context.Context, cfg *Config, states []*workerState) {
 		wall := elapsed(st.started, cfg.Now())
 		passed, total := testCounts(&st.status)
 
+		// Show the measured diff (ground truth) when we have it; fall back to the
+		// worker's self-report only when the measurement failed. Tests remain
+		// self-reported and are labeled as a worker claim.
+		diff := st.status.DiffStat
+		diffSrc := "reported"
+		if st.measuredOK {
+			diff = st.measured
+			diffSrc = "measured"
+		}
 		_, _ = fmt.Fprintf(out, "%s %s  [%s]\n", mark, ui.TextBold.Render(st.plan.Task), phase)
-		_, _ = fmt.Fprintf(out, "    diff: %d file(s) +%d/-%d   tests: %d/%d passed   wall: %s\n",
-			st.status.DiffStat.Files, st.status.DiffStat.Insertions, st.status.DiffStat.Deletions,
-			passed, total, wall)
+		_, _ = fmt.Fprintf(out, "    diff (%s): %d file(s) +%d/-%d   tests (reported): %d/%d passed   wall: %s\n",
+			diffSrc, diff.Files, diff.Insertions, diff.Deletions, passed, total, wall)
+		if st.diffErr != nil {
+			_, _ = fmt.Fprintf(out, "    %s could not measure diff: %v\n", ui.LabelWarning.Render("○"), st.diffErr)
+		}
 
-		tokenLine := renderTokens(cfg.Home, sessionByPane[st.paneID])
-		_, _ = fmt.Fprintf(out, "    tokens: %s\n", tokenLine)
+		_, _ = fmt.Fprintf(out, "    tokens: %s\n", reportTokens(cfg, st, sessionByPane[st.paneID]))
 
 		if st.hasFile {
-			renderVerdict(out, Assess(&st.status, cfg.Policy))
+			renderVerdict(out, gateVerdict(st, cfg.Policy))
 			renderReview(out, st)
 		}
 		if st.hasFile && st.status.PRURL != "" {
 			_, _ = fmt.Fprintf(out, "    pr: %s\n", st.status.PRURL)
 		}
 	}
+
+	logRunSummary(cfg, states)
+}
+
+// reportTokens formats a worker's token spend for the terminal and, when the
+// spend is known, logs a tokens event carrying the components and session id so
+// `argus stats` can total tokens per task from the run log alone.
+func reportTokens(cfg *Config, st *workerState, sessionID string) string {
+	usage, known, err := TokensForSession(cfg.Home, sessionID)
+	if err != nil || !known {
+		return ui.TextMuted.Render("unknown")
+	}
+	cfg.Log.Emit(&eventlog.Event{
+		Action: "tokens",
+		Target: st.plan.Task,
+		Fields: map[string]any{
+			"total":          usage.Total(),
+			"input":          usage.Input,
+			"output":         usage.Output,
+			"cache_creation": usage.CacheCreation,
+			"cache_read":     usage.CacheRead,
+			"session":        sessionID,
+		},
+	})
+	return fmt.Sprintf("%d total (in %d, out %d, cache-create %d, cache-read %d)",
+		usage.Total(), usage.Input, usage.Output, usage.CacheCreation, usage.CacheRead)
+}
+
+// logRunSummary records one run-level event: how many workers, how many the gate
+// escalated, and how many argus approved. It is the per-run row `argus stats`
+// aggregates across runs.
+func logRunSummary(cfg *Config, states []*workerState) {
+	workers, reported, escalated, approved := 0, 0, 0, 0
+	for _, st := range states {
+		workers++
+		if !st.hasFile {
+			continue
+		}
+		reported++
+		v := gateVerdict(st, cfg.Policy)
+		if v.AutoApprove || (st.review != nil && st.review.Decision == "approve") {
+			approved++
+		}
+		if !v.AutoApprove {
+			escalated++
+		}
+	}
+	cfg.Log.Emit(&eventlog.Event{
+		Action:  "run_summary",
+		Outcome: fmt.Sprintf("%d/%d approved", approved, workers),
+		Fields: map[string]any{
+			"workers":   workers,
+			"reported":  reported,
+			"escalated": escalated,
+			"approved":  approved,
+		},
+	})
 }
 
 // renderReview prints the LLM reviewer's verdict when the gate escalated and a
@@ -123,15 +191,6 @@ func renderVerdict(out io.Writer, v Verdict) {
 	for _, r := range v.Reasons {
 		_, _ = fmt.Fprintf(out, "      - %s\n", r)
 	}
-}
-
-func renderTokens(home, sessionID string) string {
-	usage, known, err := TokensForSession(home, sessionID)
-	if err != nil || !known {
-		return ui.TextMuted.Render("unknown")
-	}
-	return fmt.Sprintf("%d total (in %d, out %d, cache-create %d, cache-read %d)",
-		usage.Total(), usage.Input, usage.Output, usage.CacheCreation, usage.CacheRead)
 }
 
 func testCounts(s *protocol.Status) (passed, total int) {

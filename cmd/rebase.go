@@ -50,6 +50,10 @@ conflict resolution itself needs the worker.`,
 				return err
 			}
 
+			logger, closeLog := openRunLog(cmd, "rebase")
+			defer closeLog()
+			logger.Action("conflict_check", branch, fmt.Sprintf("conflicts=%v", conflicts), base)
+
 			if !conflicts && !force {
 				_, _ = fmt.Fprintf(out, "%s %s has no conflict with origin/%s — nothing to rebase (use --force to dispatch anyway)\n",
 					ui.LabelSuccess.Render("✓"), branch, base)
@@ -73,16 +77,17 @@ conflict resolution itself needs the worker.`,
 			if err := supervisor.WriteBrief(worktree, supervisor.RebaseBrief(branch, base)); err != nil {
 				return err
 			}
-			spawn := fmt.Sprintf("cd %s && %s %q", worktree, launcher, "Read .claude/argus/brief.md and follow it exactly; it is your task brief.")
-			if err := client.PaneRun(ctx, wt.RootPaneID, spawn); err != nil {
+			if err := client.PaneRun(ctx, wt.RootPaneID, supervisor.SpawnCommand(worktree, launcher)); err != nil {
 				return err
 			}
 
 			_, _ = fmt.Fprintf(out, "%s dispatched rebase worker in pane %s; waiting...\n", ui.LabelInfo.Render("i"), wt.RootPaneID)
 			status, seen := supervisor.WaitForStatus(ctx, worktree, interval)
 			if !seen {
+				logger.Action("rebase", branch, "no-status", "")
 				return fmt.Errorf("worker wrote no status before the deadline")
 			}
+			logger.Action("rebase", branch, string(status.Phase), status.BlockedReason)
 			renderRebaseOutcome(out, branch, &status)
 			return nil
 		},

@@ -28,6 +28,7 @@ func newSuperviseCmd() *cobra.Command {
 		review       bool
 		maxDiffLines int
 		interval     time.Duration
+		timeout      time.Duration
 		dryRun       bool
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
@@ -77,14 +78,19 @@ each pane's directory in --panes mode).`,
 				return fmt.Errorf("resolving home dir: %w", err)
 			}
 
+			logger, closeLog := openRunLog(cmd, "supervise")
+			defer closeLog()
+
 			cfg := &supervisor.Config{
 				Out:      cmd.OutOrStdout(),
 				Now:      time.Now,
 				Client:   client,
+				Log:      logger,
 				Base:     base,
 				Home:     home,
 				Launcher: launcher,
 				Interval: interval,
+				Timeout:  timeout,
 				Policy: &supervisor.ReviewPolicy{
 					MaxDiffLines: maxDiffLines,
 					SharedGlobs:  sharedGlobs,
@@ -92,7 +98,7 @@ each pane's directory in --panes mode).`,
 				},
 			}
 			if review {
-				cfg.Reviewer = supervisor.NewCLIReviewer(reviewModel)
+				cfg.Reviewer = supervisor.NewCLIReviewer(reviewModel).WithLog(logger)
 			}
 			return supervisor.Run(cmd.Context(), cfg, workers, dryRun)
 		},
@@ -105,6 +111,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref new worktrees branch from")
 	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in each worker pane after cd into its worktree")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "how often to poll each worker's status file")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "per-worker wall-clock deadline before argus stops waiting on it (0 = wait indefinitely)")
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables")
 	cmd.Flags().StringSliceVar(&sharedGlobs, "shared-glob", nil, "review gate: path substrings that always require review (shared/prod surface)")
 	cmd.Flags().StringSliceVar(&osGlobs, "os-glob", policyDefaults.OSPathGlobs, "review gate: path substrings whose change requires real-world proof")
@@ -163,6 +170,12 @@ func buildWorkers(ctx context.Context, client herdr.Client, in *workerInput) ([]
 
 		task := at(in.tasks, i)
 		branch := at(in.branches, i)
+		if branch != "" && !validBranch(branch) {
+			return nil, &ui.UserError{
+				Err:  fmt.Errorf("unsafe branch name %q", branch),
+				Hint: "branches become worktree paths and shell arguments; use only letters, digits, . _ - /",
+			}
+		}
 		if branch == "" {
 			branch = defaultBranch(pane, task, i)
 		}
@@ -246,4 +259,23 @@ func at(s []string, i int) string {
 		return s[i]
 	}
 	return ""
+}
+
+// validBranch accepts only branch names safe to embed in a worktree path and a
+// shell command: letters, digits, and . _ - /, with no leading dash. It rejects
+// spaces and shell metacharacters (e.g. feat$(cmd), a b) before they ever reach a
+// filesystem path or the pane's shell.
+func validBranch(b string) bool {
+	if b == "" || strings.HasPrefix(b, "-") || strings.HasPrefix(b, "/") {
+		return false
+	}
+	for _, r := range b {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-' || r == '/':
+		default:
+			return false
+		}
+	}
+	return true
 }

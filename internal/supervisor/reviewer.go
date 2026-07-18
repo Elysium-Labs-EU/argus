@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
 )
 
 // ReviewRequest is the scoped payload argus hands a reviewer when the
@@ -45,6 +47,7 @@ type reviewRunner func(ctx context.Context, workdir, stdin string, args ...strin
 // Milestone-B reviewer: a one-shot, not a session.
 type CLIReviewer struct {
 	run   reviewRunner
+	log   *eventlog.Logger
 	model string
 }
 
@@ -58,6 +61,13 @@ func NewCLIReviewer(model string) CLIReviewer {
 // for tests.
 func NewReviewerWithRunner(run reviewRunner) CLIReviewer {
 	return CLIReviewer{run: run}
+}
+
+// WithLog returns a copy of the reviewer that records its re-asks to log, so the
+// analysis pass can measure how often the model's first reply failed to parse.
+func (r CLIReviewer) WithLog(log *eventlog.Logger) CLIReviewer {
+	r.log = log
+	return r
 }
 
 // DiffFor returns the worker's change as a diff against base, read-only via
@@ -101,7 +111,33 @@ func (r CLIReviewer) Review(ctx context.Context, req *ReviewRequest) (ReviewResu
 	if err != nil {
 		return ReviewResult{}, err
 	}
+	res, perr := parseReviewOutput(out)
+	if perr == nil {
+		return res, nil
+	}
+	// The model answered but not as a clean verdict (e.g. unquoted keys, stray
+	// prose). Re-ask exactly once for strict JSON before giving up — a one-shot
+	// review shouldn't die on a formatting slip. The re-ask feeds the prior reply
+	// back so the model reformats its own judgment rather than re-reviewing.
+	r.log.Action("review_reask", req.Task, "parse-retry", perr.Error())
+	out, err = r.run(ctx, req.Worktree, reAskPrompt(out), args...)
+	if err != nil {
+		return ReviewResult{}, err
+	}
 	return parseReviewOutput(out)
+}
+
+// reAskPrompt asks the model to reformat its previous, unparseable reply into a
+// strict verdict object. It carries the prior text so no re-review is needed.
+func reAskPrompt(prior []byte) string {
+	var b strings.Builder
+	b.WriteString("Your previous reply was not a single valid JSON verdict object.\n")
+	b.WriteString("Reply with ONLY a JSON object — double-quoted keys and string values,\n")
+	b.WriteString("no prose, no code fence — of the form:\n")
+	b.WriteString(`{"decision":"approve|request-changes|needs-human","summary":"one sentence","findings":["..."]}` + "\n\n")
+	b.WriteString("Base it on your prior assessment:\n")
+	b.Write(prior)
+	return b.String()
 }
 
 func reviewPrompt(req *ReviewRequest) string {

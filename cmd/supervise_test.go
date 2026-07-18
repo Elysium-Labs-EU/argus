@@ -113,3 +113,47 @@ func TestBuildWorkersUnknownPane(t *testing.T) {
 		t.Fatal("want error for a pane not in the list, got nil")
 	}
 }
+
+func TestBuildWorkersPanesDefaultBranchAndTask(t *testing.T) {
+	client := fakeClient()
+	// A pane with no explicit task/branch: both default off the pane id.
+	workers, err := buildWorkers(context.Background(), client, &workerInput{
+		panes: []string{"1-2"},
+	})
+	if err != nil {
+		t.Fatalf("buildWorkers: %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("want 1 worker, got %d", len(workers))
+	}
+	if workers[0].Task != "1-2" || workers[0].Branch != "argus-1-2" {
+		t.Errorf("pane defaults: got task=%q branch=%q", workers[0].Task, workers[0].Branch)
+	}
+}
+
+func TestBuildWorkersRejectsUnsafeBranch(t *testing.T) {
+	client := fakeClient()
+	_, err := buildWorkers(context.Background(), client, &workerInput{
+		repo:     "/repo",
+		tasks:    []string{"x"},
+		branches: []string{"feat$(whoami)"},
+	})
+	if err == nil {
+		t.Fatal("want error for a branch with shell metacharacters, got nil")
+	}
+}
+
+func TestValidBranch(t *testing.T) {
+	ok := []string{"feat-x", "fix/started-at-144", "release_1.2.3", "a/b/c"}
+	bad := []string{"feat x", "feat$(cmd)", "a;b", "-leading", "/abs", "back`tick", ""}
+	for _, b := range ok {
+		if !validBranch(b) {
+			t.Errorf("validBranch(%q) = false, want true", b)
+		}
+	}
+	for _, b := range bad {
+		if validBranch(b) {
+			t.Errorf("validBranch(%q) = true, want false", b)
+		}
+	}
+}

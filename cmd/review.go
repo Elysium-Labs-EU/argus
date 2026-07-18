@@ -41,7 +41,10 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 			out := cmd.OutOrStdout()
 			_, _ = fmt.Fprintf(out, "%s reviewing %s vs %s...\n", ui.LabelInfo.Render("i"), worktree, base)
 
-			reviewer := supervisor.NewCLIReviewer(reviewModel)
+			logger, closeLog := openRunLog(cmd, "review")
+			defer closeLog()
+
+			reviewer := supervisor.NewCLIReviewer(reviewModel).WithLog(logger)
 			var res supervisor.ReviewResult
 			err = ui.WithSpinner("claude reviewing...", func() error {
 				var rerr error
@@ -54,8 +57,10 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 				return rerr
 			})
 			if err != nil {
+				logger.Fail("review", task, err)
 				return err
 			}
+			logger.Action("review", task, res.Decision, res.Summary)
 
 			mark := ui.LabelWarning.Render("○")
 			switch res.Decision {

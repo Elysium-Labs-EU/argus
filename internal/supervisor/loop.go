@@ -8,12 +8,16 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
 	"codeberg.org/Elysium_Labs/argus/internal/herdr"
 	"codeberg.org/Elysium_Labs/argus/internal/protocol"
 )
@@ -37,11 +41,13 @@ type Config struct {
 	Now      func() time.Time
 	Policy   *ReviewPolicy
 	Reviewer Reviewer
+	Log      *eventlog.Logger
 	Client   herdr.Client
 	Base     string
 	Home     string
 	Launcher string
 	Interval time.Duration
+	Timeout  time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
 }
 
 // WorkerPlan is the fully-resolved intent for one worker: the concrete worktree
@@ -96,15 +102,24 @@ const DefaultLauncher = "claude --permission-mode auto"
 // a real agent would submit that at the first newline.
 const initialPrompt = "Read .claude/argus/brief.md and follow it exactly; it is your task brief."
 
-// spawnCommand is the shell line argus runs in a worker's pane: cd into the
-// worktree, then start the launcher with the initial prompt as its argument.
-// launcher is configurable so a smoke test can point argus at a cheap shell
-// instead of a full agent (the shell simply ignores the prompt argument).
-func spawnCommand(worktree, launcher string) string {
+// SpawnCommand is the shell line argus runs in a worker's pane: cd into the
+// worktree, then start the launcher with the initial prompt as its argument. The
+// worktree path is single-quoted because it is data (a path that may contain
+// spaces, and whose final segment is a branch name): interpolating it raw let a
+// branch like feat$(cmd) inject into the pane's shell. launcher is argus-owned
+// config (DefaultLauncher or --launcher) and is left unquoted so a smoke test can
+// pass a multi-word command.
+func SpawnCommand(worktree, launcher string) string {
 	if launcher == "" {
 		launcher = DefaultLauncher
 	}
-	return fmt.Sprintf("cd %s && %s %q", worktree, launcher, initialPrompt)
+	return fmt.Sprintf("cd %s && %s %q", shellQuote(worktree), launcher, initialPrompt)
+}
+
+// shellQuote wraps s in single quotes for POSIX shells, escaping any embedded
+// single quote, so the whole string is treated as one literal argument.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Run is the whole deterministic supervise loop. In dry-run it prints the plan
@@ -128,9 +143,30 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 		return err
 	}
 	watch(ctx, cfg, states)
+	reconcile(ctx, cfg, states)
 	reviewEscalations(ctx, cfg, states)
 	renderReport(ctx, cfg, states)
 	return nil
+}
+
+// reconcile computes each worker's real diff from git so the gate and report use
+// ground truth rather than the worker's self-report. A measurement failure is
+// recorded (and later surfaced) rather than silently trusting status.json.
+func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ds, files, err := MeasureDiff(ctx, st.plan.Worktree, cfg.Base)
+		if err != nil {
+			st.diffErr = err
+			cfg.Log.Fail("measure_diff", st.plan.Task, err)
+			continue
+		}
+		st.measured = ds
+		st.measuredFiles = files
+		st.measuredOK = true
+	}
 }
 
 // reviewEscalations runs the LLM reviewer on exactly the workers the deterministic
@@ -138,16 +174,29 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 // gate verdict) means no call, so the LLM cost tracks the escalation rate, not the
 // worker count.
 func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) {
-	if cfg.Reviewer == nil {
-		return
-	}
 	for _, st := range states {
-		if !st.hasFile || Assess(&st.status, cfg.Policy).AutoApprove {
+		if !st.hasFile {
+			continue
+		}
+		verdict := gateVerdict(st, cfg.Policy)
+		if verdict.AutoApprove {
+			cfg.Log.Action("gate", st.plan.Task, "auto-approve", "")
+			recordApproval(cfg, st, true, "gate", "auto-approved: clean within policy", nil)
+			continue
+		}
+		cfg.Log.Action("gate", st.plan.Task, "escalate", strings.Join(verdict.Reasons, "; "))
+
+		// The gate escalated. Only spend an LLM review when one is configured;
+		// otherwise the escalation is surfaced to the human — not approved.
+		if cfg.Reviewer == nil {
+			recordApproval(cfg, st, false, "gate", "escalated, awaiting human decision", verdict.Reasons)
 			continue
 		}
 		diff, err := DiffFor(ctx, st.plan.Worktree, cfg.Base)
 		if err != nil {
 			st.reviewErr = err
+			cfg.Log.Fail("review", st.plan.Task, err)
+			recordApproval(cfg, st, false, "gate", "review could not run: "+err.Error(), verdict.Reasons)
 			continue
 		}
 		res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
@@ -155,13 +204,43 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 			Branch:   st.plan.Branch,
 			Worktree: st.plan.Worktree,
 			Diff:     diff,
-			Reasons:  Assess(&st.status, cfg.Policy).Reasons,
+			Reasons:  verdict.Reasons,
 		})
 		if err != nil {
 			st.reviewErr = err
+			cfg.Log.Fail("review", st.plan.Task, err)
+			recordApproval(cfg, st, false, "gate", "review errored: "+err.Error(), verdict.Reasons)
 			continue
 		}
 		st.review = &res
+		cfg.Log.Action("review", st.plan.Task, res.Decision, res.Summary)
+		recordApproval(cfg, st, res.Decision == "approve", "review", res.Summary, res.Findings)
+	}
+}
+
+// recordApproval writes the worker's disposition to its worktree so ship can
+// enforce it, and logs a verdict event for the run log. A write failure is logged
+// but does not abort the run — ship will then see "no verdict" and refuse, which
+// is the safe default.
+func recordApproval(cfg *Config, st *workerState, approved bool, source, summary string, reasons []string) {
+	now := time.Now
+	if cfg.Now != nil {
+		now = cfg.Now
+	}
+	a := protocol.Approval{
+		Approved:  approved,
+		Source:    source,
+		Summary:   summary,
+		Reasons:   reasons,
+		UpdatedAt: now(),
+	}
+	outcome := "approved"
+	if !approved {
+		outcome = "not-approved"
+	}
+	cfg.Log.Action("verdict", st.plan.Task, outcome, summary)
+	if err := protocol.WriteApproval(st.plan.Worktree, &a); err != nil {
+		cfg.Log.Fail("verdict_write", st.plan.Task, err)
 	}
 }
 
@@ -173,15 +252,34 @@ func worktreePaths(plans []WorkerPlan) []string {
 	return paths
 }
 
-// workerState tracks one worker across the watch loop.
+// workerState tracks one worker across the watch loop. status is what the worker
+// reported; measured is the ground truth argus computed from git. The gate trusts
+// measured, not status, for diff size and files touched.
 type workerState struct {
-	started   time.Time
-	plan      *WorkerPlan
-	review    *ReviewResult
-	reviewErr error
-	paneID    string
-	status    protocol.Status
-	hasFile   bool
+	started       time.Time
+	reviewErr     error
+	diffErr       error
+	plan          *WorkerPlan
+	review        *ReviewResult
+	paneID        string
+	measuredFiles []string
+	status        protocol.Status
+	measured      protocol.DiffStat
+	hasFile       bool
+	measuredOK    bool
+}
+
+// effective returns the status the gate should judge: the worker's reported phase,
+// tests, and proof, but with diff size and files-touched replaced by argus's own
+// measurement when it succeeded. This is the trust boundary — self-report is a
+// hint; git is the truth.
+func (st *workerState) effective() protocol.Status {
+	s := st.status
+	if st.measuredOK {
+		s.DiffStat = st.measured
+		s.FilesTouched = st.measuredFiles
+	}
+	return s
 }
 
 func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerState, error) {
@@ -218,45 +316,74 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 
 		// One launch: cd + start the agent with a prompt that points it at the
 		// brief file. No second paste — the brief is on disk, not typed in.
-		if err := cfg.Client.PaneRun(ctx, paneID, spawnCommand(p.Worktree, cfg.Launcher)); err != nil {
+		if err := cfg.Client.PaneRun(ctx, paneID, SpawnCommand(p.Worktree, cfg.Launcher)); err != nil {
+			cfg.Log.Fail("spawn", p.Task, err)
 			return nil, fmt.Errorf("spawning worker for %s: %w", p.Task, err)
 		}
+		cfg.Log.Action("spawn", p.Task, "ok", paneID)
 
 		states[i] = &workerState{plan: p, paneID: paneID, started: cfg.Now()}
 	}
 	return states, nil
 }
 
-// watch polls every worker's status file until it reaches a terminal phase or
-// ctx is canceled. One goroutine per worker; a timer (not time.After) drives
-// the poll so we don't leak a timer per tick.
+// watch polls every worker's status file until it reaches a terminal phase, its
+// deadline passes, or ctx is canceled. One goroutine per worker; a timer (not
+// time.After) drives the poll so we don't leak a timer per tick. The deadline is
+// what stops a hung or dead worker from blocking the whole run forever.
 func watch(ctx context.Context, cfg *Config, states []*workerState) {
 	var wg sync.WaitGroup
 	for _, st := range states {
 		wg.Add(1)
 		go func(st *workerState) {
 			defer wg.Done()
-			pollStatus(ctx, cfg.Interval, st)
+			pollStatus(ctx, cfg.Interval, cfg.Timeout, cfg.Log, st)
 		}(st)
 	}
 	wg.Wait()
 }
 
-func pollStatus(ctx context.Context, interval time.Duration, st *workerState) {
+func pollStatus(ctx context.Context, interval, timeout time.Duration, log *eventlog.Logger, st *workerState) {
 	path := protocol.StatusPath(st.plan.Worktree)
+
+	// A per-worker wall-clock deadline: without it a worker that dies in a
+	// non-terminal phase (crash, exit, never writes awaiting_review) would hang
+	// watch/wg.Wait indefinitely. 0 disables the deadline.
+	var deadline <-chan time.Time
+	if timeout > 0 {
+		dt := time.NewTimer(timeout)
+		defer dt.Stop()
+		deadline = dt.C
+	}
+
 	timer := time.NewTimer(0)
 	defer timer.Stop()
+	var lastErr string
 	for {
 		select {
 		case <-ctx.Done():
+			log.Action("watch", st.plan.Task, "canceled", string(st.status.Phase))
+			return
+		case <-deadline:
+			log.Action("watch", st.plan.Task, "timeout", string(st.status.Phase))
 			return
 		case <-timer.C:
-			if s, err := protocol.Load(path); err == nil {
+			s, err := protocol.Load(path)
+			switch {
+			case err == nil:
 				st.status = s
 				st.hasFile = true
+				lastErr = ""
 				if protocol.IsTerminal(s.Phase) {
+					log.Action("phase", st.plan.Task, string(s.Phase), s.BlockedReason)
 					return
 				}
+			case !errors.Is(err, os.ErrNotExist) && err.Error() != lastErr:
+				// A malformed (not merely absent) status file was silently
+				// swallowed before, so a lying/broken writer looked identical to
+				// one that never started. Log it once per distinct error.
+				lastErr = err.Error()
+				log.Fail("status_unreadable", st.plan.Task, err)
 			}
 			timer.Reset(interval)
 		}
