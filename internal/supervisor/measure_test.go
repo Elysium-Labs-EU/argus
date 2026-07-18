@@ -196,6 +196,38 @@ func TestSpawnCommandSingleQuotesWorktree(t *testing.T) {
 	}
 }
 
+func TestSpawnCommandNilEnvUnchanged(t *testing.T) {
+	// With no env, SpawnCommandEnv must produce byte-for-byte what SpawnCommand
+	// always did, so the credential proxy stays strictly opt-in.
+	if got, want := SpawnCommandEnv("/wt", "claude", nil), SpawnCommand("/wt", "claude"); got != want {
+		t.Errorf("SpawnCommandEnv(nil) = %q, want %q", got, want)
+	}
+}
+
+func TestSpawnCommandEnvInjectsQuotedAssignments(t *testing.T) {
+	env := []string{
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:5555/anthropic",
+		"ANTHROPIC_API_KEY=argus-sentinel-abc",
+		"malformed-no-equals",
+	}
+	cmd := SpawnCommandEnv("/repo/wt", "claude --permission-mode auto", env)
+
+	// Assignments land inline before the launcher, values single-quoted, so the
+	// launcher and its children inherit them while the pane shell does not.
+	if !strings.Contains(cmd, `&& ANTHROPIC_BASE_URL='http://127.0.0.1:5555/anthropic' ANTHROPIC_API_KEY='argus-sentinel-abc' claude`) {
+		t.Errorf("env not injected before launcher: %s", cmd)
+	}
+	// A pair without '=' is skipped, never emitted as a bare word.
+	if strings.Contains(cmd, "malformed-no-equals") {
+		t.Errorf("malformed env entry leaked into command: %s", cmd)
+	}
+	// A value that looks like shell substitution stays a quoted literal.
+	inj := SpawnCommandEnv("/wt", "claude", []string{"X=$(whoami)"})
+	if !strings.Contains(inj, `X='$(whoami)'`) {
+		t.Errorf("env value not single-quoted: %s", inj)
+	}
+}
+
 func hasReasonContaining(reasons []string, sub string) bool {
 	for _, r := range reasons {
 		if strings.Contains(r, sub) {
