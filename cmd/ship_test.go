@@ -8,17 +8,18 @@ import (
 	"codeberg.org/Elysium_Labs/argus/internal/protocol"
 )
 
-func TestShipText(t *testing.T) {
-	commit, prTitle, prBody := shipText("", 144, "fix-x")
-	if !strings.Contains(commit, "Closes #144") || !strings.Contains(prBody, "Closes #144") {
-		t.Errorf("issue not referenced: commit=%q body=%q", commit, prBody)
+func TestPrTitleForAndClosesLine(t *testing.T) {
+	if got := prTitleFor("", 144, "fix-x"); got != "fix: fix-x (#144)" {
+		t.Errorf("default+issue title: got %q", got)
 	}
-	if prTitle != "fix: fix-x" {
-		t.Errorf("default title: got %q", prTitle)
+	if got := prTitleFor("feat: real", 0, "b"); got != "feat: real" {
+		t.Errorf("explicit title: got %q", got)
 	}
-	c2, t2, _ := shipText("feat: real title", 0, "b")
-	if t2 != "feat: real title" || strings.Contains(c2, "Closes") {
-		t.Errorf("explicit title / no issue: title=%q commit=%q", t2, c2)
+	if got := closesLine(144); !strings.Contains(got, "Closes #144") {
+		t.Errorf("closesLine: got %q", got)
+	}
+	if got := closesLine(0); got != "" {
+		t.Errorf("no issue should have no closes line: got %q", got)
 	}
 }
 
@@ -34,13 +35,17 @@ func TestSplitOwnerRepo(t *testing.T) {
 	}
 }
 
-func TestResolveRepoOverride(t *testing.T) {
-	owner, name, err := resolveRepo(context.Background(), "Owner/Repo", "/ignored")
-	if err != nil || owner != "Owner" || name != "Repo" {
-		t.Errorf("override: got %s/%s err %v", owner, name, err)
+func TestResolveRepoDetectsHostAndOverride(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@github.com:acme/widget.git"})
+
+	host, owner, name, err := resolveRepo(context.Background(), "", wt)
+	if err != nil || host != "github.com" || owner != "acme" || name != "widget" {
+		t.Errorf("detect: got host=%s %s/%s err=%v", host, owner, name, err)
 	}
-	if _, _, err := resolveRepo(context.Background(), "garbage", "/ignored"); err == nil {
-		t.Error("a non owner/name override should error")
+	// Override changes owner/name but the host still comes from the remote.
+	host2, o2, n2, err := resolveRepo(context.Background(), "Other/Repo", wt)
+	if err != nil || host2 != "github.com" || o2 != "Other" || n2 != "Repo" {
+		t.Errorf("override: got host=%s %s/%s err=%v", host2, o2, n2, err)
 	}
 }
 

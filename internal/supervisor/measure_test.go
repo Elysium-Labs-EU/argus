@@ -54,6 +54,34 @@ func bigGitWorktree(t *testing.T, path string, lines int) string {
 	return wt
 }
 
+func TestMeasureDiffCountsUntrackedFiles(t *testing.T) {
+	// A worker that ADDS a new file: git diff misses it, but MeasureDiff must not.
+	wt := gitWorktreeWithDiff(t) // has a tracked edit (+2) vs HEAD
+	newFile := filepath.Join(wt, "cmd", "new_e2e_test.go")
+	if err := os.MkdirAll(filepath.Dir(newFile), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newFile, []byte(strings.Repeat("line\n", 40)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	if ds.Insertions < 40 {
+		t.Errorf("untracked new file not counted: insertions=%d", ds.Insertions)
+	}
+	found := false
+	for _, f := range files {
+		if strings.HasSuffix(f, "new_e2e_test.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("untracked file not in file list: %v", files)
+	}
+}
+
 func TestGateEscalatesWhenWorkerUnderReportsDiff(t *testing.T) {
 	wt := bigGitWorktree(t, "cmd/root.go", 50)
 	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
@@ -99,6 +127,35 @@ func TestGateEscalatesWhenDiffUnmeasurable(t *testing.T) {
 	}
 	if !hasReasonContaining(v.Reasons, "could not measure diff") {
 		t.Errorf("expected an unmeasurable reason, got %v", v.Reasons)
+	}
+}
+
+func TestGateAlwaysReviewsBehaviorCriticalPaths(t *testing.T) {
+	// A small, clean, passing change — but it touches internal/monitor, a
+	// behavior-critical (degraded-mode) surface, so the gate must escalate.
+	st := &workerState{
+		hasFile:       true,
+		measuredOK:    true,
+		measured:      protocol.DiffStat{Files: 1, Insertions: 4},
+		measuredFiles: []string{"internal/monitor/health_monitor.go"},
+		plan:          &WorkerPlan{Worker: Worker{Task: "restart backoff"}},
+		status: protocol.Status{
+			Phase: protocol.PhaseAwaitingReview,
+			Tests: []protocol.TestRun{{Cmd: "make ci", Result: protocol.ResultPass}},
+		},
+	}
+	v := gateVerdict(st, nil) // nil -> DefaultReviewPolicy, which includes monitor/health
+	if v.AutoApprove {
+		t.Fatal("a change to a behavior-critical path must not auto-approve")
+	}
+	if !hasReasonContaining(v.Reasons, "behavior-critical") {
+		t.Errorf("expected a behavior-critical reason, got %v", v.Reasons)
+	}
+
+	// The same diff elsewhere still auto-approves.
+	st.measuredFiles = []string{"internal/textutil/wrap.go"}
+	if v := gateVerdict(st, nil); !v.AutoApprove {
+		t.Errorf("a benign small clean change should auto-approve, got %v", v.Reasons)
 	}
 }
 

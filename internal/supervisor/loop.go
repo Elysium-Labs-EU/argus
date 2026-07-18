@@ -94,6 +94,31 @@ the supervisor can make.
 %s`, w.Task, w.Branch, w.Worktree, protocol.WriterBrief)
 }
 
+// taskLabel is a short, log-friendly identifier for a worker task: the first
+// "#<n>" issue reference when present, otherwise the first line trimmed to 60
+// characters. It keeps the run log and `argus stats` keyed by something readable
+// instead of the entire multi-line brief.
+func taskLabel(task string) string {
+	if i := strings.IndexByte(task, '#'); i >= 0 {
+		j := i + 1
+		for j < len(task) && task[j] >= '0' && task[j] <= '9' {
+			j++
+		}
+		if j > i+1 {
+			return task[i:j]
+		}
+	}
+	line := task
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	line = strings.TrimSpace(line)
+	if len(line) > 60 {
+		line = strings.TrimSpace(line[:60])
+	}
+	return line
+}
+
 // DefaultLauncher is the agent argus starts in each worker pane.
 const DefaultLauncher = "claude --permission-mode auto"
 
@@ -284,6 +309,19 @@ func (st *workerState) effective() protocol.Status {
 
 func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerState, error) {
 	states := make([]*workerState, len(plans))
+
+	// If spawning aborts partway, the workers already launched are live agents in
+	// their panes. Report them as orphaned so the operator can stop or reuse them,
+	// rather than leaving them running invisibly.
+	fail := func(i int, err error) ([]*workerState, error) {
+		for j := 0; j < i; j++ {
+			if states[j] != nil {
+				cfg.Log.Action("orphaned", taskLabel(states[j].plan.Task), "spawn-aborted", states[j].paneID)
+			}
+		}
+		return nil, err
+	}
+
 	for i := range plans {
 		p := &plans[i]
 
@@ -295,13 +333,13 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 			Label:  p.Branch,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("creating worktree for %s: %w", p.Task, err)
+			return fail(i, fmt.Errorf("creating worktree for %s: %w", p.Task, err))
 		}
 		if err := WriteSettings(p.Worktree); err != nil {
-			return nil, fmt.Errorf("writing settings for %s: %w", p.Task, err)
+			return fail(i, fmt.Errorf("writing settings for %s: %w", p.Task, err))
 		}
 		if err := WriteBrief(p.Worktree, p.Brief); err != nil {
-			return nil, fmt.Errorf("writing brief for %s: %w", p.Task, err)
+			return fail(i, fmt.Errorf("writing brief for %s: %w", p.Task, err))
 		}
 
 		// Prefer a caller-supplied pane; otherwise run the worker in the pane
@@ -311,16 +349,16 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 			paneID = wt.RootPaneID
 		}
 		if paneID == "" {
-			return nil, fmt.Errorf("worker %s has no pane and herdr returned no root pane for its worktree", p.Task)
+			return fail(i, fmt.Errorf("worker %s has no pane and herdr returned no root pane for its worktree", p.Task))
 		}
 
 		// One launch: cd + start the agent with a prompt that points it at the
 		// brief file. No second paste — the brief is on disk, not typed in.
 		if err := cfg.Client.PaneRun(ctx, paneID, SpawnCommand(p.Worktree, cfg.Launcher)); err != nil {
-			cfg.Log.Fail("spawn", p.Task, err)
-			return nil, fmt.Errorf("spawning worker for %s: %w", p.Task, err)
+			cfg.Log.Fail("spawn", taskLabel(p.Task), err)
+			return fail(i, fmt.Errorf("spawning worker for %s: %w", p.Task, err))
 		}
-		cfg.Log.Action("spawn", p.Task, "ok", paneID)
+		cfg.Log.Action("spawn", taskLabel(p.Task), "ok", paneID)
 
 		states[i] = &workerState{plan: p, paneID: paneID, started: cfg.Now()}
 	}

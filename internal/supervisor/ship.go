@@ -77,6 +77,12 @@ func CurrentBranch(ctx context.Context, worktree string) (string, error) {
 	return git(ctx, worktree, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
+// RemoteURL returns the raw origin remote URL of a worktree, for callers that
+// need the host (not just owner/repo) such as forge detection.
+func RemoteURL(ctx context.Context, worktree string) (string, error) {
+	return git(ctx, worktree, "remote", "get-url", "origin")
+}
+
 // RemoteOwnerRepo parses the origin remote of a worktree into owner and repo,
 // handling both SSH (git@host:Owner/Repo.git) and HTTPS (https://host/Owner/Repo)
 // forms.

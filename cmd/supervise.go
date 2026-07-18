@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"codeberg.org/Elysium_Labs/argus/internal/forge"
 	"codeberg.org/Elysium_Labs/argus/internal/herdr"
 	"codeberg.org/Elysium_Labs/argus/internal/supervisor"
 	"codeberg.org/Elysium_Labs/argus/internal/ui"
@@ -24,11 +25,13 @@ func newSuperviseCmd() *cobra.Command {
 		launcher     string
 		sharedGlobs  []string
 		osGlobs      []string
+		reviewGlobs  []string
 		reviewModel  string
 		review       bool
 		maxDiffLines int
 		interval     time.Duration
 		timeout      time.Duration
+		issues       []int
 		dryRun       bool
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
@@ -62,6 +65,21 @@ each pane's directory in --panes mode).`,
 				repo = wd
 			}
 
+			// --issues turns issue numbers into worker briefs by fetching each
+			// issue's title and body from the repo's forge, so the operator never
+			// hand-writes a task string. Generated tasks/branches append to any
+			// given explicitly.
+			if len(issues) > 0 {
+				fetched, brs, ierr := tasksFromIssues(cmd.Context(), repo, issues)
+				if ierr != nil {
+					return ierr
+				}
+				tasks = append(tasks, fetched...)
+				if len(branches) == 0 {
+					branches = brs
+				}
+			}
+
 			client := herdr.New()
 			workers, err := buildWorkers(cmd.Context(), client, &workerInput{
 				panes:    panes,
@@ -92,9 +110,10 @@ each pane's directory in --panes mode).`,
 				Interval: interval,
 				Timeout:  timeout,
 				Policy: &supervisor.ReviewPolicy{
-					MaxDiffLines: maxDiffLines,
-					SharedGlobs:  sharedGlobs,
-					OSPathGlobs:  osGlobs,
+					MaxDiffLines:      maxDiffLines,
+					SharedGlobs:       sharedGlobs,
+					OSPathGlobs:       osGlobs,
+					AlwaysReviewGlobs: reviewGlobs,
 				},
 			}
 			if review {
@@ -104,6 +123,7 @@ each pane's directory in --panes mode).`,
 		},
 	}
 
+	cmd.Flags().IntSliceVar(&issues, "issues", nil, "issue numbers to fetch from the repo's forge and turn into worker briefs (branch defaults to fix-issue-<n>)")
 	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated); drives worker count in the default mode")
 	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>)")
 	cmd.Flags().StringSliceVar(&panes, "panes", nil, "reuse these existing herdr panes instead of the worktree's own pane")
@@ -115,6 +135,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables")
 	cmd.Flags().StringSliceVar(&sharedGlobs, "shared-glob", nil, "review gate: path substrings that always require review (shared/prod surface)")
 	cmd.Flags().StringSliceVar(&osGlobs, "os-glob", policyDefaults.OSPathGlobs, "review gate: path substrings whose change requires real-world proof")
+	cmd.Flags().StringSliceVar(&reviewGlobs, "always-review-glob", policyDefaults.AlwaysReviewGlobs, "review gate: behavior-critical path words that always escalate, even for a small clean diff")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan and exit without creating worktrees or spawning workers")
@@ -259,6 +280,54 @@ func at(s []string, i int) string {
 		return s[i]
 	}
 	return ""
+}
+
+// tasksFromIssues resolves the repo's forge from its origin remote, then fetches
+// each issue and renders it into a worker brief. It works for Codeberg or GitHub
+// without extra flags.
+func tasksFromIssues(ctx context.Context, repoPath string, issues []int) (tasks, branches []string, err error) {
+	f, owner, name, err := resolveForge(ctx, repoPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	return issuesToTasks(ctx, f, owner, name, issues)
+}
+
+// resolveForge detects the forge host and owner/repo from a repo path's origin
+// remote and returns an authenticated client.
+func resolveForge(ctx context.Context, repoPath string) (f forge.Forge, owner, name string, err error) {
+	remote, err := supervisor.RemoteURL(ctx, repoPath)
+	if err != nil {
+		return nil, "", "", err
+	}
+	host, owner, name, err := forge.Detect(remote)
+	if err != nil {
+		return nil, "", "", err
+	}
+	token := forge.TokenForHost(host)
+	if token == "" {
+		return nil, "", "", &ui.UserError{
+			Err:  fmt.Errorf("no API token for %s (needed to fetch issues)", host),
+			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN or GITHUB_TOKEN)",
+		}
+	}
+	return forge.New(host, token, nil), owner, name, nil
+}
+
+// issuesToTasks renders each issue into a worker brief and a default branch name.
+// It takes the forge as a parameter so it is testable without a network.
+func issuesToTasks(ctx context.Context, f forge.Forge, owner, name string, issues []int) (tasks, branches []string, err error) {
+	for _, n := range issues {
+		iss, ferr := f.FetchIssue(ctx, owner, name, n)
+		if ferr != nil {
+			return nil, nil, fmt.Errorf("fetching issue #%d: %w", n, ferr)
+		}
+		tasks = append(tasks, fmt.Sprintf(
+			"Fix %s/%s issue #%d: %s\n\n%s\n\nAdd a focused test and keep make ci green. Follow the repo STYLE.md. Do NOT git commit or push; argus ships.",
+			owner, name, n, iss.Title, iss.Body))
+		branches = append(branches, fmt.Sprintf("fix-issue-%d", n))
+	}
+	return tasks, branches, nil
 }
 
 // validBranch accepts only branch names safe to embed in a worktree path and a
