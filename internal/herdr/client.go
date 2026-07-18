@@ -197,3 +197,29 @@ func (c Client) WorktreeCreate(ctx context.Context, spec *WorktreeSpec) (Worktre
 	}
 	return Worktree{Path: path, RootPaneID: result.RootPane.PaneID}, nil
 }
+
+// WorktreeOpen opens an already-existing worktree in herdr and returns its root
+// pane, so a command like rebase can dispatch a worker into a worktree argus
+// created earlier (whose herdr workspace may since have been closed).
+func (c Client) WorktreeOpen(ctx context.Context, path string) (Worktree, error) {
+	out, err := c.run(ctx, "worktree", "open", "--path", path, "--no-focus", "--json")
+	if err != nil {
+		return Worktree{}, err
+	}
+	var result struct {
+		RootPane struct {
+			PaneID string `json:"pane_id"`
+		} `json:"root_pane"`
+		Worktree struct {
+			Path string `json:"path"`
+		} `json:"worktree"`
+	}
+	if err := decodeEnvelope(out, &result); err != nil {
+		return Worktree{}, err
+	}
+	p := result.Worktree.Path
+	if p == "" {
+		p = path
+	}
+	return Worktree{Path: p, RootPaneID: result.RootPane.PaneID}, nil
+}

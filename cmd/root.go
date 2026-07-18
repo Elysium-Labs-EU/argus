@@ -37,4 +37,5 @@ func init() {
 	rootCmd.AddCommand(superviseCmd)
 	rootCmd.AddCommand(reviewCmd)
 	rootCmd.AddCommand(shipCmd)
+	rootCmd.AddCommand(rebaseCmd)
 }
