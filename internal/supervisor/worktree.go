@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 // permissionSettings mirrors the shape Claude Code reads from

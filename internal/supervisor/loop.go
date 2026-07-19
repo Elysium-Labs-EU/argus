@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
-	"codeberg.org/Elysium_Labs/argus/internal/herdr"
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 // Worker is one supervised task. PaneID, when set, names an existing pane to run

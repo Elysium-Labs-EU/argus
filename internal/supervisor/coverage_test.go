@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
-	"codeberg.org/Elysium_Labs/argus/internal/herdr"
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 func gitInit(t *testing.T, dir string) func(args ...string) {

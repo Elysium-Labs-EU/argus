@@ -1,6 +1,6 @@
 # argus - Deterministic Agent Supervisor
 
-[![Codeberg](https://img.shields.io/badge/Codeberg-argus-blue?logo=codeberg)](https://codeberg.org/Elysium_Labs/argus)
+[![GitHub](https://img.shields.io/badge/GitHub-argus-blue?logo=github)](https://github.com/Elysium-Labs-EU/argus)
 
 argus runs the mechanical half of multi-pane AI-agent supervision as plain Go instead of inside an LLM. It drives [herdr](https://codeberg.org/Elysium_Labs/herdr) (a terminal multiplexer) through its CLI, spawns worker agents in git worktrees, and reads each worker's typed status file rather than scraping terminal scrollback. The LLM re-enters only for the risky minority, the review of a diff that the deterministic gate would not clear on its own.
 
@@ -30,13 +30,13 @@ The design follows Adam Jacob's idea of reducing agent token spend by moving the
 * Go 1.26 or newer, to build from source.
 * [herdr](https://codeberg.org/Elysium_Labs/herdr) on PATH. argus talks to it only through its CLI.
 * The `claude` CLI on PATH, for `argus review` and `supervise --review`.
-* `CODEBERG_TOKEN` in the environment, for `argus ship`.
+* A forge token for the host the worktree points at (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, ...), for `argus ship`.
 
 ## Install
 
 **From source**
 ```bash
-git clone https://codeberg.org/Elysium_Labs/argus
+git clone https://github.com/Elysium-Labs-EU/argus
 cd argus
 make build      # produces ./bin/argus
 ```
@@ -56,7 +56,7 @@ argus supervise --repo /path/to/project --tasks "risky change" --review
 # Review one worktree's diff on demand
 argus review --worktree /path/to/project-feat-retry --base origin/main
 
-# Ship an approved worktree to a Codeberg PR
+# Ship an approved worktree to a pull request
 argus ship --worktree /path/to/project-feat-retry --issue 42
 ```
 
@@ -68,7 +68,7 @@ argus ship --worktree /path/to/project-feat-retry --issue 42
 | `argus supervise --review` | On a gate escalation, run a headless `claude -p` review instead of only surfacing the decision |
 | `argus supervise --dry-run` | Print the plan and exit without creating worktrees or spawning workers |
 | `argus review --worktree <path>` | Run a one-shot `claude -p` review of a worktree's diff against a base ref |
-| `argus ship --worktree <path>` | Commit, push, and open a Codeberg PR, refused without an approving verdict unless `--force` |
+| `argus ship --worktree <path>` | Commit, push, and open a pull request (forge auto-detected), refused without an approving verdict unless `--force` |
 | `argus rebase --worktree <path>` | Dispatch the worktree's own worker to resolve a post-merge conflict and force-push |
 | `argus stats` | Aggregate the run logs under `~/.argus/runs` into escalation rate, review parse-fail rate, and tokens per task |
 

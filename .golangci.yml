@@ -91,7 +91,7 @@ formatters:
       sections:
         - standard
         - default
-        - prefix(codeberg.org/Elysium_Labs/argus)
+        - prefix(github.com/Elysium-Labs-EU/argus)
   exclusions:
     generated: lax
     paths:

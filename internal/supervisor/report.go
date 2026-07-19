@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
-	"codeberg.org/Elysium_Labs/argus/internal/ui"
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 // renderPlan prints what a real run would do, without doing it. This is the

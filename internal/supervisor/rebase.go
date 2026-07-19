@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"time"
 
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 // FetchBase updates the worktree's view of the base branch from origin, so a

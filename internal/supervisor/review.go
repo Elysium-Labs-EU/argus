@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 // ReviewPolicy is the deterministic gate that decides whether a worker's change

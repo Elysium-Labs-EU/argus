@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 )
 
 // ReviewRequest is the scoped payload argus hands a reviewer when the

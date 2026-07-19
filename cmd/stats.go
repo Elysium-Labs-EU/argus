@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
-	"codeberg.org/Elysium_Labs/argus/internal/ui"
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 func newStatsCmd() *cobra.Command {

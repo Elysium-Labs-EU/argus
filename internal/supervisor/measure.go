@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 // MeasureDiff computes the ground-truth diff of a worktree against base, read-only.

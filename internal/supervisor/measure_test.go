@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 func TestParseNumstatCountsAndFiles(t *testing.T) {
