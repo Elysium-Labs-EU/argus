@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"codeberg.org/Elysium_Labs/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 )
 
 const paneListReply = `{"result":{"panes":[

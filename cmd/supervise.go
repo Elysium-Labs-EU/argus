@@ -9,10 +9,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"codeberg.org/Elysium_Labs/argus/internal/forge"
-	"codeberg.org/Elysium_Labs/argus/internal/herdr"
-	"codeberg.org/Elysium_Labs/argus/internal/supervisor"
-	"codeberg.org/Elysium_Labs/argus/internal/ui"
+	"github.com/Elysium-Labs-EU/argus/internal/forge"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 func newSuperviseCmd() *cobra.Command {

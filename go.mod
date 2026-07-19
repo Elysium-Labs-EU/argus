@@ -1,4 +1,4 @@
-module codeberg.org/Elysium_Labs/argus
+module github.com/Elysium-Labs-EU/argus
 
 go 1.26.5
 

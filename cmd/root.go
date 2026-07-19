@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"codeberg.org/Elysium_Labs/argus/internal/buildinfo"
+	"github.com/Elysium-Labs-EU/argus/internal/buildinfo"
 )
 
 var rootCmd = &cobra.Command{

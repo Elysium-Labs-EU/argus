@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 func TestRenderStats(t *testing.T) {

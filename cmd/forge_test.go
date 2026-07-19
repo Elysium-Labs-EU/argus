@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/Elysium_Labs/argus/internal/forge"
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/forge"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 // fakeForge is a Forge stub for tests: it returns canned issues and records the

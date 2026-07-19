@@ -8,10 +8,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"codeberg.org/Elysium_Labs/argus/internal/forge"
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
-	"codeberg.org/Elysium_Labs/argus/internal/supervisor"
-	"codeberg.org/Elysium_Labs/argus/internal/ui"
+	"github.com/Elysium-Labs-EU/argus/internal/forge"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 func newShipCmd() *cobra.Command {

@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"codeberg.org/Elysium_Labs/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 )
 
 // debugLog, when set via --debug, tees every run-log event to stderr as it happens.

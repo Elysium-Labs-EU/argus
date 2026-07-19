@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/Elysium_Labs/argus/internal/herdr"
-	"codeberg.org/Elysium_Labs/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 func TestRenderReportShowsVerdictAndReview(t *testing.T) {

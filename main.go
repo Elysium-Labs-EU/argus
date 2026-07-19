@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"codeberg.org/Elysium_Labs/argus/cmd"
-	"codeberg.org/Elysium_Labs/argus/internal/ui"
+	"github.com/Elysium-Labs-EU/argus/cmd"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 func main() {
