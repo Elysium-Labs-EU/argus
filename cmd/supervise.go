@@ -11,6 +11,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -33,6 +34,9 @@ func newSuperviseCmd() *cobra.Command {
 		timeout      time.Duration
 		issues       []int
 		dryRun       bool
+		attach       bool
+		workspace    string
+		worktrees    []string
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -50,43 +54,23 @@ worker and runs it in the pane herdr opens there. Pass --panes only to reuse
 existing panes instead. --repo sets the repo (default: the current directory, or
 each pane's directory in --panes mode).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if len(panes) == 0 && len(branches) == 0 && len(tasks) == 0 {
-				return &ui.UserError{
-					Err:  fmt.Errorf("no workers given"),
-					Hint: "argus supervise --tasks x,y --branches feat-x,feat-y [--repo <path>]",
-				}
-			}
-
-			if repo == "" && len(panes) == 0 {
-				wd, werr := os.Getwd()
-				if werr != nil {
-					return fmt.Errorf("resolving working directory: %w", werr)
-				}
-				repo = wd
-			}
-
-			// --issues turns issue numbers into worker briefs by fetching each
-			// issue's title and body from the repo's forge, so the operator never
-			// hand-writes a task string. Generated tasks/branches append to any
-			// given explicitly.
-			if len(issues) > 0 {
-				fetched, brs, ierr := tasksFromIssues(cmd.Context(), repo, issues)
-				if ierr != nil {
-					return ierr
-				}
-				tasks = append(tasks, fetched...)
-				if len(branches) == 0 {
-					branches = brs
-				}
-			}
-
 			client := herdr.New()
-			workers, err := buildWorkers(cmd.Context(), client, &workerInput{
-				panes:    panes,
-				branches: branches,
-				tasks:    tasks,
-				repo:     repo,
-			})
+
+			// --attach observes workers that are already running in their worktrees
+			// instead of spawning any: no worktree is created and no agent started,
+			// argus just watches their typed status and reports. Everything else
+			// (tasks/branches/issues, worktree creation) belongs to the spawn path.
+			var (
+				workers []supervisor.Worker
+				err     error
+			)
+			if attach {
+				workers, err = attachWorkers(cmd.Context(), client, workspace, worktrees)
+			} else {
+				workers, err = spawnWorkers(cmd.Context(), client, &workerInput{
+					panes: panes, branches: branches, tasks: tasks, repo: repo,
+				}, issues)
+			}
 			if err != nil {
 				return err
 			}
@@ -119,6 +103,9 @@ each pane's directory in --panes mode).`,
 			if review {
 				cfg.Reviewer = supervisor.NewCLIReviewer(reviewModel).WithLog(logger)
 			}
+			if attach {
+				return supervisor.Attach(cmd.Context(), cfg, workers)
+			}
 			return supervisor.Run(cmd.Context(), cfg, workers, dryRun)
 		},
 	}
@@ -139,7 +126,57 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan and exit without creating worktrees or spawning workers")
+	cmd.Flags().BoolVar(&attach, "attach", false, "watch workers already running in their worktrees (no spawn); pair with --workspace or --worktrees")
+	cmd.Flags().StringVar(&workspace, "workspace", "", "with --attach: attach to every herdr pane in this workspace id, using each pane's directory as a worktree")
+	cmd.Flags().StringSliceVar(&worktrees, "worktrees", nil, "with --attach: explicit worktree paths to watch (comma-separated)")
 	return cmd
+}
+
+// attachWorkers resolves --attach targets into workers without creating anything.
+// Targets come from explicit --worktrees paths and/or every pane in --workspace
+// (each pane's cwd is a worktree). Each worktree's branch is read from git and its
+// task from the typed status file, falling back to the branch name, so the report
+// is labeled without the operator restating what the worker already recorded.
+func attachWorkers(ctx context.Context, client herdr.Client, workspace string, worktrees []string) ([]supervisor.Worker, error) {
+	type target struct{ worktree, paneID string }
+	var targets []target
+	for _, wt := range worktrees {
+		targets = append(targets, target{worktree: wt})
+	}
+	if workspace != "" {
+		panes, err := client.PaneList(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for i := range panes {
+			if panes[i].WorkspaceID == workspace && panes[i].Cwd != "" {
+				targets = append(targets, target{worktree: panes[i].Cwd, paneID: panes[i].PaneID})
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return nil, &ui.UserError{
+			Err:  fmt.Errorf("no attach targets"),
+			Hint: "argus supervise --attach --workspace <id>   (or --attach --worktrees p1,p2)",
+		}
+	}
+
+	workers := make([]supervisor.Worker, 0, len(targets))
+	for _, t := range targets {
+		branch, err := supervisor.CurrentBranch(ctx, t.worktree)
+		if err != nil {
+			return nil, &ui.UserError{
+				Err:  fmt.Errorf("resolving branch for %s: %w", t.worktree, err),
+				Hint: "an --attach worktree must be a git checkout that already exists",
+			}
+		}
+		task := branch
+		if s, lerr := protocol.Load(protocol.StatusPath(t.worktree)); lerr == nil && s.Task != "" {
+			task = s.Task
+		}
+		workers = append(workers, supervisor.Worker{Task: task, Branch: branch, Worktree: t.worktree, PaneID: t.paneID})
+	}
+	return workers, nil
 }
 
 var superviseCmd = newSuperviseCmd()
@@ -149,6 +186,40 @@ type workerInput struct {
 	panes    []string
 	branches []string
 	tasks    []string
+}
+
+// spawnWorkers resolves the spawn-mode inputs into workers: it requires at least
+// one worker source, defaults --repo to the working directory, folds any --issues
+// into tasks/branches by fetching them from the forge, then pairs the slices. It
+// is the non-attach half of supervise, kept out of RunE so each mode reads flat.
+func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int) ([]supervisor.Worker, error) {
+	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 {
+		return nil, &ui.UserError{
+			Err:  fmt.Errorf("no workers given"),
+			Hint: "argus supervise --tasks x,y --branches feat-x,feat-y [--repo <path>]  (or --attach --workspace <id>)",
+		}
+	}
+	if in.repo == "" && len(in.panes) == 0 {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("resolving working directory: %w", err)
+		}
+		in.repo = wd
+	}
+	// --issues turns issue numbers into worker briefs by fetching each issue's
+	// title and body from the repo's forge, so the operator never hand-writes a
+	// task string. Generated tasks/branches append to any given explicitly.
+	if len(issues) > 0 {
+		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues)
+		if err != nil {
+			return nil, err
+		}
+		in.tasks = append(in.tasks, fetched...)
+		if len(in.branches) == 0 {
+			in.branches = brs
+		}
+	}
+	return buildWorkers(ctx, client, in)
 }
 
 // buildWorkers resolves the paired flag slices into concrete workers. In the
