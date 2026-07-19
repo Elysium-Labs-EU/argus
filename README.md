@@ -2,7 +2,7 @@
 
 [![GitHub](https://img.shields.io/badge/GitHub-argus-blue?logo=github)](https://github.com/Elysium-Labs-EU/argus)
 
-argus runs the mechanical half of multi-pane AI-agent supervision as plain Go instead of inside an LLM. It drives [herdr](https://codeberg.org/Elysium_Labs/herdr) (a terminal multiplexer) through its CLI, spawns worker agents in git worktrees, and reads each worker's typed status file rather than scraping terminal scrollback. The LLM re-enters only for the risky minority, the review of a diff that the deterministic gate would not clear on its own.
+argus runs the mechanical half of multi-pane AI-agent supervision as plain Go instead of inside an LLM. It drives [herdr](https://github.com/ogulcancelik/herdr) (a terminal multiplexer) through its CLI, spawns worker agents in git worktrees, and reads each worker's typed status file rather than scraping terminal scrollback. The LLM re-enters only for the risky minority, the review of a diff that the deterministic gate would not clear on its own.
 
 The point is not just to coordinate. argus is a verifier. The gate checks the real `git diff` (ground truth), not the worker's self-reported status; `ship` refuses to open a pull request without a recorded approving verdict; and argus's own control-plane files never leak into a PR.
 
@@ -28,7 +28,7 @@ The design follows Adam Jacob's idea of reducing agent token spend by moving the
 ## Requirements
 
 * Go 1.26 or newer, to build from source.
-* [herdr](https://codeberg.org/Elysium_Labs/herdr) on PATH. argus talks to it only through its CLI.
+* [herdr](https://github.com/ogulcancelik/herdr) on PATH. argus talks to it only through its CLI.
 * The `claude` CLI on PATH, for `argus review` and `supervise --review`.
 * A forge token for the host the worktree points at (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, ...), for `argus ship`.
 
