@@ -107,6 +107,13 @@ each pane's directory in --panes mode).`,
 				cfg.Reviewer = supervisor.NewCLIReviewer(reviewModel).WithLog(logger)
 			}
 
+			// --attach only watches workers that are already running; it never calls
+			// execute() (the only place cfg.Broker.WorkerEnv is used), so it needs no
+			// credential proxy. Return before that block starts one for nothing.
+			if attach {
+				return supervisor.Attach(cmd.Context(), cfg, workers)
+			}
+
 			// Front the workers' API traffic with a credential proxy so a worker is
 			// not handed the real key in its own environment. It runs only for a
 			// live spawn (a dry run spawns nothing) and only for API-key auth: when
@@ -135,9 +142,6 @@ each pane's directory in --panes mode).`,
 				}
 			}
 
-			if attach {
-				return supervisor.Attach(cmd.Context(), cfg, workers)
-			}
 			return supervisor.Run(cmd.Context(), cfg, workers, dryRun)
 		},
 	}

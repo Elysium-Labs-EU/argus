@@ -47,6 +47,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -208,7 +209,10 @@ func (p *Proxy) handlerFor(u *Upstream) http.Handler {
 			r.URL.Scheme = u.Target.Scheme
 			r.URL.Host = u.Target.Host
 			r.Host = u.Target.Host
-			r.URL.Path = singleJoiningSlash(u.Target.Path, strings.TrimPrefix(r.URL.Path, prefix))
+			// path.Clean collapses any ".." the caller's decoded path carries (e.g.
+			// GET /anthropic/%2e%2e/secret) before it is forwarded, so a traversal
+			// segment can never survive into the request sent upstream.
+			r.URL.Path = path.Clean(singleJoiningSlash(u.Target.Path, strings.TrimPrefix(r.URL.Path, prefix)))
 			u.inject(r)
 		},
 	}

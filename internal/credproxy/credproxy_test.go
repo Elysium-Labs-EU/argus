@@ -146,6 +146,27 @@ func TestMissingCredentialRejected(t *testing.T) {
 	}
 }
 
+// TestEncodedPathTraversalIsCleaned proves a request whose decoded path carries
+// ".." (here via a percent-encoded segment that Go's http.ServeMux dispatches
+// without redirecting, since its own "already clean" check inspects the
+// escaped/raw path rather than the decoded r.URL.Path the Director rewrites)
+// cannot make it to the upstream host with a ".." segment intact. Before the
+// fix, the joined path was forwarded to the upstream verbatim.
+func TestEncodedPathTraversalIsCleaned(t *testing.T) {
+	p, f := startProxy(t, "sk-real", nil)
+	env := p.WorkerEnv("agent-1", "feat/x")
+	base := baseFrom(t, env)
+	sentinel := sentinelFrom(t, env)
+
+	resp := do(t, http.MethodGet, base+"/anthropic/%2e%2e/secret", sentinel)
+	if resp != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (request should still reach the gated fake upstream)", resp)
+	}
+	if strings.Contains(f.gotPath, "..") {
+		t.Fatalf("upstream saw path %q, a traversal segment escaped the proxy", f.gotPath)
+	}
+}
+
 func TestUnregisteredRouteHasNoUpstream(t *testing.T) {
 	p, _ := startProxy(t, "sk-real", nil)
 	env := p.WorkerEnv("agent-1", "feat/x")
