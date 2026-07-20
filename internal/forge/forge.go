@@ -1,9 +1,10 @@
 // Package forge is argus's abstraction over the git host it ships to. argus was
 // born Codeberg-only; this package lets it open pull requests and read issues on
-// GitHub too, selected by the host in the worktree's git remote. Gitea/Forgejo
-// (Codeberg) and GitHub differ only in a few details (base URL, auth scheme,
-// Accept header) over an otherwise identical REST surface, so one parameterized
-// client serves both.
+// GitHub and GitLab too, selected by the host in the worktree's git remote.
+// Gitea/Forgejo (Codeberg) and GitHub differ only in a few details (base URL,
+// auth scheme, Accept header) over an otherwise identical REST surface, so one
+// parameterized client serves both. GitLab's shape (PRIVATE-TOKEN auth, merge
+// requests instead of pulls) differs enough to warrant its own client.
 package forge
 
 import (
@@ -49,9 +50,9 @@ type Forge interface {
 }
 
 // New returns a Forge for host, authenticated with token. github.com maps to the
-// GitHub API; every other host is treated as Gitea/Forgejo (Codeberg and any
-// self-hosted instance), whose API lives at https://<host>/api/v1. hc may be nil
-// for a default client with a timeout.
+// GitHub API; gitlab.com maps to the GitLab API; every other host is treated as
+// Gitea/Forgejo (Codeberg and any self-hosted instance), whose API lives at
+// https://<host>/api/v1. hc may be nil for a default client with a timeout.
 func New(host, token string, hc *http.Client) Forge {
 	if hc == nil {
 		hc = &http.Client{Timeout: 20 * time.Second}
@@ -60,6 +61,14 @@ func New(host, token string, hc *http.Client) Forge {
 		return &rest{
 			host: host, base: "https://api.github.com",
 			authScheme: "Bearer", accept: "application/vnd.github+json",
+			http: hc, token: token,
+		}
+	}
+	// Exact match only: self-hosted GitLab needs an explicit future flag, since
+	// hostname alone can't disambiguate a self-hosted GitLab from Gitea/Forgejo.
+	if host == "gitlab.com" {
+		return &gitlab{
+			host: host, base: "https://gitlab.com/api/v4",
 			http: hc, token: token,
 		}
 	}

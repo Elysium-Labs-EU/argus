@@ -65,8 +65,9 @@ func splitOwnerRepo(path string) (owner, repo string, err error) {
 
 // TokenForHost returns the API token for a forge host from the environment,
 // checking host-specific variables before a generic fallback. github.com uses
-// GITHUB_TOKEN or GH_TOKEN; codeberg.org uses CODEBERG_TOKEN; any other host
-// uses <HOST>_TOKEN (non-alphanumerics as underscores) then FORGE_TOKEN.
+// GITHUB_TOKEN or GH_TOKEN; codeberg.org uses CODEBERG_TOKEN; gitlab.com uses
+// GITLAB_TOKEN; any other host uses <HOST>_TOKEN (non-alphanumerics as
+// underscores) then FORGE_TOKEN.
 func TokenForHost(host string) string {
 	var candidates []string
 	switch host {
@@ -74,6 +75,8 @@ func TokenForHost(host string) string {
 		candidates = []string{"GITHUB_TOKEN", "GH_TOKEN"}
 	case "codeberg.org":
 		candidates = []string{"CODEBERG_TOKEN"}
+	case "gitlab.com":
+		candidates = []string{"GITLAB_TOKEN"}
 	default:
 		candidates = []string{envKey(host) + "_TOKEN", "FORGE_TOKEN"}
 	}
