@@ -1,0 +1,37 @@
+name: CI
+
+# Calls `make ci` directly rather than re-declaring each step in YAML: the
+# Makefile is the single source of truth for what "passing" means (test, lint,
+# nilaway, coverage floor, go-crap change-risk gate), so this workflow can't
+# drift from it the way a hand-copied step list would.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # go-crap-gate diffs against origin/main; needs full history
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install dev tools
+        run: make setup
+
+      - name: Run CI gate
+        run: make ci
