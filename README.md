@@ -41,6 +41,21 @@ cd argus
 make build      # produces ./bin/argus
 ```
 
+## Claude Code skill
+
+argus ships a Claude Code skill that teaches the agent to drive these commands instead
+of hand-running the supervise loop. When you work inside this repo, the copy at
+`.claude/skills/argus/` is picked up automatically. To use it anywhere else, install the
+distributable copy into your user skills directory:
+
+```bash
+mkdir -p ~/.claude/skills/argus
+cp skills/argus/SKILL.md ~/.claude/skills/argus/SKILL.md
+```
+
+Then, in any repo with `argus` on PATH, ask Claude Code to "supervise the panes with
+argus" and it will drive `supervise`, `review`, and `ship` for you.
+
 ## Quick Start
 
 ```bash
