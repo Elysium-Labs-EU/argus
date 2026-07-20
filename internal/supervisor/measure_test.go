@@ -185,7 +185,7 @@ func TestMatchAnyIsSegmentAware(t *testing.T) {
 func TestSpawnCommandSingleQuotesWorktree(t *testing.T) {
 	// A worktree path with a space and a shell-substitution-looking segment must
 	// be a single quoted literal, not something the pane's shell interprets.
-	cmd := SpawnCommand("/repo/.claude/worktrees/feat $(whoami)", "claude")
+	cmd := SpawnCommand("/repo/.claude/worktrees/feat $(whoami)", "claude", nil, nil)
 	if !strings.Contains(cmd, `cd '/repo/.claude/worktrees/feat $(whoami)'`) {
 		t.Errorf("worktree not single-quoted: %s", cmd)
 	}
@@ -193,6 +193,65 @@ func TestSpawnCommandSingleQuotesWorktree(t *testing.T) {
 	got := shellQuote("a'b")
 	if got != `'a'\''b'` {
 		t.Errorf("shellQuote(a'b) = %s", got)
+	}
+}
+
+func TestSpawnCommandScrubsEnv(t *testing.T) {
+	// With scrub vars, the launcher runs under `env -u` for each, so a forge or
+	// issue-tracker token the pane inherited is not in the worker's environment.
+	// Without them, the command is byte-for-byte the plain form.
+	plain := SpawnCommand("/wt", "claude", nil, nil)
+	if strings.Contains(plain, "env -u") {
+		t.Errorf("nil scrub must not add env -u: %s", plain)
+	}
+	scrubbed := SpawnCommand("/wt", "claude", []string{"CODEBERG_TOKEN", "GH_TOKEN"}, nil)
+	if !strings.Contains(scrubbed, "&& env -u CODEBERG_TOKEN -u GH_TOKEN claude ") {
+		t.Errorf("scrub not applied before launcher: %s", scrubbed)
+	}
+}
+
+func TestSpawnCommandNilEnvUnchanged(t *testing.T) {
+	// With no scrub and no worker env, SpawnCommand must produce the same
+	// command whether nil or empty slices are passed, so both knobs stay
+	// strictly opt-in.
+	got := SpawnCommand("/wt", "claude", nil, nil)
+	want := `cd '/wt' && claude "Read .claude/argus/brief.md and follow it exactly; it is your task brief."`
+	if got != want {
+		t.Errorf("SpawnCommand(nil, nil) = %q, want %q", got, want)
+	}
+}
+
+func TestSpawnCommandInjectsWorkerEnv(t *testing.T) {
+	env := []string{
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:5555/anthropic",
+		"ANTHROPIC_API_KEY=argus-sentinel-abc",
+		"malformed-no-equals",
+	}
+	cmd := SpawnCommand("/repo/wt", "claude --permission-mode auto", nil, env)
+
+	// Assignments land inline before the launcher, values single-quoted, so the
+	// launcher and its children inherit them while the pane shell does not.
+	if !strings.Contains(cmd, `&& ANTHROPIC_BASE_URL='http://127.0.0.1:5555/anthropic' ANTHROPIC_API_KEY='argus-sentinel-abc' claude`) {
+		t.Errorf("env not injected before launcher: %s", cmd)
+	}
+	// A pair without '=' is skipped, never emitted as a bare word.
+	if strings.Contains(cmd, "malformed-no-equals") {
+		t.Errorf("malformed env entry leaked into command: %s", cmd)
+	}
+	// A value that looks like shell substitution stays a quoted literal.
+	inj := SpawnCommand("/wt", "claude", nil, []string{"X=$(whoami)"})
+	if !strings.Contains(inj, `X='$(whoami)'`) {
+		t.Errorf("env value not single-quoted: %s", inj)
+	}
+}
+
+func TestSpawnCommandCombinesScrubAndWorkerEnv(t *testing.T) {
+	// The two knobs are independent and can both be active at once: scrubbed
+	// names are withheld via `env -u` and the worker's phantom credentials are
+	// still set inline, all under the same `env` invocation.
+	cmd := SpawnCommand("/wt", "claude", []string{"CODEBERG_TOKEN"}, []string{"ANTHROPIC_API_KEY=argus-sentinel-abc"})
+	if !strings.Contains(cmd, "&& env -u CODEBERG_TOKEN ANTHROPIC_API_KEY='argus-sentinel-abc' claude ") {
+		t.Errorf("scrub and worker env not combined: %s", cmd)
 	}
 }
 

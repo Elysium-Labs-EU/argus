@@ -69,23 +69,44 @@ func splitOwnerRepo(path string) (owner, repo string, err error) {
 // GITLAB_TOKEN; any other host uses <HOST>_TOKEN (non-alphanumerics as
 // underscores) then FORGE_TOKEN.
 func TokenForHost(host string) string {
-	var candidates []string
-	switch host {
-	case "github.com":
-		candidates = []string{"GITHUB_TOKEN", "GH_TOKEN"}
-	case "codeberg.org":
-		candidates = []string{"CODEBERG_TOKEN"}
-	case "gitlab.com":
-		candidates = []string{"GITLAB_TOKEN"}
-	default:
-		candidates = []string{envKey(host) + "_TOKEN", "FORGE_TOKEN"}
-	}
-	for _, key := range candidates {
+	for _, key := range tokenVarsForHost(host) {
 		if v := os.Getenv(key); v != "" {
 			return v
 		}
 	}
 	return ""
+}
+
+// tokenVarsForHost is the ordered list of environment variables TokenForHost
+// consults for host — the single place that knows which variables hold a forge
+// token.
+func tokenVarsForHost(host string) []string {
+	switch host {
+	case "github.com":
+		return []string{"GITHUB_TOKEN", "GH_TOKEN"}
+	case "codeberg.org":
+		return []string{"CODEBERG_TOKEN"}
+	case "gitlab.com":
+		return []string{"GITLAB_TOKEN"}
+	default:
+		return []string{envKey(host) + "_TOKEN", "FORGE_TOKEN"}
+	}
+}
+
+// StandardTokenVars are the credential environment variables argus knows by
+// name and a worker never needs: forge API tokens for the hosts it supports
+// (GitHub, Codeberg, GitLab, plus the generic self-hosted fallback) and the
+// Jira issue-source API token. It is the authority the supervisor uses to
+// scrub these secrets from a worker's environment — argus itself does the
+// forge API calls (fetching issues, opening PRs) and the Jira issue fetch on
+// the host, never inside the worker pane, so the safe default is to withhold
+// them. Host-specific custom variables (<HOST>_TOKEN for a self-hosted Gitea)
+// are deliberately not included — they are unknowable here without the
+// remote, and the generic FORGE_TOKEN covers the common self-hosted case.
+// JIRA_BASE_URL and JIRA_EMAIL are not included: they are non-secret config,
+// not credentials.
+func StandardTokenVars() []string {
+	return []string{"CODEBERG_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "FORGE_TOKEN", "JIRA_API_TOKEN"}
 }
 
 // envKey turns a host into an environment-variable-safe upper-case fragment:
