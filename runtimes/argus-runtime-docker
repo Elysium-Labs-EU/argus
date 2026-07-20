@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# argus-runtime-docker isolates a worker in a Docker(-compatible) container —
+# see docs/worker-runtime-protocol.md for the full adapter contract this
+# script implements. Targets any Docker-compatible engine (OrbStack, Docker
+# Desktop).
+#
+# Reads (the core contract):
+#   ARGUS_RUNTIME_WORKTREE  absolute path to the worker's git worktree
+#   ARGUS_RUNTIME_ENV       JSON object of env vars the worker needs (today:
+#                           the credproxy sentinel and its loopback base URL)
+#   ARGUS_RUNTIME_CMD       inner command to run inside the container
+#
+# Optional operator config (not part of the core contract, this adapter's own
+# knobs):
+#   ARGUS_RUNTIME_DOCKER_IMAGE    image to run (default: argus-worker:latest);
+#                                 must have `claude` and `git` on PATH.
+#   ARGUS_RUNTIME_DOCKER_NETWORK  network to attach (default: argus-worker-net).
+#
+# Smoke-tested: `docker network create argus-worker-net` plus a plain `docker
+# run` on that network gives filesystem isolation (confirmed: ~/.ssh,
+# ~/.claude, ~/.aws do not exist inside the container) but NOT network egress
+# restriction — a plain bridge network still routes outbound traffic anywhere
+# by default. Getting "reach only credproxy + the git remote, deny everything
+# else" requires making argus-worker-net an internal/restricted network (or
+# fronting it with an egress-proxy allowlist, per
+# docs/worker-runtime-protocol.md) — that hardening is not yet built into this
+# script; today it isolates the filesystem, not the network.
+#
+# Prints exactly one line to stdout: the `docker run` command line argus types
+# into the worker's herdr pane. This script never execs docker itself — the
+# printed line does, when herdr runs it in the pane.
+set -euo pipefail
+
+: "${ARGUS_RUNTIME_WORKTREE:?ARGUS_RUNTIME_WORKTREE not set}"
+: "${ARGUS_RUNTIME_CMD:?ARGUS_RUNTIME_CMD not set}"
+runtime_env="${ARGUS_RUNTIME_ENV:-}"
+if [[ -z "$runtime_env" ]]; then
+  runtime_env='{}'
+fi
+
+command -v jq >/dev/null 2>&1 || {
+  echo "argus-runtime-docker: jq is required to parse ARGUS_RUNTIME_ENV" >&2
+  exit 1
+}
+
+image="${ARGUS_RUNTIME_DOCKER_IMAGE:-argus-worker:latest}"
+network="${ARGUS_RUNTIME_DOCKER_NETWORK:-argus-worker-net}"
+
+# A worktree's .git is a text file ("gitdir: <path>"), not a directory — it
+# points at the parent repo's real .git dir by absolute host path. Bind-
+# mounting only the worktree leaves that path unresolvable inside the
+# container's mount namespace, so also mount the parent .git dir at the same
+# host path git expects to find it at.
+#
+# This mount must be read-write, not read-only: a worktree's own operational
+# state (its index, HEAD, and per-worktree refs/locks) lives inside
+# <repo>/.git/worktrees/<name>/, not inside the worktree directory itself, and
+# `git commit`/`git push` write there. A read-only mount was tried first and
+# empirically fails `git commit` with "Read-only file system" on the index
+# lock — confirmed against real Docker, not assumed. Read-write here does not
+# widen the worker's reach beyond what it already has on the host outside a
+# container (its own repo's .git dir); it does not expose any *other* repo or
+# host path.
+mount_flags=(-v "${ARGUS_RUNTIME_WORKTREE}:/work")
+gitdir_line="$(sed -n '1p' "${ARGUS_RUNTIME_WORKTREE}/.git" 2>/dev/null || true)"
+if [[ "$gitdir_line" == gitdir:\ * ]]; then
+  worktree_gitdir="${gitdir_line#gitdir: }"
+  # <repo>/.git/worktrees/<name> -> <repo>/.git (the parent repo's real .git)
+  common_dir="$(cd "${worktree_gitdir}/../.." && pwd)"
+  mount_flags+=(-v "${common_dir}:${common_dir}")
+fi
+
+# credproxy binds to 127.0.0.1 on the host; from inside the container that
+# loopback address must be reached via the Docker-provided host alias
+# instead, so rewrite it in every env value before it crosses the boundary.
+env_flags=()
+while IFS= read -r kv; do
+  [[ -z "$kv" ]] && continue
+  env_flags+=(-e "$kv")
+done < <(printf '%s' "$runtime_env" | jq -r '
+  to_entries[]
+  | .key + "=" + (.value | gsub("127\\.0\\.0\\.1|localhost"; "host.docker.internal"))
+')
+
+{
+  printf 'docker run --rm -i --add-host host.docker.internal:host-gateway'
+  for m in "${mount_flags[@]}"; do printf ' %q' "$m"; done
+  printf ' -w /work --network %q' "$network"
+  for e in "${env_flags[@]}"; do printf ' %q' "$e"; done
+  printf ' %q sh -c %q' "$image" "cd /work && ${ARGUS_RUNTIME_CMD}"
+  printf '\n'
+}

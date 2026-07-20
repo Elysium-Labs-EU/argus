@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Elysium-Labs-EU/argus/internal/credproxy"
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
@@ -16,12 +20,14 @@ import (
 
 func newRebaseCmd() *cobra.Command {
 	var (
-		worktree string
-		base     string
-		launcher string
-		interval time.Duration
-		force    bool
-		dryRun   bool
+		worktree      string
+		base          string
+		launcher      string
+		workerRuntime string
+		interval      time.Duration
+		force         bool
+		dryRun        bool
+		noCredProxy   bool
 	)
 
 	cmd := &cobra.Command{
@@ -75,10 +81,17 @@ conflict resolution itself needs the worker.`,
 			if wt.RootPaneID == "" {
 				return &ui.UserError{Err: fmt.Errorf("herdr opened no pane for %s", worktree)}
 			}
-			if err := supervisor.WriteBrief(worktree, supervisor.RebaseBrief(branch, base)); err != nil {
+			if werr := supervisor.WriteBrief(worktree, supervisor.RebaseBrief(branch, base)); werr != nil {
+				return werr
+			}
+
+			spawnLine, cleanup, err := buildRebaseSpawnLine(ctx, logger, worktree, branch, launcher, workerRuntime, noCredProxy)
+			defer cleanup()
+			if err != nil {
 				return err
 			}
-			if err := client.PaneRun(ctx, wt.RootPaneID, supervisor.SpawnCommand(worktree, launcher, forge.StandardTokenVars(), nil)); err != nil {
+
+			if err := client.PaneRun(ctx, wt.RootPaneID, spawnLine); err != nil {
 				return err
 			}
 
@@ -100,10 +113,55 @@ conflict resolution itself needs the worker.`,
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "status poll cadence")
 	cmd.Flags().BoolVar(&force, "force", false, "dispatch a rebase even if no conflict is detected")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "detect and print the plan without dispatching a worker")
+	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate the rebase worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
+	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front the rebase worker's API traffic with the credential proxy; it inherits the host's real ANTHROPIC_API_KEY")
 	return cmd
 }
 
 var rebaseCmd = newRebaseCmd()
+
+// buildRebaseSpawnLine resolves the shell command line argus types into a
+// rebase worker's pane. It fronts the worker's API traffic with the same
+// credproxy sentinel treatment cmd/supervise.go gives spawn-mode workers —
+// this path used to pass workerEnv: nil unconditionally, so a
+// rebase-dispatched worker never got a sentinel even when spawn-mode workers
+// did — then wraps the result via a runtime adapter when one is configured.
+// cleanup shuts down any credproxy this call started and must be deferred by
+// the caller regardless of the returned error.
+func buildRebaseSpawnLine(ctx context.Context, logger *eventlog.Logger, worktree, branch, launcher, workerRuntime string, noCredProxy bool) (spawnLine string, cleanup func(), err error) {
+	cleanup = func() {}
+
+	var workerEnv []string
+	if !noCredProxy {
+		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+			proxy := credproxy.New(
+				func(agent, method, path string) {
+					logger.Action("credproxy", agent, method, path)
+				},
+				credproxy.Anthropic(key),
+			)
+			if serr := proxy.Start(); serr != nil { //nolint:contextcheck // credproxy.Start takes no context; it only binds a loopback listener
+				return "", cleanup, fmt.Errorf("starting credential proxy: %w", serr)
+			}
+			cleanup = func() { //nolint:contextcheck // deliberately decoupled from ctx: this cleanup must still run a shutdown after RunE's ctx is done
+				sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = proxy.Shutdown(sctx)
+			}
+			workerEnv = proxy.WorkerEnv(branch, branch)
+		}
+	}
+
+	spawnLine = supervisor.SpawnCommand(worktree, launcher, forge.StandardTokenVars(), workerEnv)
+	if workerRuntime != "" && workerRuntime != "none" {
+		line, rerr := supervisor.LaunchViaRuntime(ctx, workerRuntime, worktree, launcher, workerEnv)
+		if rerr != nil {
+			return "", cleanup, fmt.Errorf("launching rebase worker via runtime adapter: %w", rerr)
+		}
+		spawnLine = line
+	}
+	return spawnLine, cleanup, nil
+}
 
 func renderRebaseOutcome(out io.Writer, branch string, status *protocol.Status) {
 	switch status.Phase {

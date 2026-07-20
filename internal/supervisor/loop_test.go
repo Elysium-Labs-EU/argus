@@ -168,6 +168,86 @@ func TestExecuteWritesSettingsBriefAndSpawnsInRootPane(t *testing.T) {
 	}
 }
 
+func TestExecuteWrapsSpawnLineViaRuntimeAdapterWhenConfigured(t *testing.T) {
+	writeFakeAdapter(t, "fake", `echo "ISOLATED: $ARGUS_RUNTIME_CMD"`)
+
+	repo := t.TempDir()
+	rr := &recordingRunner{}
+	runner := func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		}
+		return rr.run(ctx, args...)
+	}
+	cfg := &Config{
+		Client:        herdr.NewWithRunner(runner),
+		Now:           time.Now,
+		Base:          "main",
+		WorkerRuntime: "fake",
+	}
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}})
+
+	if _, err := execute(context.Background(), cfg, plans); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	var spawnLine string
+	for _, call := range rr.subcommands() {
+		if strings.HasPrefix(call, "pane run ") {
+			spawnLine = call
+		}
+	}
+	if !strings.Contains(spawnLine, "ISOLATED:") {
+		t.Errorf("spawn line should come from the runtime adapter's stdout, got %q", spawnLine)
+	}
+	// The adapter path must never fall back to the plain cd+launcher line.
+	if strings.Contains(spawnLine, "cd "+plans[0].Worktree) {
+		t.Errorf("spawn line should not contain the unwrapped cd command when a runtime adapter is configured: %q", spawnLine)
+	}
+}
+
+func TestExecuteFailsWhenConfiguredRuntimeAdapterIsMissing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no argus-runtime-* resolves
+
+	repo := t.TempDir()
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	}
+	cfg := &Config{
+		Client:        herdr.NewWithRunner(runner),
+		Now:           time.Now,
+		Base:          "main",
+		WorkerRuntime: "does-not-exist",
+	}
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}})
+
+	if _, err := execute(context.Background(), cfg, plans); err == nil {
+		t.Fatal("want an error when the configured runtime adapter cannot be resolved, got nil")
+	}
+}
+
+func TestRenderPlanNeverExecsAnAdapter(t *testing.T) {
+	// A runtime name that resolves to nothing on PATH must not make renderPlan
+	// (the --dry-run path) fail or hang — it only prints a note, it never execs
+	// LaunchViaRuntime. This is the dry-run "makes no changes" contract.
+	t.Setenv("PATH", t.TempDir())
+
+	var buf bytes.Buffer
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: "/repo"}})
+	renderPlan(&buf, "origin/main", "claude", "docker", nil, plans)
+
+	out := buf.String()
+	if !strings.Contains(out, "wrapped by runtime adapter: docker") {
+		t.Errorf("dry-run output should note the configured runtime adapter: %s", out)
+	}
+	if !strings.Contains(out, "cd '/repo/.claude/worktrees/feat-x'") {
+		t.Errorf("dry-run should still print the plain SpawnCommand line: %s", out)
+	}
+}
+
 // gitWorktreeWithDiff makes a temp git repo with one committed file and an
 // uncommitted edit, so DiffFor(wt, "HEAD") returns a non-empty diff.
 func gitWorktreeWithDiff(t *testing.T) string {

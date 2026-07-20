@@ -19,26 +19,27 @@ import (
 
 func newSuperviseCmd() *cobra.Command {
 	var (
-		panes        []string
-		branches     []string
-		tasks        []string
-		repo         string
-		base         string
-		launcher     string
-		sharedGlobs  []string
-		osGlobs      []string
-		reviewGlobs  []string
-		reviewModel  string
-		review       bool
-		maxDiffLines int
-		interval     time.Duration
-		timeout      time.Duration
-		issues       []int
-		dryRun       bool
-		noCredProxy  bool
-		attach       bool
-		workspace    string
-		worktrees    []string
+		panes         []string
+		branches      []string
+		tasks         []string
+		repo          string
+		base          string
+		launcher      string
+		sharedGlobs   []string
+		osGlobs       []string
+		reviewGlobs   []string
+		reviewModel   string
+		review        bool
+		maxDiffLines  int
+		interval      time.Duration
+		timeout       time.Duration
+		issues        []int
+		dryRun        bool
+		noCredProxy   bool
+		attach        bool
+		workspace     string
+		worktrees     []string
+		workerRuntime string
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -86,16 +87,17 @@ each pane's directory in --panes mode).`,
 			defer closeLog()
 
 			cfg := &supervisor.Config{
-				Out:      cmd.OutOrStdout(),
-				Now:      time.Now,
-				Client:   client,
-				Log:      logger,
-				Base:     base,
-				Home:     home,
-				Launcher: launcher,
-				ScrubEnv: forge.StandardTokenVars(),
-				Interval: interval,
-				Timeout:  timeout,
+				Out:           cmd.OutOrStdout(),
+				Now:           time.Now,
+				Client:        client,
+				Log:           logger,
+				Base:          base,
+				Home:          home,
+				Launcher:      launcher,
+				ScrubEnv:      forge.StandardTokenVars(),
+				Interval:      interval,
+				Timeout:       timeout,
+				WorkerRuntime: workerRuntime,
 				Policy: &supervisor.ReviewPolicy{
 					MaxDiffLines:      maxDiffLines,
 					SharedGlobs:       sharedGlobs,
@@ -108,9 +110,14 @@ each pane's directory in --panes mode).`,
 			}
 
 			// --attach only watches workers that are already running; it never calls
-			// execute() (the only place cfg.Broker.WorkerEnv is used), so it needs no
-			// credential proxy. Return before that block starts one for nothing.
+			// execute() (the only place cfg.Broker.WorkerEnv is used or a runtime
+			// adapter is invoked), so it needs no credential proxy and applies no
+			// isolation of its own. Warn so the operator knows an attached worker's
+			// isolation is whatever it was started with, not argus-managed, then
+			// return before the credproxy block starts one for nothing.
 			if attach {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s --attach does not manage isolation: an attached worker keeps whatever credential proxy and runtime adapter (if any) it was started with\n",
+					ui.LabelWarning.Render("○"))
 				return supervisor.Attach(cmd.Context(), cfg, workers)
 			}
 
@@ -166,6 +173,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().BoolVar(&attach, "attach", false, "watch workers already running in their worktrees (no spawn); pair with --workspace or --worktrees")
 	cmd.Flags().StringVar(&workspace, "workspace", "", "with --attach: attach to every herdr pane in this workspace id, using each pane's directory as a worktree")
 	cmd.Flags().StringSliceVar(&worktrees, "worktrees", nil, "with --attach: explicit worktree paths to watch (comma-separated)")
+	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate each worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
 	return cmd
 }
 
