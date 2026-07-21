@@ -35,6 +35,20 @@ The design follows Adam Jacob's idea of reducing agent token spend by moving the
 
 ## Install
 
+**From a release**
+```bash
+curl -sSfL https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/scripts/install.sh | sh
+```
+
+No sudo needed on most machines: the script installs to `~/.local/bin` when that
+directory is already on `PATH`, and only falls back to `/usr/local/bin` (via
+`sudo`, prompting if needed) when it isn't. Set `ARGUS_INSTALL_DIR` to install
+somewhere else instead:
+```bash
+ARGUS_INSTALL_DIR=$HOME/bin sh -c "$(curl -sSfL https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/scripts/install.sh)"
+```
+Set `ARGUS_VERSION` to install a specific release tag instead of the latest one.
+
 **From source**
 ```bash
 git clone https://github.com/Elysium-Labs-EU/argus
