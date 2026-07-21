@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -75,6 +76,21 @@ func Push(ctx context.Context, worktree, branch string) error {
 // CurrentBranch returns the worktree's checked-out branch.
 func CurrentBranch(ctx context.Context, worktree string) (string, error) {
 	return git(ctx, worktree, "rev-parse", "--abbrev-ref", "HEAD")
+}
+
+// RepoRoot returns the main repository's working directory for worktree —
+// worktree may itself be a linked worktree (e.g. .claude/worktrees/<branch>),
+// in which case this is its parent repo, not worktree itself. herdr's
+// `worktree open` (used to reopen a pane for an already-created worktree,
+// e.g. by `argus rebase`) requires --cwd to name the repo the linked
+// worktree belongs to, not the linked worktree's own path — passing the
+// worktree path itself is rejected (herdr error "linked_worktree_source").
+func RepoRoot(ctx context.Context, worktree string) (string, error) {
+	commonDir, err := git(ctx, worktree, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(commonDir), nil
 }
 
 // RemoteURL returns the raw origin remote URL of a worktree, for callers that
