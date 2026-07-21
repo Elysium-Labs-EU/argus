@@ -255,10 +255,10 @@ type workerInput struct {
 // then pairs the slices. It is the non-attach half of supervise, kept out of RunE
 // so each mode reads flat.
 func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string) ([]supervisor.Worker, error) {
-	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 {
+	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
-			Hint: "argus supervise --tasks x,y --branches feat-x,feat-y [--repo <path>]  (or --attach --workspace <id>)",
+			Hint: "argus supervise --tasks x,y --branches feat-x,feat-y [--repo <path>]  (or --issues n,n or --jira-issues KEY,KEY, or --attach --workspace <id>)",
 		}
 	}
 	if in.repo == "" && len(in.panes) == 0 {

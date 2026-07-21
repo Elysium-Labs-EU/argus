@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
@@ -16,6 +17,21 @@ func fakeClient() herdr.Client {
 	return herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
 		return []byte(paneListReply), nil
 	})
+}
+
+func TestSpawnWorkersIssuesOnlyPassesGuard(t *testing.T) {
+	// --issues alone (no --tasks/--branches/--panes) used to trip the "no
+	// workers given" guard, since that check ran before --issues was folded
+	// into tasks/branches. repo is a non-git tempdir so it fails downstream
+	// (resolving the forge) instead — proof the guard itself let it through.
+	client := fakeClient()
+	_, err := spawnWorkers(context.Background(), client, &workerInput{repo: t.TempDir()}, []int{1}, nil)
+	if err == nil {
+		t.Fatal("want a downstream error resolving the forge for a non-git repo")
+	}
+	if strings.Contains(err.Error(), "no workers given") {
+		t.Errorf("--issues alone should satisfy the worker-source guard, got: %v", err)
+	}
 }
 
 func TestFoldIssueSourcesNoop(t *testing.T) {
