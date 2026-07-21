@@ -608,19 +608,21 @@ func resolvePaneID(p *WorkerPlan, wt herdr.Worktree) (string, error) {
 // cmd/supervise.go.
 //
 // The launcher's binary is resolved to an absolute path (see
-// ResolveLauncherPath) before either launch path below consults it, so a
-// newly opened pane's not-yet-initialized shell PATH never enters into it.
-// Applied after the DefaultLauncher fallback so the common (no --launcher)
-// case is covered too.
+// ResolveLauncherPath) only on the plain-host-shell path (SpawnCommand),
+// where a newly opened pane's not-yet-initialized shell PATH is the race
+// being sidestepped. A container/podman runtime adapter runs the launcher
+// inside its own image via its own already-initialized shell PATH, and the
+// host's absolute path (e.g. /opt/homebrew/bin/claude) is almost certainly
+// wrong inside that container's filesystem, so LaunchViaRuntime gets the
+// launcher unresolved and lets the container's PATH find it.
 func resolveSpawnLine(ctx context.Context, cfg *Config, p *WorkerPlan, workerEnv []string) (string, error) {
 	launcher := cfg.Launcher
 	if launcher == "" {
 		launcher = DefaultLauncher
 	}
-	launcher = ResolveLauncherPath(launcher)
 
 	if cfg.WorkerRuntime == "" || cfg.WorkerRuntime == "none" {
-		return SpawnCommand(p.Worktree, launcher, cfg.ScrubEnv, workerEnv), nil
+		return SpawnCommand(p.Worktree, ResolveLauncherPath(launcher), cfg.ScrubEnv, workerEnv), nil
 	}
 	line, err := LaunchViaRuntime(ctx, cfg.WorkerRuntime, p.Worktree, launcher, workerEnv)
 	if err != nil {
