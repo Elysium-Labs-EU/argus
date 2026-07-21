@@ -120,6 +120,17 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 			v.Reasons = append(v.Reasons,
 				fmt.Sprintf("worker under-reported diff: claimed %d lines, git measured %d", reported, measured))
 		}
+		// A worker that reaches a terminal phase claiming completed, verified work
+		// but touched zero files per git is exactly the failure mode that let a
+		// launcher spawn silently fail while its stale/fabricated status.json still
+		// sailed through the gate (issue #15): no code change means nothing was
+		// actually done or reviewable, so this must never auto-approve even though
+		// an empty diff looks "clean" by every other check above.
+		if len(st.measuredFiles) == 0 && (eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone) {
+			v.AutoApprove = false
+			v.Reasons = append(v.Reasons,
+				fmt.Sprintf("worker reports phase %q but git shows zero files changed against base — status may be stale or unverified", eff.Phase))
+		}
 	}
 	return v
 }
