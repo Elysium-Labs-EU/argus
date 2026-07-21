@@ -45,6 +45,14 @@ argus supervise --repo <path> \
 # then drop --dry-run to run for real
 ```
 
+`--tasks` is CSV-parsed, so a free-text brief containing commas or quotes will fail
+to parse. For multi-sentence briefs with punctuation, put one brief per line in a
+file and pass `--tasks-file` instead (appended after any `--tasks`):
+
+```bash
+argus supervise --repo <path> --tasks-file briefs.txt --branches feat-a,feat-b
+```
+
 Turn on the LLM review path for escalations with `--review` (headless `claude -p`):
 
 ```bash
