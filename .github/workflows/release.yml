@@ -47,11 +47,11 @@ jobs:
             goos: linux
             goarch: arm64
             artifact: argus-linux-arm64
-          - os: ubuntu-latest
+          - os: macos-latest
             goos: darwin
             goarch: amd64
             artifact: argus-darwin-amd64
-          - os: ubuntu-latest
+          - os: macos-latest
             goos: darwin
             goarch: arm64
             artifact: argus-darwin-arm64
@@ -97,6 +97,15 @@ jobs:
         run: |
           ls -lh ${{ matrix.artifact }}
           file ${{ matrix.artifact }}
+
+      # Ad-hoc signing (no Developer ID cert, no notarization — none provisioned
+      # yet). This doesn't remove the Gatekeeper prompt on a manually downloaded
+      # binary, but it upgrades the failure mode from a hard SIGKILL/"cannot be
+      # opened" to the softer "unidentified developer" dialog with an explicit
+      # Allow path in System Settings. See issue #47.
+      - name: Ad-hoc codesign (macOS only)
+        if: matrix.goos == 'darwin'
+        run: codesign --force -s - ${{ matrix.artifact }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
