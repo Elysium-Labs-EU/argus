@@ -31,10 +31,11 @@ var skippedADFNodes = map[string]bool{
 }
 
 // flattenADF walks an ADF document tree and returns its plain-text rendering:
-// each paragraph/heading becomes one line, joined with newlines. Unknown node
-// types are traversed for nested paragraphs (lists, blockquotes, expands) so
-// content isn't silently dropped; known non-prose types (tables, panels,
-// mentions, media) are skipped entirely rather than erroring.
+// each paragraph/heading becomes one line and each codeBlock becomes a
+// fenced line, joined with newlines. Unknown node types are traversed for
+// nested paragraphs (lists, blockquotes, expands) so content isn't silently
+// dropped; known non-prose types (tables, panels, mentions, media) are
+// skipped entirely rather than erroring.
 func flattenADF(doc adfNode) string {
 	var lines []string
 	var walkBlock func(n adfNode)
@@ -46,6 +47,15 @@ func flattenADF(doc adfNode) string {
 		case "paragraph", "heading":
 			if text := walkInline(n); text != "" {
 				lines = append(lines, text)
+			}
+		case "codeBlock":
+			// A codeBlock's content is text nodes directly, not paragraph-wrapped,
+			// so walkInline (which just concatenates text/hardBreak children)
+			// extracts it correctly; the default branch below would instead
+			// recurse into those text nodes as if they were nested blocks and
+			// silently produce nothing.
+			if text := walkInline(n); text != "" {
+				lines = append(lines, "```\n"+text+"\n```")
 			}
 		default:
 			// doc, blockquote, bulletList, orderedList, listItem, expand, and any
@@ -59,9 +69,10 @@ func flattenADF(doc adfNode) string {
 	return strings.Join(lines, "\n")
 }
 
-// walkInline collects the text of a single block node (paragraph/heading),
-// concatenating text nodes and turning hardBreaks into newlines. Inline nodes
-// with no plain-text meaning (mention, emoji, unknown) are skipped gracefully.
+// walkInline collects the text of a single block node (paragraph/heading/
+// codeBlock), concatenating text nodes and turning hardBreaks into newlines.
+// Inline nodes with no plain-text meaning (mention, emoji, unknown) are
+// skipped gracefully.
 func walkInline(n adfNode) string {
 	var out strings.Builder
 	for _, c := range n.Content {
