@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 const paneListReply = `{"result":{"panes":[
@@ -235,6 +237,96 @@ func TestRunSupervisionSpawnDryRunSkipsCredProxy(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "--attach") {
 		t.Errorf("dry-run spawn should not print the attach warning, got %q", buf.String())
+	}
+}
+
+// TestRunSupervisionWorkerRuntimeNoKeyFailsFast pins down the fix for issue
+// #57: --worker-runtime docker/podman isolates the worker from the host's
+// ~/.claude, so with no ANTHROPIC_API_KEY the worker previously got silently
+// spawned with zero credentials and failed deep inside the container. It
+// should now fail fast, before ever spawning anything.
+func TestRunSupervisionWorkerRuntimeNoKeyFailsFast(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runSupervision(cmd, fakeClient(), nil, &superviseOpts{
+		base: "origin/main", workerRuntime: "docker",
+	})
+	var userErr *ui.UserError
+	if !errors.As(err, &userErr) {
+		t.Fatalf("want *ui.UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Error(), "--worker-runtime docker has no credential path") {
+		t.Errorf("unexpected message: %q", userErr.Error())
+	}
+	if userErr.Hint == "" {
+		t.Error("want an actionable hint, got none")
+	}
+}
+
+// TestRunSupervisionWorkerRuntimeNoneSkipsFailFast confirms the unwrapped path
+// (no runtime adapter) is unaffected: it still reaches host ~/.claude
+// directly, exactly as before this fix.
+func TestRunSupervisionWorkerRuntimeNoneSkipsFailFast(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runSupervision(cmd, fakeClient(), nil, &superviseOpts{
+		base: "origin/main", workerRuntime: "none",
+	})
+	if err != nil {
+		t.Fatalf("runSupervision: %v", err)
+	}
+}
+
+// TestRunSupervisionWorkerRuntimeDryRunSkipsFailFast confirms --dry-run still
+// previews the plan even with no ANTHROPIC_API_KEY: nothing is actually
+// spawned, so there is nothing to fail fast about yet.
+func TestRunSupervisionWorkerRuntimeDryRunSkipsFailFast(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runSupervision(cmd, fakeClient(), nil, &superviseOpts{
+		dryRun: true, base: "origin/main", workerRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("runSupervision: %v", err)
+	}
+}
+
+// TestRunSupervisionWorkerRuntimeWithKeySucceeds confirms a real
+// ANTHROPIC_API_KEY (credproxy on) still works with a runtime adapter
+// configured — the fail-fast check must not fire when a credential path
+// actually exists.
+func TestRunSupervisionWorkerRuntimeWithKeySucceeds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runSupervision(cmd, fakeClient(), nil, &superviseOpts{
+		base: "origin/main", workerRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("runSupervision: %v", err)
 	}
 }
 

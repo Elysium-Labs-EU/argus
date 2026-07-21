@@ -210,9 +210,10 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 	// not handed the real key in its own environment. It runs only for a
 	// live spawn (a dry run spawns nothing) and only for API-key auth: when
 	// ANTHROPIC_API_KEY is unset (subscription/OAuth), there is no key to
-	// swap and the proxy stays off — in that mode workers reach the host's
-	// ~/.claude credentials directly and get no credential isolation, so it
-	// only holds for hosts that authenticate with an API key.
+	// swap and the proxy stays off. For an unwrapped worker (no runtime
+	// adapter) that is still fine — it reaches the host's ~/.claude
+	// credentials directly and gets no credential isolation, but it works.
+	// An isolated worker has no such fallback; see the check below.
 	// --no-cred-proxy opts out entirely.
 	if !o.dryRun && !o.noCredProxy {
 		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
@@ -231,6 +232,21 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 				_ = proxy.Shutdown(ctx)
 			}()
 			cfg.Broker = proxy
+		}
+	}
+
+	// A runtime adapter's whole point is that the worker's filesystem does not
+	// contain ~/.claude (see docs/worker-runtime-protocol.md), so unlike the
+	// unwrapped path above, an isolated worker has no fallback credential
+	// source: if cfg.Broker is still nil here (no ANTHROPIC_API_KEY, or
+	// --no-cred-proxy), the worker gets nothing at all and fails deep inside
+	// the container with a bare "Not logged in" (issue #57). Fail fast at the
+	// one place that knows both facts at once, instead of letting that
+	// surprise happen mid-run.
+	if !o.dryRun && cfg.Broker == nil && o.workerRuntime != "" && o.workerRuntime != "none" {
+		return &ui.UserError{
+			Err:  fmt.Errorf("--worker-runtime %s has no credential path: ANTHROPIC_API_KEY is unset (or --no-cred-proxy was passed), and an isolated worker cannot reach the host's ~/.claude", o.workerRuntime),
+			Hint: fmt.Sprintf("export ANTHROPIC_API_KEY=... to bridge credentials via credproxy, or drop --worker-runtime %s to run unwrapped (shares host ~/.claude directly)", o.workerRuntime),
 		}
 	}
 
