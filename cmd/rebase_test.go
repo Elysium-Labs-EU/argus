@@ -3,12 +3,55 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
+
+// initGitDir creates a minimal git repo (with a commit, so HEAD resolves) for
+// tests that only need a real branch/worktree, not a full remote setup.
+func initGitDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	run("checkout", "-q", "-b", "feat-x")
+	run("commit", "-q", "--allow-empty", "-m", "work")
+	return dir
+}
+
+// fakeRebaseClient routes "herdr worktree ..." and "herdr pane ..." calls to
+// caller-supplied outcomes, so dispatchRebaseWorker's herdr interactions can be
+// tested without a real herdr binary.
+func fakeRebaseClient(paneID string, worktreeErr, paneErr error) herdr.Client {
+	return herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "worktree" {
+			if worktreeErr != nil {
+				return nil, worktreeErr
+			}
+			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, paneID), nil
+		}
+		if paneErr != nil {
+			return nil, paneErr
+		}
+		return []byte(`{"result":{}}`), nil
+	})
+}
 
 func TestRebaseDryRunNoConflict(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // openRunLog writes under ~/.argus
@@ -95,5 +138,124 @@ func TestBuildRebaseSpawnLineNoCredProxyOptOut(t *testing.T) {
 	}
 	if strings.Contains(spawnLine, "ANTHROPIC_API_KEY") {
 		t.Errorf("--no-cred-proxy should inject no credential env at all, got %q", spawnLine)
+	}
+}
+
+func TestRunRebaseEmptyWorktree(t *testing.T) {
+	cmd := newRebaseCmd()
+	err := runRebase(cmd, herdr.New(), &rebaseOpts{})
+	if _, ok := errors.AsType[*ui.UserError](err); !ok {
+		t.Fatalf("want a *ui.UserError for an empty worktree, got %v", err)
+	}
+}
+
+// TestRunRebaseDryRunForcesPastNoConflict exercises the --force branch of the
+// "!conflicts && !force" check (force=true keeps the early no-conflict return
+// from firing) and then the --dry-run branch, without dispatching a worker.
+func TestRunRebaseDryRunForcesPastNoConflict(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	// FetchBase needs an "origin" remote to fetch from; point it at the repo
+	// itself so `git fetch origin main` succeeds without a real conflict.
+	if out, err := exec.Command("git", "-C", dir, "remote", "add", "origin", dir).CombinedOutput(); err != nil {
+		t.Fatalf("remote add: %v\n%s", err, out)
+	}
+
+	cmd := newRebaseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--worktree", dir, "--base", "feat-x", "--force", "--dry-run"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("rebase --force --dry-run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "rebase plan (dry run)") {
+		t.Errorf("expected a dry-run plan message:\n%s", buf.String())
+	}
+}
+
+// TestDetectRebaseConflictFetchBaseError covers detectRebaseConflict's FetchBase
+// error path: a repo with no "origin" remote can't fetch, so it fails before
+// ConflictsWith ever runs.
+func TestDetectRebaseConflictFetchBaseError(t *testing.T) {
+	dir := initGitDir(t)
+	if _, _, err := detectRebaseConflict(context.Background(), dir, "main"); err == nil {
+		t.Fatal("want an error fetching from a repo with no origin remote")
+	}
+}
+
+func TestDispatchRebaseWorkerWorktreeOpenError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("", errors.New("herdr: no such worktree"), nil)
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main"})
+	if err == nil || !strings.Contains(err.Error(), "no such worktree") {
+		t.Fatalf("want the WorktreeOpen error propagated, got %v", err)
+	}
+}
+
+func TestDispatchRebaseWorkerEmptyPane(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("", nil, nil) // no pane_id in the reply
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main"})
+	if _, ok := errors.AsType[*ui.UserError](err); !ok {
+		t.Fatalf("want a *ui.UserError when herdr opens no pane, got %v", err)
+	}
+}
+
+func TestDispatchRebaseWorkerPaneRunError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, errors.New("herdr: pane gone"))
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main", launcher: "claude"})
+	if err == nil || !strings.Contains(err.Error(), "pane gone") {
+		t.Fatalf("want the PaneRun error propagated, got %v", err)
+	}
+}
+
+// TestDispatchRebaseWorkerSuccessTerminal covers the happy path: herdr opens a
+// pane and runs the worker, and a status.json already at a terminal phase is
+// picked up on WaitForStatus's first (immediate) poll.
+func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	status := &protocol.Status{Phase: protocol.PhaseAwaitingReview}
+	if err := protocol.Write(protocol.StatusPath(worktree), status); err != nil {
+		t.Fatalf("seeding status.json: %v", err)
+	}
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+	var buf bytes.Buffer
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("dispatchRebaseWorker: %v", err)
+	}
+	if !strings.Contains(buf.String(), "dispatched rebase worker") || !strings.Contains(buf.String(), "rebased and ready") {
+		t.Errorf("expected dispatch + outcome messages:\n%s", buf.String())
+	}
+}
+
+// TestDispatchRebaseWorkerNoStatus covers the !seen path: no status.json is ever
+// written, so WaitForStatus returns once ctx is canceled.
+func TestDispatchRebaseWorkerNoStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := dispatchRebaseWorker(ctx, logger, client, &bytes.Buffer{}, "feat-x", &rebaseOpts{
+		worktree: t.TempDir(), base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no status before the deadline") {
+		t.Fatalf("want the no-status error, got %v", err)
 	}
 }
