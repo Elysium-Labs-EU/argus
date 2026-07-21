@@ -16,17 +16,37 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 )
 
+// apiAtlassianPrefix is the base every Jira Cloud request must actually hit
+// once resolved: https://api.atlassian.com/ex/jira/{cloudId}. Newer
+// "granular scope" API tokens (what Atlassian now issues by default) are
+// rejected with a 401 (www-authenticate: OAuth) or silently return empty
+// results with a 200 when used directly against a site's bare
+// *.atlassian.net domain — they only work against this api.atlassian.com
+// route. See resolvedBase.
+//
+// It's a var, not a const, purely so tests can point it at a local
+// httptest.Server instead of the real api.atlassian.com host.
+var apiAtlassianPrefix = "https://api.atlassian.com/ex/jira/"
+
 // Client fetches issues from one Jira Cloud site.
 type Client struct {
-	http    *http.Client
-	baseURL string // e.g. https://acme.atlassian.net
-	email   string
-	token   string
+	// resolveErr, apiBase, and resolveOnce cache the api.atlassian.com/ex/jira/
+	// translation of baseURL (see resolvedBase) for the life of the Client,
+	// so the /_edge/tenant_info lookup it requires only ever happens once.
+	resolveErr error
+	http       *http.Client
+	baseURL    string // e.g. https://acme.atlassian.net, as configured
+	email      string
+	token      string
+	apiBase    string
+
+	resolveOnce sync.Once
 }
 
 // configPathEnvVar overrides the default config-file location NewFromEnv
@@ -124,6 +144,78 @@ func New(baseURL, email, token string, hc *http.Client) *Client {
 	}
 }
 
+// resolvedBase returns the base URL FetchIssue should build request URLs
+// against, resolving and caching it on first call (see apiAtlassianPrefix
+// for why the translation is needed at all). Resolution happens lazily
+// here rather than in New so New's signature can stay unchanged — it's
+// called from NewFromEnv and from existing tests — and so a Client can
+// still be constructed even when the network call resolution requires
+// isn't available yet (e.g. offline unit tests that never call
+// FetchIssue). sync.Once means the /_edge/tenant_info request, and any
+// error it produces, only ever happens/is produced once per Client, no
+// matter how many times FetchIssue is called.
+func (c *Client) resolvedBase(ctx context.Context) (string, error) {
+	c.resolveOnce.Do(func() {
+		if strings.HasPrefix(c.baseURL, apiAtlassianPrefix) {
+			// Someone already worked around this manually and configured
+			// the api.atlassian.com/ex/jira/{cloudId} form directly — use
+			// it as-is, no /_edge/tenant_info round trip needed.
+			c.apiBase = c.baseURL
+			return
+		}
+
+		cloudID, err := fetchCloudID(ctx, c.http, c.baseURL)
+		if err != nil {
+			c.resolveErr = fmt.Errorf("jira: resolving cloud id for %s: %w", c.baseURL, err)
+			return
+		}
+		c.apiBase = apiAtlassianPrefix + cloudID
+	})
+	return c.apiBase, c.resolveErr
+}
+
+// tenantInfoResponse is the subset of {baseURL}/_edge/tenant_info we read.
+// This is an undocumented but stable endpoint every Jira Cloud site serves
+// unauthenticated; it's the confirmed way to turn a site's bare
+// *.atlassian.net domain into the cloudId api.atlassian.com/ex/jira/
+// requests need (see apiAtlassianPrefix).
+type tenantInfoResponse struct {
+	CloudID string `json:"cloudId"`
+}
+
+// fetchCloudID resolves the Atlassian cloudId for a Jira site.
+func fetchCloudID(ctx context.Context, hc *http.Client, baseURL string) (string, error) {
+	url := baseURL + "/_edge/tenant_info"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("building request: %w", err)
+	}
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := hc.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("GET %s: %w", url, err)
+	}
+	if resp == nil {
+		return "", fmt.Errorf("GET %s: nil response", url)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("GET %s returned %s: %s", url, resp.Status, apiMessage(body))
+	}
+
+	var tenant tenantInfoResponse
+	if err := json.Unmarshal(body, &tenant); err != nil {
+		return "", fmt.Errorf("decoding tenant_info response: %w", err)
+	}
+	if tenant.CloudID == "" {
+		return "", fmt.Errorf("tenant_info response had no cloudId")
+	}
+	return tenant.CloudID, nil
+}
+
 // issueResponse is the subset of a Jira Cloud v3 issue payload we read.
 type issueResponse struct {
 	Key    string `json:"key"`
@@ -139,7 +231,12 @@ type issueResponse struct {
 // text for Body via flattenADF. Number is the numeric suffix of the key when
 // there is one, else 0.
 func (c *Client) FetchIssue(ctx context.Context, key string) (forge.Issue, error) {
-	url := fmt.Sprintf("%s/rest/api/3/issue/%s", c.baseURL, key)
+	base, err := c.resolvedBase(ctx)
+	if err != nil {
+		return forge.Issue{}, err
+	}
+
+	url := fmt.Sprintf("%s/rest/api/3/issue/%s", base, key)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return forge.Issue{}, fmt.Errorf("building request: %w", err)
