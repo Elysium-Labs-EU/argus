@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -28,18 +29,84 @@ type Client struct {
 	token   string
 }
 
+// configPathEnvVar overrides the default config-file location NewFromEnv
+// falls back to when the JIRA_* env vars aren't all set. It exists mainly so
+// tests can point at a throwaway file instead of the developer's real
+// ~/.argus.
+const configPathEnvVar = "JIRA_CONFIG_FILE"
+
+// Config is the on-disk shape of the JSON file NewFromEnv falls back to when
+// JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN aren't all set in the env.
+// It exists so credentials already provisioned for another tool — e.g. an
+// Atlassian MCP server a session already has Jira access through — can be
+// written to one file once instead of duplicated as env vars for argus too.
+type Config struct {
+	BaseURL  string `json:"base_url"`
+	Email    string `json:"email"`
+	APIToken string `json:"api_token"`
+}
+
 // NewFromEnv builds a Client from JIRA_BASE_URL, JIRA_EMAIL, and
-// JIRA_API_TOKEN, following the same env-var-configured pattern as the other
-// forges (see forge.TokenForHost). hc may be nil for a default client with a
-// timeout.
+// JIRA_API_TOKEN if all three are set, following the same env-var-configured
+// pattern as the other forges (see forge.TokenForHost). Otherwise it falls
+// back to a JSON config file — $JIRA_CONFIG_FILE if set, else
+// ~/.argus/jira.json — so credentials provisioned once for another tool
+// don't need to be duplicated as env vars (see Config). hc may be nil for a
+// default client with a timeout.
 func NewFromEnv(hc *http.Client) (*Client, error) {
 	baseURL := os.Getenv("JIRA_BASE_URL")
 	email := os.Getenv("JIRA_EMAIL")
 	token := os.Getenv("JIRA_API_TOKEN")
-	if baseURL == "" || email == "" || token == "" {
-		return nil, fmt.Errorf("jira: JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN must all be set")
+	if baseURL != "" && email != "" && token != "" {
+		return New(baseURL, email, token, hc), nil
 	}
-	return New(baseURL, email, token, hc), nil
+
+	path, pathErr := configFilePath()
+	if pathErr == nil {
+		cfg, cfgErr := readConfigFile(path)
+		switch {
+		case cfgErr == nil:
+			return New(cfg.BaseURL, cfg.Email, cfg.APIToken, hc), nil
+		case !os.IsNotExist(cfgErr):
+			return nil, fmt.Errorf("jira: reading config file %s: %w", path, cfgErr)
+		}
+	}
+
+	return nil, fmt.Errorf("jira: set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN, or write them as JSON to %s (see jira.Config)", path)
+}
+
+// configFilePath resolves the JSON config file NewFromEnv reads when the
+// JIRA_* env vars aren't all set: $JIRA_CONFIG_FILE if set, else
+// ~/.argus/jira.json, matching the ~/.argus directory the rest of argus
+// already uses for its own state (see cmd.argusDataDir).
+func configFilePath() (string, error) {
+	if p := os.Getenv(configPathEnvVar); p != "" {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".argus", "jira.json"), nil
+}
+
+// readConfigFile reads and validates a Jira Config file. A missing file
+// surfaces as an os.IsNotExist error so NewFromEnv can tell "no config file"
+// apart from "config file is broken" and give a more specific message for
+// the latter.
+func readConfigFile(path string) (Config, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- path is an operator-set env var or our own fixed ~/.argus/jira.json, not attacker input
+	if err != nil {
+		return Config{}, err
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parsing JSON: %w", err)
+	}
+	if cfg.BaseURL == "" || cfg.Email == "" || cfg.APIToken == "" {
+		return Config{}, fmt.Errorf("base_url, email, and api_token must all be set")
+	}
+	return cfg, nil
 }
 
 // New builds a Client for baseURL (e.g. https://acme.atlassian.net),

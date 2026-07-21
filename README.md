@@ -31,7 +31,7 @@ The design follows Adam Jacob's idea of reducing agent token spend by moving the
 * [herdr](https://github.com/ogulcancelik/herdr) on PATH. argus talks to it only through its CLI.
 * The `claude` CLI on PATH, for `argus review` and `supervise --review`.
 * A forge token for the host the worktree points at (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, `GITLAB_TOKEN` for gitlab.com, `FORGE_TOKEN` for any self-hosted Gitea/Forgejo, ...), for `argus ship`. Self-hosted GitLab is not yet supported: only the exact host `gitlab.com` gets the GitLab API client — any other host, including a self-hosted GitLab, is treated as Gitea/Forgejo.
-* `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`, only for `supervise --jira-issues`.
+* `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN` — or a JSON config file at `$JIRA_CONFIG_FILE` or `~/.argus/jira.json` (`{"base_url":...,"email":...,"api_token":...}`) — only for `supervise --jira-issues`.
 
 ## Install
 

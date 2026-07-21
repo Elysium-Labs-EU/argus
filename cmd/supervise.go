@@ -107,7 +107,7 @@ each pane's directory in --panes mode).`,
 	}
 
 	cmd.Flags().IntSliceVar(&issues, "issues", nil, "issue numbers to fetch from the repo's forge and turn into worker briefs (branch defaults to fix-issue-<n>)")
-	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN")
+	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
 	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated); drives worker count in the default mode")
 	cmd.Flags().StringVar(&tasksFile, "tasks-file", "", "path to a file with one task per line, appended after --tasks; unlike --tasks this is not CSV-parsed, so commas and quotes in a free-text brief are safe")
 	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>)")
@@ -584,7 +584,7 @@ func jiraTasksFromIssues(ctx context.Context, keys []string) (tasks, branches []
 	if err != nil {
 		return nil, nil, &ui.UserError{
 			Err:  err,
-			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN to fetch --jira-issues",
+			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN, or write them to a JSON config file at $JIRA_CONFIG_FILE or ~/.argus/jira.json, to fetch --jira-issues",
 		}
 	}
 	return jiraIssuesToTasks(ctx, c, keys)
