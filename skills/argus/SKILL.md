@@ -54,8 +54,12 @@ argus supervise --repo <path> --tasks "risky change" --branches feat-x --review
 Fetch briefs straight from forge issues instead of writing them by hand:
 
 ```bash
-argus supervise --repo <path> --issues 141,142,143 --review
+argus supervise --repo <path> --issues 141,142,143 --branches feat-141,feat-142,feat-143 --review
 ```
+
+Known bug: pass `--branches` explicitly as above — `--issues` alone (no
+`--tasks`/`--branches`) currently fails with `no workers given`, because the
+no-workers-given guard runs before `--issues` is folded into tasks/branches.
 
 Useful flags (see `argus supervise --help` for all):
 
@@ -63,7 +67,43 @@ Useful flags (see `argus supervise --help` for all):
 - `--interval 15s` — status poll cadence.
 - `--timeout 0` — per-worker deadline; `0` waits indefinitely.
 - `--review-model <id>` — model for `--review`.
+- `--worker-runtime <name>` — isolate each worker with the `argus-runtime-<name>`
+  adapter on PATH instead of running it unwrapped on the host; see
+  "Worker runtime isolation" below.
 - Gate tuning: `--max-diff-lines`, `--shared-glob`, `--os-glob`, `--always-review-glob`.
+
+### Worker runtime isolation
+
+By default a worker runs unwrapped on the host, in the same OS user and
+filesystem as argus — credproxy keeps the real API key out of its env, but
+it still has unrestricted read access to `~/.ssh`, `~/.claude`, `~/.aws`, and
+unrestricted outbound network. `--worker-runtime <name>` closes that gap by
+resolving an executable named `argus-runtime-<name>` on `PATH` — the same
+convention `git` uses for `git-<subcommand>` — and execing it with the
+worktree path, credproxy env, and inner command; the adapter prints back the
+one shell command line argus actually types into the pane. Default is `none`,
+so existing installs are unaffected until an operator opts in. Full contract
+in `docs/worker-runtime-protocol.md`.
+
+Shipped adapters (`runtimes/`):
+
+- `argus-runtime-none` — trivial pass-through, the default: today's behavior,
+  no isolation added.
+- `argus-runtime-docker` — runs the worker via `docker run`, isolating it
+  from `~/.ssh`, `~/.claude`, `~/.aws`; egress allowlisting is not yet built
+  into the script, so outbound traffic to arbitrary hosts still succeeds.
+
+`podman` and Apple's native `container` tool are not shipped adapters — they
+follow the same contract, so a `argus-runtime-podman` or Apple-container
+adapter can be added by anyone without touching argus core.
+
+```bash
+argus supervise --repo <path> --tasks "add retry to sink" --branches feat-retry \
+  --worker-runtime docker
+```
+
+`argus rebase` (see [4. Post-merge conflict handoff](#4-post-merge-conflict-handoff))
+takes the same `--worker-runtime <name>` flag.
 
 ## 2. React to escalations
 
