@@ -31,10 +31,12 @@ func newShipCmd() *cobra.Command {
 		Short: "Commit a worktree's change, push it, and open a pull request",
 		Long: `Ship commits any uncommitted change in a worktree, pushes the branch to origin,
 and opens a pull request. It is Milestone C of argus: the deterministic final step
-once a change has been reviewed. The forge (Codeberg/Gitea or GitHub) is detected
-from the worktree's origin remote and the matching token is read from the
-environment (CODEBERG_TOKEN, GITHUB_TOKEN, ...). Repo owner/name and branch are
-derived from the worktree unless overridden.`,
+once a change has been reviewed. The forge (Codeberg/Gitea, GitHub, or GitLab) is
+detected from the worktree's origin remote and the matching token is read from the
+environment (CODEBERG_TOKEN, GITHUB_TOKEN, GITLAB_TOKEN, ...). Only the exact host
+gitlab.com gets the GitLab API client; self-hosted GitLab is not yet supported and
+is treated as Gitea/Forgejo. Repo owner/name and branch are derived from the
+worktree unless overridden.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runShip(cmd, &shipArgs{
 				worktree: worktree, base: base, title: title, repo: repo,
@@ -108,7 +110,7 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	if token == "" {
 		return &ui.UserError{
 			Err:  fmt.Errorf("no API token for %s", host),
-			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN or GITHUB_TOKEN)",
+			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN)",
 		}
 	}
 	return shipChange(cmd, forge.New(host, token, nil), a, target)
