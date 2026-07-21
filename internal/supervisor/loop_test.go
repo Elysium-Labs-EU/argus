@@ -80,7 +80,7 @@ func TestTaskLabel(t *testing.T) {
 func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 	plans := BuildPlan([]Worker{
 		{Task: "eos#42", Branch: "feat-x", RepoRoot: "/repo-a"},
-	})
+	}, nil)
 	if len(plans) != 1 {
 		t.Fatalf("want 1 plan, got %d", len(plans))
 	}
@@ -220,7 +220,7 @@ func TestExecuteWritesSettingsBriefAndSpawnsInRootPane(t *testing.T) {
 		Now:    time.Now,
 		Base:   "main",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}})
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
 
 	states, err := execute(context.Background(), cfg, plans)
 	if err != nil {
@@ -259,7 +259,7 @@ func TestExecuteWrapsSpawnLineViaRuntimeAdapterWhenConfigured(t *testing.T) {
 		Base:          "main",
 		WorkerRuntime: "fake",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}})
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -296,7 +296,7 @@ func TestExecuteFailsWhenConfiguredRuntimeAdapterIsMissing(t *testing.T) {
 		Base:          "main",
 		WorkerRuntime: "does-not-exist",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}})
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err == nil {
 		t.Fatal("want an error when the configured runtime adapter cannot be resolved, got nil")
@@ -310,7 +310,7 @@ func TestRenderPlanNeverExecsAnAdapter(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
 	var buf bytes.Buffer
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: "/repo"}})
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: "/repo"}}, nil)
 	renderPlan(&buf, "origin/main", "claude", "docker", nil, plans)
 
 	out := buf.String()

@@ -52,24 +52,28 @@ type Config struct {
 	Reviewer Reviewer
 	Out      io.Writer
 	Broker   CredentialBroker
-	Client   herdr.Client
+	Now      func() time.Time
 	Log      *eventlog.Logger
 	Policy   *ReviewPolicy
-	Now      func() time.Time
+	Client   herdr.Client
 	Base     string
 	Home     string
 	Launcher string
-
 	// WorkerRuntime names a worker-runtime adapter (see
 	// docs/worker-runtime-protocol.md): argus execs argus-runtime-<name> to
 	// isolate the worker instead of running it directly in the host shell.
 	// Empty (or "none") means today's unwrapped behavior — the default, so
 	// existing installs are unaffected until an operator opts in.
 	WorkerRuntime string
-
-	ScrubEnv []string // env vars withheld from each worker (e.g. forge tokens it never needs)
-	Interval time.Duration
-	Timeout  time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
+	ScrubEnv      []string // env vars withheld from each worker (e.g. forge tokens it never needs)
+	// ExtraAllow appends operator-supplied permission patterns (e.g.
+	// "Bash(task *)", "Bash(npm *)") to every worker's generated allowlist, on
+	// top of the Go/make defaults settingsFor always includes. This is how a
+	// repo whose mandated command runner isn't make (task, npm, etc.) avoids a
+	// permission prompt on every invocation.
+	ExtraAllow []string
+	Interval   time.Duration
+	Timeout    time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
 }
 
 // WorkerPlan is the fully-resolved intent for one worker: the concrete worktree
@@ -84,8 +88,10 @@ type WorkerPlan struct {
 
 // BuildPlan resolves each worker into a concrete plan. Missing worktree paths are
 // derived as <repo>/.claude/worktrees/<branch>; each brief is the task text plus
-// the shared status-writing contract so writer and reader can't drift.
-func BuildPlan(workers []Worker) []WorkerPlan {
+// the shared status-writing contract so writer and reader can't drift. extraAllow
+// is forwarded to settingsFor so every worker's allowlist reflects the same
+// operator-supplied extension the dry-run preview shows.
+func BuildPlan(workers []Worker, extraAllow []string) []WorkerPlan {
 	plans := make([]WorkerPlan, len(workers))
 	for i := range workers {
 		w := workers[i]
@@ -94,7 +100,7 @@ func BuildPlan(workers []Worker) []WorkerPlan {
 		}
 		plans[i] = WorkerPlan{
 			Worker:   w,
-			Settings: settingsFor(w.Worktree),
+			Settings: settingsFor(w.Worktree, extraAllow),
 			Brief:    briefFor(&w),
 		}
 	}
@@ -316,7 +322,7 @@ func envMap(env []string) map[string]string {
 // worker, watches their status files until every one reaches a terminal phase or
 // ctx is canceled, then prints a metrics report.
 func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error {
-	plans := BuildPlan(workers)
+	plans := BuildPlan(workers, cfg.ExtraAllow)
 
 	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
 		return err
@@ -353,7 +359,7 @@ func superviseStates(ctx context.Context, cfg *Config, states []*workerState) er
 // or grinding on an existing PR branch — under the same deterministic observation
 // instead of eyeballing its pane scrollback.
 func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
-	plans := BuildPlan(workers)
+	plans := BuildPlan(workers, cfg.ExtraAllow)
 	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
 		return err
 	}
@@ -566,7 +572,7 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	if err != nil {
 		return herdr.Worktree{}, fmt.Errorf("creating worktree for %s: %w", p.Task, err)
 	}
-	if err := WriteSettings(p.Worktree); err != nil {
+	if err := WriteSettings(p.Worktree, cfg.ExtraAllow); err != nil {
 		return herdr.Worktree{}, fmt.Errorf("writing settings for %s: %w", p.Task, err)
 	}
 	if err := WriteBrief(p.Worktree, p.Brief); err != nil {

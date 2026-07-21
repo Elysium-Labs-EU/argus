@@ -31,7 +31,7 @@ func TestEnsureDistinctWorktreesRefusesCollision(t *testing.T) {
 
 func TestSettingsForConfinesToWorktree(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt)
+	s := settingsFor(wt, nil)
 
 	wantAllow := "Edit(" + wt + "/**)"
 	if !slices.Contains(s.Permissions.Allow, wantAllow) {
@@ -47,9 +47,20 @@ func TestSettingsForConfinesToWorktree(t *testing.T) {
 	}
 }
 
+func TestSettingsForAppendsExtraAllow(t *testing.T) {
+	wt := "/repo/.claude/worktrees/feat-x"
+	s := settingsFor(wt, []string{"Bash(task *)", "Bash(npm *)"})
+
+	for _, want := range []string{"Bash(task *)", "Bash(npm *)", "Bash(make *)"} {
+		if !slices.Contains(s.Permissions.Allow, want) {
+			t.Errorf("allow missing %q; got %v", want, s.Permissions.Allow)
+		}
+	}
+}
+
 func TestWriteSettingsWritesConfinedFile(t *testing.T) {
 	wt := t.TempDir()
-	if err := WriteSettings(wt); err != nil {
+	if err := WriteSettings(wt, nil); err != nil {
 		t.Fatalf("WriteSettings: %v", err)
 	}
 	path := filepath.Join(wt, ".claude", "settings.local.json")

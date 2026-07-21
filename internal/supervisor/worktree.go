@@ -29,23 +29,29 @@ type permissionBlock struct {
 // skill): edits/writes are confined to the worktree, build/test/read commands
 // are pre-cleared, commit/push stay gated behind ask, and destructive or
 // out-of-worktree operations are denied outright.
-func settingsFor(worktree string) permissionSettings {
+//
+// extraAllow appends operator-supplied patterns (e.g. "Bash(task *)" for a repo
+// whose runner isn't make) after the Go/make defaults, so a non-Go repo isn't
+// stuck hitting a permission prompt on every command its own AGENTS.md mandates.
+func settingsFor(worktree string, extraAllow []string) permissionSettings {
 	glob := worktree + "/**"
+	allow := []string{
+		"Edit(" + glob + ")",
+		"Write(" + glob + ")",
+		"Bash(go build *)",
+		"Bash(go test *)",
+		"Bash(go vet *)",
+		"Bash(go get *)",
+		"Bash(make *)",
+		"Bash(git status*)",
+		"Bash(git diff*)",
+		"Bash(git log*)",
+		"Bash(git add*)",
+	}
+	allow = append(allow, extraAllow...)
 	return permissionSettings{
 		Permissions: permissionBlock{
-			Allow: []string{
-				"Edit(" + glob + ")",
-				"Write(" + glob + ")",
-				"Bash(go build *)",
-				"Bash(go test *)",
-				"Bash(go vet *)",
-				"Bash(go get *)",
-				"Bash(make *)",
-				"Bash(git status*)",
-				"Bash(git diff*)",
-				"Bash(git log*)",
-				"Bash(git add*)",
-			},
+			Allow: allow,
 			Ask: []string{
 				"Bash(git commit:*)",
 				"Bash(git push:*)",
@@ -65,9 +71,9 @@ func settingsFor(worktree string) permissionSettings {
 
 // WriteSettings renders SettingsFor(worktree) to worktree/.claude/settings.local.json.
 // It must run before the worker's claude session starts, since settings are read
-// once at session launch.
-func WriteSettings(worktree string) error {
-	settings := settingsFor(worktree)
+// once at session launch. extraAllow is forwarded to settingsFor unchanged.
+func WriteSettings(worktree string, extraAllow []string) error {
+	settings := settingsFor(worktree, extraAllow)
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding settings: %w", err)
