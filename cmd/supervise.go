@@ -412,8 +412,8 @@ func at(s []string, i int) string {
 }
 
 // tasksFromIssues resolves the repo's forge from its origin remote, then fetches
-// each issue and renders it into a worker brief. It works for Codeberg or GitHub
-// without extra flags.
+// each issue and renders it into a worker brief. It works for GitHub, GitLab, and
+// Codeberg/Gitea-family hosts without extra flags.
 func tasksFromIssues(ctx context.Context, repoPath string, issues []int) (tasks, branches []string, err error) {
 	f, owner, name, err := resolveForge(ctx, repoPath)
 	if err != nil {

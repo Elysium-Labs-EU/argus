@@ -1,4 +1,4 @@
-.PHONY: help build test test-coverage-check lint nilcheck fix setup ci clean release pre-release changelog changelog-preview
+.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus fix setup ci clean release pre-release changelog changelog-preview
 
 COVERAGE_THRESHOLD ?= 75
 BINARY_NAME=argus
@@ -37,7 +37,10 @@ nilcheck: ## Static nil-pointer safety analysis
 	nilaway ./...
 
 sg: ## Scan codebase with ast-grep rules (skipped until rules/ ported)
-	@if [ -d rules ]; then ast-grep scan; else echo "no rules/ dir yet, skipping"; fi
+	@if [ -d rules ]; then command -v ast-grep >/dev/null 2>&1 || { echo "ast-grep not found. Install: brew install ast-grep"; exit 1; }; ast-grep scan; else echo "no rules/ dir yet, skipping"; fi
+
+gitnexus: ## Index this repo with GitNexus for AI-assisted code search (no install needed, runs via npx)
+	npx gitnexus analyze
 
 crap: test-coverage-check ## go-crap change-risk gate on changed functions only (vs origin/main)
 	@command -v go-crap >/dev/null 2>&1 || { echo "go-crap not found. Run: make setup"; exit 1; }
@@ -51,13 +54,14 @@ fix: ## Fix go formatting and struct field alignment
 	golangci-lint fmt
 	go tool fieldalignment -fix ./...
 
-setup: ## Install dev tools (golangci-lint, nilaway, go-crap) — same versions as eos/themis
+setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same versions as eos/themis
 	@echo "Installing golangci-lint v2.11.0..."
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(shell go env GOPATH)/bin v2.11.0
 	@echo "Installing nilaway..."
 	go install go.uber.org/nilaway/cmd/nilaway@latest
 	@echo "Installing go-crap (change-risk analysis)..."
 	go install github.com/padiazg/go-crap@latest
+	@command -v ast-grep >/dev/null 2>&1 || echo "ast-grep not found — install with: brew install ast-grep (or see https://ast-grep.github.io/guide/quick-start.html)"
 	@echo "Setup complete."
 
 ci: test lint sg nilcheck test-coverage-check crap ## Run all CI checks locally
