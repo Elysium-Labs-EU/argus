@@ -23,10 +23,16 @@ die() { log "error: $*"; exit 1; }
 usage() {
   cat <<EOF
 Usage: install.sh [--print-install-dir]
+       install.sh --strip-quarantine <path>
 
   --print-install-dir  Print the directory the script would install into
                         (honoring ARGUS_INSTALL_DIR and PATH) and exit,
                         without downloading anything.
+  --strip-quarantine <path>
+                        Remove the macOS Gatekeeper quarantine attribute
+                        from <path> and exit. No-op on non-Darwin. Useful
+                        after manually downloading a release asset instead
+                        of using this script.
 EOF
 }
 
@@ -65,16 +71,35 @@ select_install_dir() {
   fi
 }
 
+# strip_quarantine removes the macOS Gatekeeper "com.apple.quarantine" xattr
+# from a downloaded binary. Without this, a binary carrying that attribute
+# (set by curl/browsers on Darwin, or a manual re-download) is killed
+# (SIGKILL) by Gatekeeper on first run, since the project has no signing key
+# provisioned yet (issue #47). No-op on non-Darwin, and tolerant of the
+# attribute already being absent.
+strip_quarantine() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    xattr -d com.apple.quarantine "$1" 2>/dev/null || true
+  fi
+}
+
 PRINT_INSTALL_DIR_ONLY=false
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --print-install-dir) PRINT_INSTALL_DIR_ONLY=true ;;
+    --strip-quarantine)
+      shift
+      [ $# -gt 0 ] || die "--strip-quarantine requires a path argument"
+      strip_quarantine "$1"
+      exit 0
+      ;;
     -h | --help)
       usage
       exit 0
       ;;
-    *) die "unknown argument: $arg (see --help)" ;;
+    *) die "unknown argument: $1 (see --help)" ;;
   esac
+  shift
 done
 
 if [ "$PRINT_INSTALL_DIR_ONLY" = true ]; then
@@ -118,6 +143,8 @@ log "Verifying checksum..."
     die "neither sha256sum nor shasum is available to verify the download"
   fi
 ) || die "checksum verification failed for ${ASSET}"
+
+strip_quarantine "${TMP_DIR}/${ASSET}"
 
 chmod +x "${TMP_DIR}/${ASSET}"
 
