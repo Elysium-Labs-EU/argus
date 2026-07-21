@@ -36,17 +36,17 @@ var apiAtlassianPrefix = "https://api.atlassian.com/ex/jira/"
 
 // Client fetches issues from one Jira Cloud site.
 type Client struct {
-	http    *http.Client
-	baseURL string // e.g. https://acme.atlassian.net, as configured
-	email   string
-	token   string
-
-	// resolveOnce/apiBase/resolveErr cache the api.atlassian.com/ex/jira/
+	// resolveErr, apiBase, and resolveOnce cache the api.atlassian.com/ex/jira/
 	// translation of baseURL (see resolvedBase) for the life of the Client,
 	// so the /_edge/tenant_info lookup it requires only ever happens once.
+	resolveErr error
+	http       *http.Client
+	baseURL    string // e.g. https://acme.atlassian.net, as configured
+	email      string
+	token      string
+	apiBase    string
+
 	resolveOnce sync.Once
-	apiBase     string
-	resolveErr  error
 }
 
 // configPathEnvVar overrides the default config-file location NewFromEnv
