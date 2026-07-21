@@ -176,6 +176,16 @@ jobs:
 
             Deterministic supervisor for multi-agent AI coding workflows.
 
+            ### Install
+
+            ```bash
+            curl -sSfL https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/scripts/install.sh | sh
+            ```
+
+            No sudo required on most machines — installs to `~/.local/bin` when
+            it's on `PATH`, otherwise `/usr/local/bin` (sudo only as a last
+            resort). Set `ARGUS_INSTALL_DIR` to pick another directory.
+
             ### Manual Installation
 
             Download the binary for your platform:
@@ -184,11 +194,13 @@ jobs:
             - **macOS (Apple Silicon)**: `argus-darwin-arm64`
             - **macOS (Intel)**: `argus-darwin-amd64`
 
-            Then:
+            Then, without sudo, move it onto a directory already on your
+            `PATH` (e.g. `~/.local/bin`):
             ```bash
             chmod +x argus-<platform>
-            sudo mv argus-<platform> /usr/local/bin/argus
+            mv argus-<platform> ~/.local/bin/argus
             ```
+            Or, if you have root: `sudo mv argus-<platform> /usr/local/bin/argus`.
 
             ### Verify Download
 
