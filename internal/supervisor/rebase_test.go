@@ -11,6 +11,40 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
+// TestInvalidateStatusRemovesStaleFiles covers argus issue #50's fix: a rebase
+// dispatch must not let a leftover status.json (or verdict.json) from an
+// earlier, unrelated task in the same worktree survive to be misread as this
+// dispatch's outcome.
+func TestInvalidateStatusRemovesStaleFiles(t *testing.T) {
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Phase: protocol.PhaseAwaitingReview}); err != nil {
+		t.Fatalf("seeding status.json: %v", err)
+	}
+	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: true}); err != nil {
+		t.Fatalf("seeding verdict.json: %v", err)
+	}
+
+	if err := InvalidateStatus(wt); err != nil {
+		t.Fatalf("InvalidateStatus: %v", err)
+	}
+
+	if _, err := os.Stat(protocol.StatusPath(wt)); !os.IsNotExist(err) {
+		t.Errorf("status.json should be removed, stat err: %v", err)
+	}
+	if _, err := os.Stat(protocol.VerdictPath(wt)); !os.IsNotExist(err) {
+		t.Errorf("verdict.json should be removed, stat err: %v", err)
+	}
+}
+
+// TestInvalidateStatusMissingFilesOK confirms a worktree with no prior status
+// or verdict files (the common case: a fresh worker, not a re-dispatch) is not
+// an error.
+func TestInvalidateStatusMissingFilesOK(t *testing.T) {
+	if err := InvalidateStatus(t.TempDir()); err != nil {
+		t.Fatalf("InvalidateStatus on a clean worktree: %v", err)
+	}
+}
+
 // initGitRepo builds a tiny real git repo with an origin/<base> remote so the
 // merge-tree conflict check runs against actual git plumbing.
 func initGitRepo(t *testing.T) (worktree, base string) {

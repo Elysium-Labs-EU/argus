@@ -144,12 +144,21 @@ func detectRebaseConflict(ctx context.Context, worktree, base string) (branch st
 // is the worktree's main repo (see supervisor.RepoRoot) — herdr's WorktreeOpen
 // needs it as --cwd to confirm the calling context is inside a git work tree.
 func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client herdr.Client, out io.Writer, repoRoot, branch string, opts *rebaseOpts) error {
+	// Captured before anything else touches the worktree, so WaitForStatus
+	// rejects a status.json left over from before this dispatch (see
+	// InvalidateStatus and issue #50) even if invalidation below races with a
+	// stray write.
+	dispatchedAt := time.Now()
+
 	wt, err := client.WorktreeOpen(ctx, repoRoot, opts.worktree)
 	if err != nil {
 		return err
 	}
 	if wt.RootPaneID == "" {
 		return &ui.UserError{Err: fmt.Errorf("herdr opened no pane for %s", opts.worktree)}
+	}
+	if ierr := supervisor.InvalidateStatus(opts.worktree); ierr != nil {
+		return fmt.Errorf("invalidating stale status before rebase dispatch: %w", ierr)
 	}
 	if werr := supervisor.WriteBrief(opts.worktree, supervisor.RebaseBrief(branch, opts.base)); werr != nil {
 		return werr
@@ -166,7 +175,7 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	}
 
 	_, _ = fmt.Fprintf(out, "%s dispatched rebase worker in pane %s; waiting...\n", ui.LabelInfo.Render("i"), wt.RootPaneID)
-	status, seen := supervisor.WaitForStatus(ctx, opts.worktree, opts.interval)
+	status, seen := supervisor.WaitForStatus(ctx, opts.worktree, opts.interval, dispatchedAt)
 	if !seen {
 		logger.Action("rebase", branch, "no-status", "")
 		return fmt.Errorf("worker wrote no status before the deadline")
