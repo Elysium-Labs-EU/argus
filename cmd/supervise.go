@@ -68,6 +68,19 @@ each pane's directory in --panes mode).`,
 				err     error
 			)
 			if attach {
+				// --attach watches a worktree argus did not create, so it has no
+				// idea what the worker actually branched from. Silently falling
+				// back to the spawn-mode default (origin/main) measures the diff
+				// against the wrong ref whenever the real base differs (e.g. a
+				// stacked branch) — wrong gate/review output with no indication
+				// anything was off. Fail fast instead: require the operator to
+				// state the real base explicitly.
+				if !cmd.Flags().Changed("base") {
+					return &ui.UserError{
+						Err:  fmt.Errorf("--attach requires --base"),
+						Hint: "argus supervise --attach --worktrees <path> --base <real-base-branch>",
+					}
+				}
 				workers, err = attachWorkers(cmd.Context(), client, workspace, worktrees)
 			} else {
 				workers, err = spawnWorkers(cmd.Context(), client, &workerInput{
@@ -158,7 +171,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>)")
 	cmd.Flags().StringSliceVar(&panes, "panes", nil, "reuse these existing herdr panes instead of the worktree's own pane")
 	cmd.Flags().StringVar(&repo, "repo", "", "repo root for all workers (default cwd; or each pane's directory in --panes mode)")
-	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref new worktrees branch from")
+	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref new worktrees branch from; required with --attach (no default applies — argus does not know what an attached worktree actually branched from)")
 	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in each worker pane after cd into its worktree")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "how often to poll each worker's status file")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "per-worker wall-clock deadline before argus stops waiting on it (0 = wait indefinitely)")
