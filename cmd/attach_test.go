@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -86,6 +87,27 @@ func TestAttachWorkersFromWorkspace(t *testing.T) {
 	}
 	if w.Task != "feat-x" { // empty status task → branch name
 		t.Errorf("task should fall back to branch, got %q", w.Task)
+	}
+}
+
+// TestSuperviseAttachRequiresExplicitBase covers the issue-14 fix: --attach must
+// not silently fall back to the spawn-mode --base default (origin/main), since an
+// attached worktree may have been branched from something else entirely — that
+// silently measured/gated/reviewed the diff against the wrong ref. --attach must
+// fail fast unless the operator states the real base explicitly.
+func TestSuperviseAttachRequiresExplicitBase(t *testing.T) {
+	wt := attachWorktree(t, "attached")
+	cmd := newSuperviseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--attach", "--worktrees", wt})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("--attach without --base should error")
+	}
+	if !strings.Contains(err.Error(), "--base") {
+		t.Errorf("error should mention --base, got: %v", err)
 	}
 }
 
