@@ -280,6 +280,54 @@ func TestExecuteWrapsSpawnLineViaRuntimeAdapterWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestResolveSpawnLineLeavesLauncherUnresolvedForRuntimeAdapter(t *testing.T) {
+	// The fake launcher binary sits on PATH so that, if resolveSpawnLine
+	// wrongly resolves it (issue #56), the wrong absolute host path leaks
+	// into the line handed to the container adapter.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("writing fake launcher: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "argus-runtime-fake"), []byte(`#!/bin/sh
+echo "$ARGUS_RUNTIME_CMD"
+`), 0o755); err != nil {
+		t.Fatalf("writing fake adapter: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	cfg := &Config{WorkerRuntime: "fake", Launcher: "claude"}
+	p := &WorkerPlan{Worker: Worker{Worktree: "/repo/wt"}}
+
+	line, err := resolveSpawnLine(context.Background(), cfg, p, nil)
+	if err != nil {
+		t.Fatalf("resolveSpawnLine: %v", err)
+	}
+	want := `claude "` + initialPrompt + `"`
+	if line != want {
+		t.Errorf("resolveSpawnLine leaked a host-resolved launcher path into the runtime adapter's command: got %q want %q", line, want)
+	}
+}
+
+func TestResolveSpawnLineResolvesLauncherForHostShell(t *testing.T) {
+	dir := t.TempDir()
+	launcherPath := filepath.Join(dir, "claude")
+	if err := os.WriteFile(launcherPath, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("writing fake launcher: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	cfg := &Config{Launcher: "claude"}
+	p := &WorkerPlan{Worker: Worker{Worktree: "/repo/wt"}}
+
+	line, err := resolveSpawnLine(context.Background(), cfg, p, nil)
+	if err != nil {
+		t.Fatalf("resolveSpawnLine: %v", err)
+	}
+	if !strings.Contains(line, launcherPath) {
+		t.Errorf("resolveSpawnLine should still resolve the launcher to an absolute path on the plain host-shell path: got %q, want it to contain %q", line, launcherPath)
+	}
+}
+
 func TestExecuteFailsWhenConfiguredRuntimeAdapterIsMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // no argus-runtime-* resolves
 
