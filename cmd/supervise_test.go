@@ -63,9 +63,12 @@ func TestFoldIssueSourcesJiraError(t *testing.T) {
 	for _, k := range []string{"JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"} {
 		t.Setenv(k, "")
 	}
+	// Point the config-file fallback at a path that doesn't exist, so this
+	// doesn't accidentally pass on a machine with a real ~/.argus/jira.json.
+	t.Setenv("JIRA_CONFIG_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
 	in := &workerInput{repo: t.TempDir()}
 	if err := foldIssueSources(context.Background(), in, nil, []string{"PROJ-1"}); err == nil {
-		t.Fatal("want error building jira client without JIRA_* env vars")
+		t.Fatal("want error building jira client without JIRA_* env vars or a config file")
 	}
 }
 
