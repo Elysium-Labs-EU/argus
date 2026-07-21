@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# argus-runtime-none is the trivial worker-runtime adapter and argus's default
+# when no --worker-runtime is configured: it applies no isolation and echoes
+# ARGUS_RUNTIME_CMD back unchanged, reproducing today's plain
+# `cd worktree && claude ...` behavior. See docs/worker-runtime-protocol.md
+# for the full adapter contract.
+set -euo pipefail
+
+: "${ARGUS_RUNTIME_WORKTREE:?ARGUS_RUNTIME_WORKTREE not set}"
+: "${ARGUS_RUNTIME_CMD:?ARGUS_RUNTIME_CMD not set}"
+
+printf 'cd %q && %s\n' "$ARGUS_RUNTIME_WORKTREE" "$ARGUS_RUNTIME_CMD"

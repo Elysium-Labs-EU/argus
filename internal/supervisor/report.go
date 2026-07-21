@@ -14,7 +14,12 @@ import (
 // renderPlan prints what a real run would do, without doing it. This is the
 // dry-run surface: worktrees to create, the settings each worker gets, and the
 // brief that will be injected.
-func renderPlan(out io.Writer, base, launcher string, scrubEnv []string, plans []WorkerPlan) {
+//
+// It always prints the plain SpawnCommand line, never LaunchViaRuntime's
+// output — dry-run's contract is "makes no changes," so it must not exec an
+// adapter subprocess just to print a preview line. When a runtime adapter is
+// configured, it instead appends a note that the real spawn will be wrapped.
+func renderPlan(out io.Writer, base, launcher, workerRuntime string, scrubEnv []string, plans []WorkerPlan) {
 	_, _ = fmt.Fprintf(out, "%s supervise plan — %d worker(s), base %s\n\n",
 		ui.LabelInfo.Render("i"), len(plans), base)
 
@@ -28,7 +33,13 @@ func renderPlan(out io.Writer, base, launcher string, scrubEnv []string, plans [
 		_, _ = fmt.Fprintf(out, "  branch:   %s\n", p.Branch)
 		_, _ = fmt.Fprintf(out, "  worktree: %s\n", p.Worktree)
 		_, _ = fmt.Fprintf(out, "  pane:     %s\n", pane)
-		_, _ = fmt.Fprintf(out, "  spawn:    %s\n", ui.TextCommand.Render(SpawnCommand(p.Worktree, launcher, scrubEnv, nil)))
+		spawn := SpawnCommand(p.Worktree, launcher, scrubEnv, nil)
+		if workerRuntime != "" && workerRuntime != "none" {
+			_, _ = fmt.Fprintf(out, "  spawn:    %s %s\n", ui.TextCommand.Render(spawn),
+				ui.TextMuted.Render(fmt.Sprintf("(wrapped by runtime adapter: %s)", workerRuntime)))
+		} else {
+			_, _ = fmt.Fprintf(out, "  spawn:    %s\n", ui.TextCommand.Render(spawn))
+		}
 
 		settings, _ := json.MarshalIndent(p.Settings, "    ", "  ")
 		_, _ = fmt.Fprintf(out, "  settings.local.json:\n    %s\n", settings)

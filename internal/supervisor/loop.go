@@ -8,10 +8,12 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -47,16 +49,24 @@ type CredentialBroker interface {
 // effectful (herdr, the clock, the home dir, output) enters here so the loop
 // stays testable.
 type Config struct {
-	Out      io.Writer
-	Now      func() time.Time
-	Policy   *ReviewPolicy
 	Reviewer Reviewer
-	Log      *eventlog.Logger
+	Out      io.Writer
 	Broker   CredentialBroker
 	Client   herdr.Client
+	Log      *eventlog.Logger
+	Policy   *ReviewPolicy
+	Now      func() time.Time
 	Base     string
 	Home     string
 	Launcher string
+
+	// WorkerRuntime names a worker-runtime adapter (see
+	// docs/worker-runtime-protocol.md): argus execs argus-runtime-<name> to
+	// isolate the worker instead of running it directly in the host shell.
+	// Empty (or "none") means today's unwrapped behavior — the default, so
+	// existing installs are unaffected until an operator opts in.
+	WorkerRuntime string
+
 	ScrubEnv []string // env vars withheld from each worker (e.g. forge tokens it never needs)
 	Interval time.Duration
 	Timeout  time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
@@ -200,6 +210,78 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// launcherCommand is the inner command a runtime adapter wraps: the launcher
+// plus the initial prompt, quoted the same way SpawnCommand quotes it. Unlike
+// SpawnCommand it carries no `cd` or env prefix — ARGUS_RUNTIME_WORKTREE and
+// ARGUS_RUNTIME_ENV carry that information across the adapter boundary
+// instead, since a container backend places the worktree and environment
+// differently than a plain host shell does.
+func launcherCommand(launcher string) string {
+	if launcher == "" {
+		launcher = DefaultLauncher
+	}
+	return fmt.Sprintf("%s %q", launcher, initialPrompt)
+}
+
+// LaunchViaRuntime resolves the argus-runtime-<name> adapter on $PATH (see
+// docs/worker-runtime-protocol.md) and execs it to obtain the final shell
+// command line argus types into the worker's pane. worktree and env
+// ("KEY=VALUE" pairs — typically just the credproxy sentinel and base URL,
+// not cfg.ScrubEnv, since an isolated environment never had those secrets to
+// begin with) cross the boundary as ARGUS_RUNTIME_WORKTREE and
+// ARGUS_RUNTIME_ENV; launcher is turned into ARGUS_RUNTIME_CMD the same way
+// SpawnCommand turns it into the tail of its host-shell command line.
+//
+// A missing adapter, a non-zero exit, or empty output is a hard error naming
+// the adapter — there is no silent fallback to running the worker unwrapped,
+// since that would defeat the point of configuring a runtime at all. Only a
+// real spawn path (execute, or a command like rebase that spawns a single
+// worker directly) calls this; renderPlan's dry-run preview must never exec
+// an adapter subprocess just to print a preview line.
+func LaunchViaRuntime(ctx context.Context, adapterName, worktree, launcher string, env []string) (string, error) {
+	bin := "argus-runtime-" + adapterName
+	binPath, err := exec.LookPath(bin)
+	if err != nil {
+		return "", fmt.Errorf("worker runtime adapter %q not found on PATH: %w", bin, err)
+	}
+
+	envJSON, err := json.Marshal(envMap(env))
+	if err != nil {
+		return "", fmt.Errorf("encoding runtime env for adapter %q: %w", bin, err)
+	}
+
+	cmd := exec.CommandContext(ctx, binPath) //nolint:gosec // binPath resolved via LookPath against an argus-owned naming convention
+	cmd.Env = append(os.Environ(),
+		"ARGUS_RUNTIME_WORKTREE="+worktree,
+		"ARGUS_RUNTIME_ENV="+string(envJSON),
+		"ARGUS_RUNTIME_CMD="+launcherCommand(launcher),
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("worker runtime adapter %q failed: %w", bin, err)
+	}
+	line := strings.TrimSpace(string(out))
+	if line == "" {
+		return "", fmt.Errorf("worker runtime adapter %q produced no output", bin)
+	}
+	return line, nil
+}
+
+// envMap turns "KEY=VALUE" pairs into a JSON object for ARGUS_RUNTIME_ENV,
+// dropping any entry without an "=" the same way SpawnCommand's inline
+// injection does.
+func envMap(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		m[k] = v
+	}
+	return m
+}
+
 // Run is the whole deterministic supervise loop. In dry-run it prints the plan
 // and makes no changes. Otherwise it enforces distinct worktrees, spawns each
 // worker, watches their status files until every one reaches a terminal phase or
@@ -212,7 +294,7 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 	}
 
 	if dryRun {
-		renderPlan(cfg.Out, cfg.Base, cfg.Launcher, cfg.ScrubEnv, plans)
+		renderPlan(cfg.Out, cfg.Base, cfg.Launcher, cfg.WorkerRuntime, cfg.ScrubEnv, plans)
 		return nil
 	}
 
@@ -441,7 +523,23 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 		if cfg.Broker != nil {
 			workerEnv = cfg.Broker.WorkerEnv(taskLabel(p.Task), p.Branch)
 		}
-		if err := cfg.Client.PaneRun(ctx, paneID, SpawnCommand(p.Worktree, cfg.Launcher, cfg.ScrubEnv, workerEnv)); err != nil {
+
+		// A configured runtime adapter isolates the worker (container, namespace,
+		// ...); "" or "none" is today's unwrapped behavior. Only the adapter path
+		// gets workerEnv via ARGUS_RUNTIME_ENV — cfg.ScrubEnv stays host-shell-only
+		// (see docs/worker-runtime-protocol.md), since an isolated environment
+		// never had those secrets to scrub in the first place.
+		spawnLine := SpawnCommand(p.Worktree, cfg.Launcher, cfg.ScrubEnv, workerEnv)
+		if cfg.WorkerRuntime != "" && cfg.WorkerRuntime != "none" {
+			line, rerr := LaunchViaRuntime(ctx, cfg.WorkerRuntime, p.Worktree, cfg.Launcher, workerEnv)
+			if rerr != nil {
+				cfg.Log.Fail("spawn", taskLabel(p.Task), rerr)
+				return fail(i, fmt.Errorf("launching worker for %s via runtime adapter: %w", p.Task, rerr))
+			}
+			spawnLine = line
+		}
+
+		if err := cfg.Client.PaneRun(ctx, paneID, spawnLine); err != nil {
 			cfg.Log.Fail("spawn", taskLabel(p.Task), err)
 			return fail(i, fmt.Errorf("spawning worker for %s: %w", p.Task, err))
 		}
