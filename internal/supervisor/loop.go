@@ -516,67 +516,27 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 	for i := range plans {
 		p := &plans[i]
 
-		wt, err := cfg.Client.WorktreeCreate(ctx, &herdr.WorktreeSpec{
-			Cwd:    p.RepoRoot,
-			Branch: p.Branch,
-			Base:   cfg.Base,
-			Path:   p.Worktree,
-			Label:  p.Branch,
-		})
+		wt, err := prepareWorktree(ctx, cfg, p)
 		if err != nil {
-			return fail(i, fmt.Errorf("creating worktree for %s: %w", p.Task, err))
-		}
-		if err := WriteSettings(p.Worktree); err != nil {
-			return fail(i, fmt.Errorf("writing settings for %s: %w", p.Task, err))
-		}
-		if err := WriteBrief(p.Worktree, p.Brief); err != nil {
-			return fail(i, fmt.Errorf("writing brief for %s: %w", p.Task, err))
+			return fail(i, err)
 		}
 
-		// Prefer a caller-supplied pane; otherwise run the worker in the pane
-		// herdr opened inside the new worktree — no separate --panes needed.
-		paneID := p.PaneID
-		if paneID == "" {
-			paneID = wt.RootPaneID
-		}
-		if paneID == "" {
-			return fail(i, fmt.Errorf("worker %s has no pane and herdr returned no root pane for its worktree", p.Task))
+		paneID, err := resolvePaneID(p, wt)
+		if err != nil {
+			return fail(i, err)
 		}
 
-		// One launch: cd + start the agent with a prompt that points it at the
-		// brief file. No second paste — the brief is on disk, not typed in. When a
-		// broker is configured, the launch line also carries this worker's phantom
-		// credentials inline, so the agent authenticates through argus and is not
-		// handed a real key in its own environment.
+		// When a broker is configured, the launch line carries this worker's
+		// phantom credentials inline, so the agent authenticates through argus
+		// and is not handed a real key in its own environment.
 		var workerEnv []string
 		if cfg.Broker != nil {
 			workerEnv = cfg.Broker.WorkerEnv(taskLabel(p.Task), p.Branch)
 		}
 
-		// Resolve the launcher's binary to an absolute path (see
-		// ResolveLauncherPath) before either launch path below consults it, so
-		// a newly opened pane's not-yet-initialized shell PATH never enters
-		// into it. Applied after the DefaultLauncher fallback so the common
-		// (no --launcher) case is covered too.
-		launcher := cfg.Launcher
-		if launcher == "" {
-			launcher = DefaultLauncher
-		}
-		launcher = ResolveLauncherPath(launcher)
-
-		// A configured runtime adapter isolates the worker (container, namespace,
-		// ...); "" or "none" is today's unwrapped behavior. Only the adapter path
-		// gets workerEnv via ARGUS_RUNTIME_ENV — cfg.ScrubEnv stays host-shell-only
-		// (see docs/worker-runtime-protocol.md), since an isolated environment
-		// never had those secrets to scrub in the first place.
-		spawnLine := SpawnCommand(p.Worktree, launcher, cfg.ScrubEnv, workerEnv)
-		if cfg.WorkerRuntime != "" && cfg.WorkerRuntime != "none" {
-			line, rerr := LaunchViaRuntime(ctx, cfg.WorkerRuntime, p.Worktree, launcher, workerEnv)
-			if rerr != nil {
-				cfg.Log.Fail("spawn", taskLabel(p.Task), rerr)
-				return fail(i, fmt.Errorf("launching worker for %s via runtime adapter: %w", p.Task, rerr))
-			}
-			spawnLine = line
+		spawnLine, err := resolveSpawnLine(ctx, cfg, p, workerEnv)
+		if err != nil {
+			return fail(i, err)
 		}
 
 		if err := cfg.Client.PaneRun(ctx, paneID, spawnLine); err != nil {
@@ -588,6 +548,80 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 		states[i] = &workerState{plan: p, paneID: paneID, started: cfg.Now()}
 	}
 	return states, nil
+}
+
+// prepareWorktree creates one worker's git worktree via herdr and writes its
+// settings and brief into it. Split out of execute to keep the worktree/herdr
+// side effects independently testable from pane resolution and launch, the
+// same way foldIssueSources in cmd/supervise.go isolates one source's
+// fetch-and-fold step.
+func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Worktree, error) {
+	wt, err := cfg.Client.WorktreeCreate(ctx, &herdr.WorktreeSpec{
+		Cwd:    p.RepoRoot,
+		Branch: p.Branch,
+		Base:   cfg.Base,
+		Path:   p.Worktree,
+		Label:  p.Branch,
+	})
+	if err != nil {
+		return herdr.Worktree{}, fmt.Errorf("creating worktree for %s: %w", p.Task, err)
+	}
+	if err := WriteSettings(p.Worktree); err != nil {
+		return herdr.Worktree{}, fmt.Errorf("writing settings for %s: %w", p.Task, err)
+	}
+	if err := WriteBrief(p.Worktree, p.Brief); err != nil {
+		return herdr.Worktree{}, fmt.Errorf("writing brief for %s: %w", p.Task, err)
+	}
+	return wt, nil
+}
+
+// resolvePaneID picks the pane a worker launches in: a caller-supplied pane
+// wins, otherwise the pane herdr opened inside the new worktree — no separate
+// --panes needed. Neither present is a hard error, since execute has nowhere
+// left to run the worker.
+func resolvePaneID(p *WorkerPlan, wt herdr.Worktree) (string, error) {
+	if p.PaneID != "" {
+		return p.PaneID, nil
+	}
+	if wt.RootPaneID != "" {
+		return wt.RootPaneID, nil
+	}
+	return "", fmt.Errorf("worker %s has no pane and herdr returned no root pane for its worktree", p.Task)
+}
+
+// resolveSpawnLine builds the command line argus types into a worker's pane:
+// cd + start the agent with a prompt that points it at the brief file (no
+// second paste — the brief is on disk, not typed in), or — when a runtime
+// adapter is configured — the line argus-runtime-<name> produces for an
+// isolated environment instead. "" or "none" is today's unwrapped behavior.
+// Only the adapter path gets workerEnv via ARGUS_RUNTIME_ENV — cfg.ScrubEnv
+// stays host-shell-only (see docs/worker-runtime-protocol.md), since an
+// isolated environment never had those secrets to scrub in the first place.
+// Split out of execute so the adapter-selection branch, and its own error
+// path, is independently testable — mirroring foldIssueSources's split in
+// cmd/supervise.go.
+//
+// The launcher's binary is resolved to an absolute path (see
+// ResolveLauncherPath) before either launch path below consults it, so a
+// newly opened pane's not-yet-initialized shell PATH never enters into it.
+// Applied after the DefaultLauncher fallback so the common (no --launcher)
+// case is covered too.
+func resolveSpawnLine(ctx context.Context, cfg *Config, p *WorkerPlan, workerEnv []string) (string, error) {
+	launcher := cfg.Launcher
+	if launcher == "" {
+		launcher = DefaultLauncher
+	}
+	launcher = ResolveLauncherPath(launcher)
+
+	if cfg.WorkerRuntime == "" || cfg.WorkerRuntime == "none" {
+		return SpawnCommand(p.Worktree, launcher, cfg.ScrubEnv, workerEnv), nil
+	}
+	line, err := LaunchViaRuntime(ctx, cfg.WorkerRuntime, p.Worktree, launcher, workerEnv)
+	if err != nil {
+		cfg.Log.Fail("spawn", taskLabel(p.Task), err)
+		return "", fmt.Errorf("launching worker for %s via runtime adapter: %w", p.Task, err)
+	}
+	return line, nil
 }
 
 // watch polls every worker's status file until it reaches a terminal phase, its

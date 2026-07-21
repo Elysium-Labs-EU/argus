@@ -49,6 +49,34 @@ const twoPaneList = `{"result":{"panes":[
 {"pane_id":"1-3","cwd":"/repo-b","agent":"claude","agent_status":"idle"}
 ]}}`
 
+func TestTaskLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		task string
+		want string
+	}{
+		{"issue ref mid-string wins over the line", "fix #42: reduce CRAP", "#42"},
+		{"issue ref at start", "#7 tidy up logging", "#7"},
+		{"first of multiple issue refs", "see #1 and #2", "#1"},
+		{"hash with no trailing digits falls back to the line", "hash with no digits # end", "hash with no digits # end"},
+		{"trailing bare hash falls back to the line", "task #", "task #"},
+		{"digits stop at first non-digit", "#123abc rest", "#123"},
+		{"no hash, short line, unchanged", "no hash here", "no hash here"},
+		{"multi-line uses only the first line", "first line\nsecond line", "first line"},
+		{"line is trimmed after newline split", "  hello  \nworld", "hello"},
+		{"line over 60 chars is truncated to 60", strings.Repeat("a", 90), strings.Repeat("a", 60)},
+		{"truncation retrims trailing whitespace at the cut", strings.Repeat("a", 59) + "   more text after the boundary", strings.Repeat("a", 59)},
+		{"empty task", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := taskLabel(tc.task); got != tc.want {
+				t.Errorf("taskLabel(%q) = %q, want %q", tc.task, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 	plans := BuildPlan([]Worker{
 		{Task: "eos#42", Branch: "feat-x", RepoRoot: "/repo-a"},
@@ -129,6 +157,52 @@ func TestRunRefusesCollidingWorktrees(t *testing.T) {
 	}
 	if err := Run(context.Background(), cfg, ok, true); err != nil {
 		t.Fatalf("distinct branches from one repo root should pass, got %v", err)
+	}
+}
+
+func TestResolvePaneID(t *testing.T) {
+	cases := []struct {
+		name    string
+		plan    *WorkerPlan
+		wt      herdr.Worktree
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "caller-supplied pane wins",
+			plan: &WorkerPlan{Worker: Worker{Task: "t", PaneID: "1-2"}},
+			wt:   herdr.Worktree{RootPaneID: "w9:p1"},
+			want: "1-2",
+		},
+		{
+			name: "falls back to the worktree's root pane",
+			plan: &WorkerPlan{Worker: Worker{Task: "t"}},
+			wt:   herdr.Worktree{RootPaneID: "w9:p1"},
+			want: "w9:p1",
+		},
+		{
+			name:    "neither present is an error",
+			plan:    &WorkerPlan{Worker: Worker{Task: "t"}},
+			wt:      herdr.Worktree{},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolvePaneID(tc.plan, tc.wt)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("want error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("resolvePaneID() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
