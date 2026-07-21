@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -26,54 +28,11 @@ verdict (approve / request-changes / needs-human). It is the manual counterpart
 to supervise --review: the same scoped, one-shot review argus runs when its
 deterministic gate escalates, pointed at any worktree on demand.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if worktree == "" {
-				return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus review --worktree <path>"}
-			}
-			ctx := cmd.Context()
-			diff, err := supervisor.DiffFor(ctx, worktree, base)
-			if err != nil {
-				return err
-			}
-			if diff == "" {
-				return &ui.UserError{Err: fmt.Errorf("no diff between worktree and %s", base), Hint: "check --base"}
-			}
-
-			out := cmd.OutOrStdout()
-			_, _ = fmt.Fprintf(out, "%s reviewing %s vs %s...\n", ui.LabelInfo.Render("i"), worktree, base)
-
 			logger, closeLog := openRunLog(cmd, "review")
 			defer closeLog()
 
 			reviewer := supervisor.NewCLIReviewer(reviewModel).WithLog(logger)
-			var res supervisor.ReviewResult
-			err = ui.WithSpinner("claude reviewing...", func() error {
-				var rerr error
-				res, rerr = reviewer.Review(ctx, &supervisor.ReviewRequest{
-					Task:     task,
-					Worktree: worktree,
-					Reasons:  reasons,
-					Diff:     diff,
-				})
-				return rerr
-			})
-			if err != nil {
-				logger.Fail("review", task, err)
-				return err
-			}
-			logger.Action("review", task, res.Decision, res.Summary)
-
-			mark := ui.LabelWarning.Render("○")
-			switch res.Decision {
-			case "approve":
-				mark = ui.LabelSuccess.Render("✓")
-			case "request-changes":
-				mark = ui.LabelError.Render("✗")
-			}
-			_, _ = fmt.Fprintf(out, "\n%s %s — %s\n", mark, ui.TextBold.Render(res.Decision), res.Summary)
-			for _, f := range res.Findings {
-				_, _ = fmt.Fprintf(out, "  · %s\n", f)
-			}
-			return nil
+			return runReview(cmd, worktree, base, task, reasons, reviewer, logger)
 		},
 	}
 
@@ -86,3 +45,57 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 }
 
 var reviewCmd = newReviewCmd()
+
+// runReview is newReviewCmd's RunE body, pulled out so tests can drive it
+// directly with a fake supervisor.Reviewer instead of shelling out to claude.
+func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string, reviewer supervisor.Reviewer, logger *eventlog.Logger) error {
+	if worktree == "" {
+		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus review --worktree <path>"}
+	}
+	ctx := cmd.Context()
+	diff, err := supervisor.DiffFor(ctx, worktree, base)
+	if err != nil {
+		return err
+	}
+	if diff == "" {
+		return &ui.UserError{Err: fmt.Errorf("no diff between worktree and %s", base), Hint: "check --base"}
+	}
+
+	out := cmd.OutOrStdout()
+	_, _ = fmt.Fprintf(out, "%s reviewing %s vs %s...\n", ui.LabelInfo.Render("i"), worktree, base)
+
+	var res supervisor.ReviewResult
+	err = ui.WithSpinner("claude reviewing...", func() error {
+		var rerr error
+		res, rerr = reviewer.Review(ctx, &supervisor.ReviewRequest{
+			Task:     task,
+			Worktree: worktree,
+			Reasons:  reasons,
+			Diff:     diff,
+		})
+		return rerr
+	})
+	if err != nil {
+		logger.Fail("review", task, err)
+		return err
+	}
+	logger.Action("review", task, res.Decision, res.Summary)
+
+	renderReviewResult(out, res)
+	return nil
+}
+
+// renderReviewResult prints a reviewer's verdict with a decision-colored mark.
+func renderReviewResult(out io.Writer, res supervisor.ReviewResult) {
+	mark := ui.LabelWarning.Render("○")
+	switch res.Decision {
+	case "approve":
+		mark = ui.LabelSuccess.Render("✓")
+	case "request-changes":
+		mark = ui.LabelError.Render("✗")
+	}
+	_, _ = fmt.Fprintf(out, "\n%s %s — %s\n", mark, ui.TextBold.Render(res.Decision), res.Summary)
+	for _, f := range res.Findings {
+		_, _ = fmt.Fprintf(out, "  · %s\n", f)
+	}
+}
