@@ -114,6 +114,33 @@ func TestGateEscalatesWhenWorkerUnderReportsDiff(t *testing.T) {
 	}
 }
 
+func TestGateEscalatesWhenMeasuredDiffIsEmptyDespiteClaimedCompletion(t *testing.T) {
+	// Regression for issue #15: a worker (or a stale/fabricated status.json left
+	// behind by a launcher spawn that never really ran) reports a terminal phase
+	// with passing tests and a plausible-looking self-reported diff, but git shows
+	// zero files actually changed against base. This must never auto-approve.
+	wt := t.TempDir()
+	st := &workerState{
+		hasFile:       true,
+		measuredOK:    true,
+		measured:      protocol.DiffStat{Files: 0, Insertions: 0, Deletions: 0},
+		measuredFiles: nil,
+		plan:          &WorkerPlan{Worker: Worker{Task: "fabricated", Worktree: wt}},
+		status: protocol.Status{
+			Phase:    protocol.PhaseAwaitingReview,
+			DiffStat: protocol.DiffStat{Files: 1, Insertions: 3, Deletions: 3},
+			Tests:    []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
+		},
+	}
+	v := gateVerdict(st, nil)
+	if v.AutoApprove {
+		t.Fatal("gate must not auto-approve a terminal-phase worker whose measured diff touches zero files")
+	}
+	if !hasReasonContaining(v.Reasons, "zero files changed") {
+		t.Errorf("expected a zero-files-changed reason, got %v", v.Reasons)
+	}
+}
+
 func TestGateEscalatesWhenDiffUnmeasurable(t *testing.T) {
 	st := &workerState{
 		hasFile: true,

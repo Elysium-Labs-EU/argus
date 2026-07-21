@@ -60,7 +60,7 @@ func untrackedFiles(ctx context.Context, worktree string) ([]string, error) {
 		return nil, fmt.Errorf("listing untracked files: %w", err)
 	}
 	var files []string
-	for _, line := range strings.Split(out.String(), "\n") {
+	for line := range strings.SplitSeq(out.String(), "\n") {
 		f := strings.TrimSpace(line)
 		if f == "" || strings.HasPrefix(f, ".claude/argus/") || f == ".claude/settings.local.json" {
 			continue
@@ -84,6 +84,7 @@ func countLines(path string) int {
 	for sc.Scan() {
 		n++
 	}
+	_ = sc.Err() // best-effort magnitude for the gate; a scan error still keeps the count seen so far
 	return n
 }
 
@@ -93,7 +94,7 @@ func countLines(path string) int {
 func parseNumstat(out string) (protocol.DiffStat, []string, error) {
 	var stat protocol.DiffStat
 	files := []string{}
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
