@@ -105,3 +105,56 @@ func TestTokenForHost(t *testing.T) {
 		t.Errorf("unknown host should have no token, got %q", got)
 	}
 }
+
+func TestTokenForHostFallsBackToCredentialHelperWhenEnvUnset(t *testing.T) {
+	t.Setenv("CODEBERG_TOKEN", "")
+
+	orig := tokenFromHelper
+	defer func() { tokenFromHelper = orig }()
+
+	var gotHost string
+	tokenFromHelper = func(host string) string {
+		gotHost = host
+		return "helper-token"
+	}
+
+	if got := TokenForHost("codeberg.org"); got != "helper-token" {
+		t.Errorf("want fallback token from helper, got %q", got)
+	}
+	if gotHost != "codeberg.org" {
+		t.Errorf("helper called with host %q, want codeberg.org", gotHost)
+	}
+}
+
+func TestTokenForHostPrefersEnvOverCredentialHelper(t *testing.T) {
+	t.Setenv("CODEBERG_TOKEN", "env-token")
+
+	orig := tokenFromHelper
+	defer func() { tokenFromHelper = orig }()
+	tokenFromHelper = func(string) string {
+		t.Fatal("credential helper should not run when the env var is set")
+		return ""
+	}
+
+	if got := TokenForHost("codeberg.org"); got != "env-token" {
+		t.Errorf("want env token, got %q", got)
+	}
+}
+
+func TestParseCredentialPassword(t *testing.T) {
+	out := "protocol=https\nhost=codeberg.org\nusername=x\npassword=s3cr3t\n"
+	if got := parseCredentialPassword(out); got != "s3cr3t" {
+		t.Errorf("parseCredentialPassword: got %q", got)
+	}
+	if got := parseCredentialPassword("protocol=https\nhost=codeberg.org\n"); got != "" {
+		t.Errorf("parseCredentialPassword with no password line: got %q, want empty", got)
+	}
+}
+
+func TestCredentialHelperTokenNeverPromptsForUnknownHost(t *testing.T) {
+	// A host with no configured credential helper must return empty quickly,
+	// not hang waiting on a terminal prompt (GIT_TERMINAL_PROMPT=0 disables that).
+	if got := credentialHelperToken("argus-fix-issue-58-test.invalid"); got != "" {
+		t.Errorf("want empty token for a host with no configured credentials, got %q", got)
+	}
+}
