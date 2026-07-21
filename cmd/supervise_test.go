@@ -18,6 +18,35 @@ func fakeClient() herdr.Client {
 	})
 }
 
+func TestFoldIssueSourcesNoop(t *testing.T) {
+	in := &workerInput{tasks: []string{"existing"}, branches: []string{"existing-branch"}}
+	if err := foldIssueSources(context.Background(), in, nil, nil); err != nil {
+		t.Fatalf("foldIssueSources: %v", err)
+	}
+	if len(in.tasks) != 1 || len(in.branches) != 1 {
+		t.Errorf("no issue sources should leave tasks/branches untouched, got %v %v", in.tasks, in.branches)
+	}
+}
+
+func TestFoldIssueSourcesIssuesError(t *testing.T) {
+	// repo isn't a git checkout, so resolving the origin remote fails before any
+	// network call — exercises the --issues error path without a real forge.
+	in := &workerInput{repo: t.TempDir()}
+	if err := foldIssueSources(context.Background(), in, []int{1}, nil); err == nil {
+		t.Fatal("want error resolving forge for a non-git repo")
+	}
+}
+
+func TestFoldIssueSourcesJiraError(t *testing.T) {
+	for _, k := range []string{"JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"} {
+		t.Setenv(k, "")
+	}
+	in := &workerInput{repo: t.TempDir()}
+	if err := foldIssueSources(context.Background(), in, nil, []string{"PROJ-1"}); err == nil {
+		t.Fatal("want error building jira client without JIRA_* env vars")
+	}
+}
+
 func TestBuildWorkersDerivesRepoAndDefaults(t *testing.T) {
 	client := fakeClient()
 	workers, err := buildWorkers(context.Background(), client, &workerInput{

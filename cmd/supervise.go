@@ -268,33 +268,44 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 		}
 		in.repo = wd
 	}
-	// --issues turns issue numbers into worker briefs by fetching each issue's
-	// title and body from the repo's forge, so the operator never hand-writes a
-	// task string. Generated tasks/branches append to any given explicitly.
+	if err := foldIssueSources(ctx, in, issues, jiraIssues); err != nil {
+		return nil, err
+	}
+	return buildWorkers(ctx, client, in)
+}
+
+// foldIssueSources turns --issues and --jira-issues into worker briefs and
+// appends them to in.tasks/in.branches, so the operator never hand-writes a
+// task string for an issue that already has a title and body. Generated
+// branches only fill in.branches when it is still empty, so explicit
+// --branches always wins. Split out of spawnWorkers to keep each source's
+// fetch-and-fold step independently testable and readable.
+func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string) error {
+	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
 		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		in.tasks = append(in.tasks, fetched...)
 		if len(in.branches) == 0 {
 			in.branches = brs
 		}
 	}
-	// --jira-issues works the same way but reads from Jira Cloud instead of the
-	// repo's forge, since Jira is an issue tracker with no git-host concept to
-	// resolve from the origin remote.
+	// --jira-issues works the same way but reads from Jira Cloud instead, since
+	// Jira is an issue tracker with no git-host concept to resolve from the
+	// origin remote.
 	if len(jiraIssues) > 0 {
 		fetched, brs, err := jiraTasksFromIssues(ctx, jiraIssues)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		in.tasks = append(in.tasks, fetched...)
 		if len(in.branches) == 0 {
 			in.branches = brs
 		}
 	}
-	return buildWorkers(ctx, client, in)
+	return nil
 }
 
 // buildWorkers resolves the paired flag slices into concrete workers. In the
