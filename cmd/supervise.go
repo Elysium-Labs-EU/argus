@@ -563,7 +563,7 @@ func resolveForge(ctx context.Context, repoPath string) (f forge.Forge, owner, n
 	if token == "" {
 		return nil, "", "", &ui.UserError{
 			Err:  fmt.Errorf("no API token for %s (needed to fetch issues)", host),
-			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN)",
+			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN), or run `gh auth login` / `glab auth login`",
 		}
 	}
 	return forge.New(host, token, nil), owner, name, nil

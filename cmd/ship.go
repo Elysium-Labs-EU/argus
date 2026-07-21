@@ -110,7 +110,7 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	if token == "" {
 		return &ui.UserError{
 			Err:  fmt.Errorf("no API token for %s", host),
-			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN)",
+			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN), or run `gh auth login` / `glab auth login`",
 		}
 	}
 	return shipChange(cmd, forge.New(host, token, nil), a, target)
