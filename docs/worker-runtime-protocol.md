@@ -130,6 +130,39 @@ succeeding is not sufficient evidence that the mount is right.
   argus (on the host) push after gating the diff — that's a bigger
   control-flow change, only worth it if network scoping doesn't work out.
 
+## OAuth/subscription auth has no credential path into an isolated worker (yet)
+
+credproxy (`internal/credproxy`) only bridges `ANTHROPIC_API_KEY` auth: it
+mints a per-worker sentinel and swaps in the real key on the way out. An
+operator who authenticates the `claude` CLI via subscription/OAuth login
+instead of a raw API key has no key for credproxy to front, so `cfg.Broker`
+stays `nil` and no credential env reaches `ARGUS_RUNTIME_ENV` at all.
+
+For an unwrapped worker (`--worker-runtime none`, the default) that is not
+fatal — the worker runs on the host's own filesystem and reaches `~/.claude`
+directly, same as running `claude` by hand. For an isolated worker it *is*
+fatal: the whole point of a runtime adapter is that `~/.claude` does not exist
+in its mount table (see above), so there is no fallback credential source
+left. Before this was caught, that produced a worker that spawned
+successfully and then failed deep inside the container with a bare `claude`
+`Not logged in · Please run /login` — no indication from argus itself that
+anything was wrong.
+
+`argus supervise` now fails fast instead: passing `--worker-runtime` set to
+anything other than `none`/`""` with no `ANTHROPIC_API_KEY` set (and without
+`--no-cred-proxy` masking the same gap) is a startup error, not a silent
+runtime surprise. Today there are two ways around it:
+
+- Set `ANTHROPIC_API_KEY` so credproxy has a key to front.
+- Drop `--worker-runtime` (or pass `none`) and accept the unwrapped worker's
+  weaker isolation — it can still read `~/.ssh`, `~/.claude`, `~/.aws`.
+
+Bridging OAuth/subscription credentials into an isolated worker properly —
+either by extending credproxy to front session-token auth the same way it
+fronts API keys, or by having an adapter opt into bind-mounting a scoped,
+read-only credential file (trading away some of the isolation guarantee) — is
+not yet built.
+
 ## What argus core does *not* do
 
 - It does not know `docker` or `podman` flag syntax, image names, or network
