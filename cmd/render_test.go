@@ -9,6 +9,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 )
 
 func TestRenderStats(t *testing.T) {
@@ -52,6 +53,33 @@ func TestRenderRebaseOutcome(t *testing.T) {
 		renderRebaseOutcome(&buf, "feat-x", &protocol.Status{Phase: c.phase, BlockedReason: "x"})
 		if !strings.Contains(buf.String(), c.want) {
 			t.Errorf("phase %q: output %q missing %q", c.phase, buf.String(), c.want)
+		}
+	}
+}
+
+func TestRenderReviewResult(t *testing.T) {
+	cases := []struct {
+		decision string
+		want     string
+	}{
+		{"approve", "✓"},
+		{"request-changes", "✗"},
+		{"needs-human", "○"},
+		{"", "○"},
+	}
+	for _, c := range cases {
+		var buf bytes.Buffer
+		renderReviewResult(&buf, supervisor.ReviewResult{
+			Decision: c.decision,
+			Summary:  "a summary",
+			Findings: []string{"finding one"},
+		})
+		out := buf.String()
+		if !strings.Contains(out, c.want) {
+			t.Errorf("decision %q: output %q missing mark %q", c.decision, out, c.want)
+		}
+		if !strings.Contains(out, "a summary") || !strings.Contains(out, "finding one") {
+			t.Errorf("decision %q: output missing summary/findings:\n%s", c.decision, out)
 		}
 	}
 }
