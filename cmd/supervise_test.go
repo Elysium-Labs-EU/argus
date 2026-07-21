@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 )
 
 const paneListReply = `{"result":{"panes":[
@@ -185,6 +189,47 @@ func TestBuildWorkersRejectsUnsafeBranch(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("want error for a branch with shell metacharacters, got nil")
+	}
+}
+
+func TestRunSupervisionAttachWarnsAndSkipsCredProxy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // openRunLog writes under ~/.argus
+	t.Setenv("ANTHROPIC_API_KEY", "sk-should-not-be-used")
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runSupervision(cmd, fakeClient(), nil, &superviseOpts{
+		attach: true, base: "origin/main", review: true,
+	})
+	if err != nil {
+		t.Fatalf("runSupervision: %v", err)
+	}
+	if !strings.Contains(buf.String(), "--attach does not manage isolation") {
+		t.Errorf("want the attach-isolation warning in output, got %q", buf.String())
+	}
+}
+
+func TestRunSupervisionSpawnDryRunSkipsCredProxy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "sk-should-not-be-used")
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetContext(context.Background())
+
+	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: t.TempDir()}}
+	err := runSupervision(cmd, fakeClient(), workers, &superviseOpts{
+		dryRun: true, base: "origin/main",
+	})
+	if err != nil {
+		t.Fatalf("runSupervision: %v", err)
+	}
+	if strings.Contains(buf.String(), "--attach") {
+		t.Errorf("dry-run spawn should not print the attach warning, got %q", buf.String())
 	}
 }
 
