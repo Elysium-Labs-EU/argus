@@ -201,8 +201,18 @@ func (c Client) WorktreeCreate(ctx context.Context, spec *WorktreeSpec) (Worktre
 // WorktreeOpen opens an already-existing worktree in herdr and returns its root
 // pane, so a command like rebase can dispatch a worker into a worktree argus
 // created earlier (whose herdr workspace may since have been closed).
-func (c Client) WorktreeOpen(ctx context.Context, path string) (Worktree, error) {
-	out, err := c.run(ctx, "worktree", "open", "--path", path, "--no-focus", "--json")
+//
+// cwd must be the linked worktree's parent repo (see supervisor.RepoRoot),
+// not path itself: herdr's `worktree open` determines whether the calling
+// context is "inside a git work tree" from cwd, not from path or from the
+// invoking process's own working directory. Without it, a caller whose own
+// pane isn't itself rooted in a git repo (or that omits cwd altogether) gets
+// "not_git_worktree" even though path is a perfectly valid worktree — this
+// bit argus itself once, dispatching `argus rebase` from a pane rooted
+// outside any repo. WorktreeCreate sidesteps the same check by always
+// passing --cwd for the repo being worked on; this mirrors that.
+func (c Client) WorktreeOpen(ctx context.Context, cwd, path string) (Worktree, error) {
+	out, err := c.run(ctx, "worktree", "open", "--cwd", cwd, "--path", path, "--no-focus", "--json")
 	if err != nil {
 		return Worktree{}, err
 	}

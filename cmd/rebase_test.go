@@ -102,6 +102,60 @@ func TestRebaseDryRunNoConflict(t *testing.T) {
 	}
 }
 
+// TestRebaseDryRunForcedShowsRepoRoot exercises the --force dry-run path (no
+// conflict, but forced past it) that actually computes RepoRoot — the value
+// WorktreeOpen needs as --cwd so herdr doesn't reject the request with
+// "not_git_worktree" when the calling pane itself isn't repo-rooted. Dry-run
+// resolves and prints it (read-only git plumbing, no side effect) so a
+// broken worktree is caught here too, not just on the real dispatch.
+func TestRebaseDryRunForcedShowsRepoRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	git := func(dir string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare init: %v\n%s", err, out)
+	}
+	seed := t.TempDir()
+	git(seed, "init", "-q")
+	git(seed, "config", "user.email", "t@t")
+	git(seed, "config", "user.name", "t")
+	git(seed, "checkout", "-q", "-b", "main")
+	git(seed, "commit", "-q", "--allow-empty", "-m", "base")
+	git(seed, "remote", "add", "origin", remote)
+	git(seed, "push", "-q", "-u", "origin", "main")
+
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", remote, repo).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+	git(repo, "config", "user.email", "t@t")
+	git(repo, "config", "user.name", "t")
+	git(repo, "checkout", "-q", "-b", "feat-x", "origin/main")
+	git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+
+	cmd := newRebaseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--worktree", repo, "--base", "main", "--force", "--dry-run"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("rebase dry-run --force: %v", err)
+	}
+	if !strings.Contains(buf.String(), "repo:") {
+		t.Errorf("expected the plan to include a repo: line, got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), repo) {
+		t.Errorf("expected the resolved repo root (%s) in the plan, got:\n%s", repo, buf.String())
+	}
+}
+
 // TestBuildRebaseSpawnLineInjectsCredProxySentinel guards the small-consistency
 // fix at cmd/rebase.go: this path used to pass workerEnv: nil unconditionally,
 // so a rebase-dispatched worker never got the credproxy sentinel treatment
@@ -189,7 +243,7 @@ func TestDispatchRebaseWorkerWorktreeOpenError(t *testing.T) {
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("", errors.New("herdr: no such worktree"), nil)
 
-	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main"})
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main"})
 	if err == nil || !strings.Contains(err.Error(), "no such worktree") {
 		t.Fatalf("want the WorktreeOpen error propagated, got %v", err)
 	}
@@ -200,7 +254,7 @@ func TestDispatchRebaseWorkerEmptyPane(t *testing.T) {
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("", nil, nil) // no pane_id in the reply
 
-	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main"})
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main"})
 	if _, ok := errors.AsType[*ui.UserError](err); !ok {
 		t.Fatalf("want a *ui.UserError when herdr opens no pane, got %v", err)
 	}
@@ -211,7 +265,7 @@ func TestDispatchRebaseWorkerPaneRunError(t *testing.T) {
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("w1:p1", nil, errors.New("herdr: pane gone"))
 
-	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main", launcher: "claude"})
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main", launcher: "claude"})
 	if err == nil || !strings.Contains(err.Error(), "pane gone") {
 		t.Fatalf("want the PaneRun error propagated, got %v", err)
 	}
@@ -232,7 +286,7 @@ func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
 	client := fakeRebaseClient("w1:p1", nil, nil)
 	var buf bytes.Buffer
 
-	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "feat-x", &rebaseOpts{
+	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
 		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
 	})
 	if err != nil {
@@ -252,7 +306,7 @@ func TestDispatchRebaseWorkerNoStatus(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	err := dispatchRebaseWorker(ctx, logger, client, &bytes.Buffer{}, "feat-x", &rebaseOpts{
+	err := dispatchRebaseWorker(ctx, logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
 		worktree: t.TempDir(), base: "main", launcher: "claude", interval: 10 * time.Millisecond,
 	})
 	if err == nil || !strings.Contains(err.Error(), "no status before the deadline") {

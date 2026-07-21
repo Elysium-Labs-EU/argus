@@ -105,13 +105,21 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 		return nil
 	}
 
+	// Resolved even in a dry run (read-only git plumbing, no side effect) so a
+	// broken worktree — one herdr couldn't open a pane for even with this in
+	// hand — is caught by --dry-run too, not just by the real dispatch below.
+	repoRoot, err := supervisor.RepoRoot(ctx, opts.worktree)
+	if err != nil {
+		return fmt.Errorf("resolving repo root for %s: %w", opts.worktree, err)
+	}
+
 	if opts.dryRun {
-		_, _ = fmt.Fprintf(out, "%s rebase plan (dry run)\n  worktree: %s\n  branch:   %s -> origin/%s\n  conflicts: %v\n  action:   dispatch worker to rebase + force-push\n",
-			ui.LabelInfo.Render("i"), opts.worktree, branch, opts.base, conflicts)
+		_, _ = fmt.Fprintf(out, "%s rebase plan (dry run)\n  worktree: %s\n  repo:     %s\n  branch:   %s -> origin/%s\n  conflicts: %v\n  action:   dispatch worker to rebase + force-push\n",
+			ui.LabelInfo.Render("i"), opts.worktree, repoRoot, branch, opts.base, conflicts)
 		return nil
 	}
 
-	return dispatchRebaseWorker(ctx, logger, client, out, branch, opts)
+	return dispatchRebaseWorker(ctx, logger, client, out, repoRoot, branch, opts)
 }
 
 // detectRebaseConflict resolves the worktree's current branch, refreshes its view
@@ -132,9 +140,11 @@ func detectRebaseConflict(ctx context.Context, worktree, base string) (branch st
 }
 
 // dispatchRebaseWorker opens the worktree in herdr, hands its root pane the rebase
-// brief, spawns the worker, and waits for it to reach a terminal status.
-func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client herdr.Client, out io.Writer, branch string, opts *rebaseOpts) error {
-	wt, err := client.WorktreeOpen(ctx, opts.worktree)
+// brief, spawns the worker, and waits for it to reach a terminal status. repoRoot
+// is the worktree's main repo (see supervisor.RepoRoot) — herdr's WorktreeOpen
+// needs it as --cwd to confirm the calling context is inside a git work tree.
+func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client herdr.Client, out io.Writer, repoRoot, branch string, opts *rebaseOpts) error {
+	wt, err := client.WorktreeOpen(ctx, repoRoot, opts.worktree)
 	if err != nil {
 		return err
 	}
