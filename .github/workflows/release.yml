@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g., v1.0.0)"
+        required: false
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # go-crap-gate diffs against origin/main; needs full history
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install dev tools
+        run: make setup
+
+      - name: Run CI gate
+        run: make ci
+
+  build:
+    needs: ci
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            artifact: argus-linux-amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            artifact: argus-linux-arm64
+          - os: ubuntu-latest
+            goos: darwin
+            goarch: amd64
+            artifact: argus-darwin-amd64
+          - os: ubuntu-latest
+            goos: darwin
+            goarch: arm64
+            artifact: argus-darwin-arm64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Get version info
+        id: info
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "date=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        run: |
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+          go build \
+            -ldflags="-X 'github.com/Elysium-Labs-EU/argus/internal/buildinfo.Version=${{ steps.info.outputs.version }}' \
+              -X 'github.com/Elysium-Labs-EU/argus/internal/buildinfo.GitCommit=${{ steps.info.outputs.commit }}' \
+              -X 'github.com/Elysium-Labs-EU/argus/internal/buildinfo.BuildDate=${{ steps.info.outputs.date }}' \
+              -w -s" \
+            -o ${{ matrix.artifact }} .
+
+      - name: Verify binary
+        run: |
+          ls -lh ${{ matrix.artifact }}
+          file ${{ matrix.artifact }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -name "argus-*" -exec cp {} release/ \;
+          ls -lh release/
+
+      # No cosign/GPG signing yet — the org's other release pipelines (eos,
+      # theia) are checksum-only too, and this repo has no signing key
+      # provisioned. sha256sums.txt lets a downloader verify a binary wasn't
+      # corrupted or tampered with in transit; it does not prove who built it.
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum argus-* > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine if prerelease
+        id: prerelease
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [[ "$VERSION" =~ -[a-zA-Z] ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: |
+            release/argus-linux-amd64
+            release/argus-linux-arm64
+            release/argus-darwin-amd64
+            release/argus-darwin-arm64
+            release/sha256sums.txt
+          draft: false
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          generate_release_notes: true
+          body: |
+            ## argus ${{ steps.version.outputs.version }}
+
+            Deterministic supervisor for multi-agent AI coding workflows.
+
+            ### Manual Installation
+
+            Download the binary for your platform:
+            - **Linux AMD64**: `argus-linux-amd64`
+            - **Linux ARM64**: `argus-linux-arm64`
+            - **macOS (Apple Silicon)**: `argus-darwin-arm64`
+            - **macOS (Intel)**: `argus-darwin-amd64`
+
+            Then:
+            ```bash
+            chmod +x argus-<platform>
+            sudo mv argus-<platform> /usr/local/bin/argus
+            ```
+
+            ### Verify Download
+
+            Check `sha256sums.txt` against the binary you downloaded:
+            ```bash
+            sha256sum -c sha256sums.txt --ignore-missing
+            ```
+
+            This confirms the download wasn't corrupted or tampered with in transit — it is not a cryptographic signature over who built it. Binary signing is planned once a signing key is provisioned.
+
+            See the [README](https://github.com/Elysium-Labs-EU/argus/blob/main/README.md) for full documentation.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
