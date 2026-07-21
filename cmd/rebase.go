@@ -152,6 +152,12 @@ func buildRebaseSpawnLine(ctx context.Context, logger *eventlog.Logger, worktree
 		}
 	}
 
+	// See supervisor.ResolveLauncherPath: a freshly opened pane's shell may not
+	// have finished initializing its own PATH yet, so resolve the launcher
+	// binary to an absolute path here (argus's own PATH is already ready)
+	// rather than risk it racing against the new shell's startup.
+	launcher = supervisor.ResolveLauncherPath(launcher)
+
 	spawnLine = supervisor.SpawnCommand(worktree, launcher, forge.StandardTokenVars(), workerEnv)
 	if workerRuntime != "" && workerRuntime != "none" {
 		line, rerr := supervisor.LaunchViaRuntime(ctx, workerRuntime, worktree, launcher, workerEnv)

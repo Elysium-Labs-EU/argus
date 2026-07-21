@@ -149,6 +149,35 @@ const DefaultLauncher = "claude --permission-mode auto"
 // a real agent would submit that at the first newline.
 const initialPrompt = "Read .claude/argus/brief.md and follow it exactly; it is your task brief."
 
+// ResolveLauncherPath rewrites launcher's first (whitespace-separated) token
+// — the binary name — to its absolute path via a PATH lookup on argus's own
+// process, leaving the rest of the command (flags, args) untouched. It falls
+// back to returning launcher unchanged when that lookup fails.
+//
+// A freshly opened worker pane's shell may not have finished initializing its
+// own PATH (slow rc-file startup: nvm, fnm, plugin managers, prompt segments
+// that shell out, ...) by the moment argus types the launch command into it —
+// PaneRun runs right after the pane opens, with no readiness wait. If the
+// launcher binary transiently isn't found via the new shell's own PATH, a
+// shell with spelling-correction enabled (oh-my-zsh's default) can offer a
+// correction and then block forever on an unanswered interactive prompt,
+// rather than failing loudly. argus's own PATH is already fully initialized
+// by the time this runs, so resolving the binary here and splicing in the
+// absolute path sidesteps that race for the one PATH-dependent token in the
+// launch line.
+func ResolveLauncherPath(launcher string) string {
+	fields := strings.Fields(launcher)
+	if len(fields) == 0 {
+		return launcher
+	}
+	resolved, err := exec.LookPath(fields[0])
+	if err != nil {
+		return launcher
+	}
+	rest := strings.TrimPrefix(strings.TrimLeft(launcher, " \t"), fields[0])
+	return resolved + rest
+}
+
 // SpawnCommand is the shell line argus runs in a worker's pane: cd into the
 // worktree, then start the launcher with the initial prompt as its argument. The
 // worktree path is single-quoted because it is data (a path that may contain
@@ -524,14 +553,25 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 			workerEnv = cfg.Broker.WorkerEnv(taskLabel(p.Task), p.Branch)
 		}
 
+		// Resolve the launcher's binary to an absolute path (see
+		// ResolveLauncherPath) before either launch path below consults it, so
+		// a newly opened pane's not-yet-initialized shell PATH never enters
+		// into it. Applied after the DefaultLauncher fallback so the common
+		// (no --launcher) case is covered too.
+		launcher := cfg.Launcher
+		if launcher == "" {
+			launcher = DefaultLauncher
+		}
+		launcher = ResolveLauncherPath(launcher)
+
 		// A configured runtime adapter isolates the worker (container, namespace,
 		// ...); "" or "none" is today's unwrapped behavior. Only the adapter path
 		// gets workerEnv via ARGUS_RUNTIME_ENV — cfg.ScrubEnv stays host-shell-only
 		// (see docs/worker-runtime-protocol.md), since an isolated environment
 		// never had those secrets to scrub in the first place.
-		spawnLine := SpawnCommand(p.Worktree, cfg.Launcher, cfg.ScrubEnv, workerEnv)
+		spawnLine := SpawnCommand(p.Worktree, launcher, cfg.ScrubEnv, workerEnv)
 		if cfg.WorkerRuntime != "" && cfg.WorkerRuntime != "none" {
-			line, rerr := LaunchViaRuntime(ctx, cfg.WorkerRuntime, p.Worktree, cfg.Launcher, workerEnv)
+			line, rerr := LaunchViaRuntime(ctx, cfg.WorkerRuntime, p.Worktree, launcher, workerEnv)
 			if rerr != nil {
 				cfg.Log.Fail("spawn", taskLabel(p.Task), rerr)
 				return fail(i, fmt.Errorf("launching worker for %s via runtime adapter: %w", p.Task, rerr))

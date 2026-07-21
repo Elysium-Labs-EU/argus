@@ -282,6 +282,35 @@ func TestSpawnCommandCombinesScrubAndWorkerEnv(t *testing.T) {
 	}
 }
 
+func TestResolveLauncherPathSubstitutesAbsolutePath(t *testing.T) {
+	// "ls" is on PATH in any test environment; assert the binary token is
+	// replaced with its absolute path while trailing args are preserved
+	// byte-for-byte.
+	resolved, err := exec.LookPath("ls")
+	if err != nil {
+		t.Skip("ls not found on PATH in this test environment")
+	}
+
+	got := ResolveLauncherPath("ls -la /tmp")
+	want := resolved + " -la /tmp"
+	if got != want {
+		t.Errorf("ResolveLauncherPath(%q) = %q, want %q", "ls -la /tmp", got, want)
+	}
+}
+
+func TestResolveLauncherPathUnchangedWhenNotFound(t *testing.T) {
+	launcher := "definitely-not-a-real-binary-argus-test --permission-mode auto"
+	if got := ResolveLauncherPath(launcher); got != launcher {
+		t.Errorf("ResolveLauncherPath(%q) = %q, want unchanged", launcher, got)
+	}
+}
+
+func TestResolveLauncherPathEmptyUnchanged(t *testing.T) {
+	if got := ResolveLauncherPath(""); got != "" {
+		t.Errorf("ResolveLauncherPath(\"\") = %q, want empty", got)
+	}
+}
+
 func hasReasonContaining(reasons []string, sub string) bool {
 	for _, r := range reasons {
 		if strings.Contains(r, sub) {
