@@ -116,6 +116,33 @@ func TestFlattenADFSkipsUnknownNodeType(t *testing.T) {
 	}
 }
 
+func TestFlattenADFCodeBlock(t *testing.T) {
+	raw := `{
+		"type": "doc",
+		"content": [
+			{"type": "paragraph", "content": [{"type": "text", "text": "Repro:"}]},
+			{"type": "codeBlock", "attrs": {"language": "go"}, "content": [
+				{"type": "text", "text": "func main() {\n\tpanic(\"boom\")\n}"}
+			]},
+			{"type": "paragraph", "content": [{"type": "text", "text": "after"}]}
+		]
+	}`
+	var doc adfNode
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+
+	got := flattenADF(doc)
+	want := "Repro:\n" +
+		"```\n" +
+		"func main() {\n\tpanic(\"boom\")\n}\n" +
+		"```\n" +
+		"after"
+	if got != want {
+		t.Errorf("flattenADF mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
 func TestFlattenADFHardBreak(t *testing.T) {
 	raw := `{
 		"type": "doc",
