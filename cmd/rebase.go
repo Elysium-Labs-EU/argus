@@ -39,71 +39,16 @@ conflict, and dispatches the worktree's own worker to rebase, resolve, re-verify
 and force-push. argus does the deterministic parts (detect, dispatch, wait); the
 conflict resolution itself needs the worker.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if worktree == "" {
-				return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus rebase --worktree <path>"}
-			}
-			ctx := cmd.Context()
-			out := cmd.OutOrStdout()
-
-			branch, err := supervisor.CurrentBranch(ctx, worktree)
-			if err != nil {
-				return err
-			}
-			if ferr := supervisor.FetchBase(ctx, worktree, base); ferr != nil {
-				return ferr
-			}
-			conflicts, err := supervisor.ConflictsWith(ctx, worktree, base)
-			if err != nil {
-				return err
-			}
-
-			logger, closeLog := openRunLog(cmd, "rebase")
-			defer closeLog()
-			logger.Action("conflict_check", branch, fmt.Sprintf("conflicts=%v", conflicts), base)
-
-			if !conflicts && !force {
-				_, _ = fmt.Fprintf(out, "%s %s has no conflict with origin/%s — nothing to rebase (use --force to dispatch anyway)\n",
-					ui.LabelSuccess.Render("✓"), branch, base)
-				return nil
-			}
-
-			if dryRun {
-				_, _ = fmt.Fprintf(out, "%s rebase plan (dry run)\n  worktree: %s\n  branch:   %s -> origin/%s\n  conflicts: %v\n  action:   dispatch worker to rebase + force-push\n",
-					ui.LabelInfo.Render("i"), worktree, branch, base, conflicts)
-				return nil
-			}
-
-			client := herdr.New()
-			wt, err := client.WorktreeOpen(ctx, worktree)
-			if err != nil {
-				return err
-			}
-			if wt.RootPaneID == "" {
-				return &ui.UserError{Err: fmt.Errorf("herdr opened no pane for %s", worktree)}
-			}
-			if werr := supervisor.WriteBrief(worktree, supervisor.RebaseBrief(branch, base)); werr != nil {
-				return werr
-			}
-
-			spawnLine, cleanup, err := buildRebaseSpawnLine(ctx, logger, worktree, branch, launcher, workerRuntime, noCredProxy)
-			defer cleanup()
-			if err != nil {
-				return err
-			}
-
-			if err := client.PaneRun(ctx, wt.RootPaneID, spawnLine); err != nil {
-				return err
-			}
-
-			_, _ = fmt.Fprintf(out, "%s dispatched rebase worker in pane %s; waiting...\n", ui.LabelInfo.Render("i"), wt.RootPaneID)
-			status, seen := supervisor.WaitForStatus(ctx, worktree, interval)
-			if !seen {
-				logger.Action("rebase", branch, "no-status", "")
-				return fmt.Errorf("worker wrote no status before the deadline")
-			}
-			logger.Action("rebase", branch, string(status.Phase), status.BlockedReason)
-			renderRebaseOutcome(out, branch, &status)
-			return nil
+			return runRebase(cmd, herdr.New(), &rebaseOpts{
+				worktree:      worktree,
+				base:          base,
+				launcher:      launcher,
+				workerRuntime: workerRuntime,
+				interval:      interval,
+				force:         force,
+				dryRun:        dryRun,
+				noCredProxy:   noCredProxy,
+			})
 		},
 	}
 
@@ -119,6 +64,107 @@ conflict resolution itself needs the worker.`,
 }
 
 var rebaseCmd = newRebaseCmd()
+
+// rebaseOpts carries newRebaseCmd's flag values into runRebase. It exists so the
+// constructor stays flag-registration boilerplate and the actual RunE logic lives
+// in a top-level function go-crap can score (and tests can call) on its own,
+// instead of an inline closure whose complexity gets charged to the constructor.
+type rebaseOpts struct {
+	worktree      string
+	base          string
+	launcher      string
+	workerRuntime string
+	interval      time.Duration
+	force         bool
+	dryRun        bool
+	noCredProxy   bool
+}
+
+// runRebase is newRebaseCmd's RunE body. It detects whether the worktree's branch
+// conflicts with its base, then either reports the plan (--dry-run / no conflict)
+// or dispatches the worktree's own worker to resolve it.
+func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error {
+	if opts.worktree == "" {
+		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus rebase --worktree <path>"}
+	}
+	ctx := cmd.Context()
+	out := cmd.OutOrStdout()
+
+	branch, conflicts, err := detectRebaseConflict(ctx, opts.worktree, opts.base)
+	if err != nil {
+		return err
+	}
+
+	logger, closeLog := openRunLog(cmd, "rebase")
+	defer closeLog()
+	logger.Action("conflict_check", branch, fmt.Sprintf("conflicts=%v", conflicts), opts.base)
+
+	if !conflicts && !opts.force {
+		_, _ = fmt.Fprintf(out, "%s %s has no conflict with origin/%s — nothing to rebase (use --force to dispatch anyway)\n",
+			ui.LabelSuccess.Render("✓"), branch, opts.base)
+		return nil
+	}
+
+	if opts.dryRun {
+		_, _ = fmt.Fprintf(out, "%s rebase plan (dry run)\n  worktree: %s\n  branch:   %s -> origin/%s\n  conflicts: %v\n  action:   dispatch worker to rebase + force-push\n",
+			ui.LabelInfo.Render("i"), opts.worktree, branch, opts.base, conflicts)
+		return nil
+	}
+
+	return dispatchRebaseWorker(ctx, logger, client, out, branch, opts)
+}
+
+// detectRebaseConflict resolves the worktree's current branch, refreshes its view
+// of origin/base, and reports whether rebasing onto it would conflict.
+func detectRebaseConflict(ctx context.Context, worktree, base string) (branch string, conflicts bool, err error) {
+	branch, err = supervisor.CurrentBranch(ctx, worktree)
+	if err != nil {
+		return "", false, err
+	}
+	if ferr := supervisor.FetchBase(ctx, worktree, base); ferr != nil {
+		return "", false, ferr
+	}
+	conflicts, err = supervisor.ConflictsWith(ctx, worktree, base)
+	if err != nil {
+		return "", false, err
+	}
+	return branch, conflicts, nil
+}
+
+// dispatchRebaseWorker opens the worktree in herdr, hands its root pane the rebase
+// brief, spawns the worker, and waits for it to reach a terminal status.
+func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client herdr.Client, out io.Writer, branch string, opts *rebaseOpts) error {
+	wt, err := client.WorktreeOpen(ctx, opts.worktree)
+	if err != nil {
+		return err
+	}
+	if wt.RootPaneID == "" {
+		return &ui.UserError{Err: fmt.Errorf("herdr opened no pane for %s", opts.worktree)}
+	}
+	if werr := supervisor.WriteBrief(opts.worktree, supervisor.RebaseBrief(branch, opts.base)); werr != nil {
+		return werr
+	}
+
+	spawnLine, cleanup, err := buildRebaseSpawnLine(ctx, logger, opts.worktree, branch, opts.launcher, opts.workerRuntime, opts.noCredProxy)
+	defer cleanup()
+	if err != nil {
+		return err
+	}
+
+	if err := client.PaneRun(ctx, wt.RootPaneID, spawnLine); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintf(out, "%s dispatched rebase worker in pane %s; waiting...\n", ui.LabelInfo.Render("i"), wt.RootPaneID)
+	status, seen := supervisor.WaitForStatus(ctx, opts.worktree, opts.interval)
+	if !seen {
+		logger.Action("rebase", branch, "no-status", "")
+		return fmt.Errorf("worker wrote no status before the deadline")
+	}
+	logger.Action("rebase", branch, string(status.Phase), status.BlockedReason)
+	renderRebaseOutcome(out, branch, &status)
+	return nil
+}
 
 // buildRebaseSpawnLine resolves the shell command line argus types into a
 // rebase worker's pane. It fronts the worker's API traffic with the same
