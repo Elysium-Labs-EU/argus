@@ -37,8 +37,7 @@ nilcheck: ## Static nil-pointer safety analysis
 	nilaway ./...
 
 sg: ## Scan codebase with ast-grep rules (skipped until rules/ ported)
-	@command -v ast-grep >/dev/null 2>&1 || { echo "ast-grep not found. Install: brew install ast-grep"; exit 1; }
-	@if [ -d rules ]; then ast-grep scan; else echo "no rules/ dir yet, skipping"; fi
+	@if [ -d rules ]; then command -v ast-grep >/dev/null 2>&1 || { echo "ast-grep not found. Install: brew install ast-grep"; exit 1; }; ast-grep scan; else echo "no rules/ dir yet, skipping"; fi
 
 gitnexus: ## Index this repo with GitNexus for AI-assisted code search (no install needed, runs via npx)
 	npx gitnexus analyze
