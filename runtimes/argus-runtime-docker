@@ -12,9 +12,19 @@
 #
 # Optional operator config (not part of the core contract, this adapter's own
 # knobs):
-#   ARGUS_RUNTIME_DOCKER_IMAGE    image to run (default: argus-worker:latest);
-#                                 must have `claude` and `git` on PATH.
-#   ARGUS_RUNTIME_DOCKER_NETWORK  network to attach (default: argus-worker-net).
+#   ARGUS_RUNTIME_DOCKER_IMAGE     image to run (default: argus-worker:latest);
+#                                  must have `claude` and `git` on PATH.
+#   ARGUS_RUNTIME_DOCKER_NETWORK   network to attach (default: argus-worker-net).
+#   ARGUS_RUNTIME_DOCKER_PLATFORM  --platform value for `docker run` (default:
+#                                  linux/<host arch, amd64|arm64>). An image
+#                                  built with an explicit platform pin (e.g.
+#                                  `FROM --platform=linux/arm64 ...`) must be
+#                                  run with the same --platform, or `docker
+#                                  run` fails with a misleading "pull access
+#                                  denied" error instead of an arch mismatch
+#                                  error — even though `docker images` shows
+#                                  the image present locally. Confirmed against
+#                                  real Docker/OrbStack.
 #
 # Smoke-tested: `docker network create argus-worker-net` plus a plain `docker
 # run` on that network gives filesystem isolation (confirmed: ~/.ssh,
@@ -45,6 +55,15 @@ command -v jq >/dev/null 2>&1 || {
 
 image="${ARGUS_RUNTIME_DOCKER_IMAGE:-argus-worker:latest}"
 network="${ARGUS_RUNTIME_DOCKER_NETWORK:-argus-worker-net}"
+
+platform="${ARGUS_RUNTIME_DOCKER_PLATFORM:-}"
+if [[ -z "$platform" ]]; then
+  case "$(uname -m)" in
+    x86_64) platform="linux/amd64" ;;
+    aarch64 | arm64) platform="linux/arm64" ;;
+    *) platform="linux/$(uname -m)" ;;
+  esac
+fi
 
 # A worktree's .git is a text file ("gitdir: <path>"), not a directory — it
 # points at the parent repo's real .git dir by absolute host path. Bind-
@@ -83,7 +102,7 @@ done < <(printf '%s' "$runtime_env" | jq -r '
 ')
 
 {
-  printf 'docker run --rm -i --add-host host.docker.internal:host-gateway'
+  printf 'docker run --rm -i --add-host host.docker.internal:host-gateway --platform %q' "$platform"
   for m in "${mount_flags[@]}"; do printf ' %q' "$m"; done
   printf ' -w /work --network %q' "$network"
   for e in "${env_flags[@]}"; do printf ' %q' "$e"; done

@@ -146,10 +146,17 @@ succeeding is not sufficient evidence that the mount is right.
 - `runtimes/argus-runtime-none` — the trivial pass-through adapter (also the
   built-in default behavior when no `--worker-runtime` is given).
 - `runtimes/argus-runtime-docker` — wraps the inner command in `docker run
-  --rm -v '<worktree>:/work' -w /work --network argus-worker-net -e ...
-  <image> <cmd>`, targets any Docker-compatible engine (OrbStack, Docker
-  Desktop), and rewrites the credproxy base URL to `host.docker.internal`.
-  Smoke-tested against real Docker: the filesystem isolation claim holds
+  --rm --platform linux/<arch> -v '<worktree>:/work' -w /work --network
+  argus-worker-net -e ... <image> <cmd>`, targets any Docker-compatible engine
+  (OrbStack, Docker Desktop), and rewrites the credproxy base URL to
+  `host.docker.internal`. `--platform` defaults to the host arch
+  (`ARGUS_RUNTIME_DOCKER_PLATFORM` overrides it) so a worker image built with
+  an explicit platform pin (e.g. `FROM --platform=linux/arm64 ...`, needed to
+  avoid silently resolving to the wrong arch on first build) still runs
+  correctly — without a matching `--platform` here, `docker run` fails with a
+  misleading "pull access denied" error even though the image is present
+  locally. Smoke-tested against real Docker: the filesystem isolation claim
+  holds
   (`~/.ssh`, `~/.claude`, `~/.aws` do not exist inside the container) — but a
   plain `docker network create argus-worker-net` does not by itself restrict
   egress, so outbound traffic to arbitrary hosts still succeeds today. The
