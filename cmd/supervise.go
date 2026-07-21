@@ -12,6 +12,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/credproxy"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/jira"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
@@ -34,6 +35,7 @@ func newSuperviseCmd() *cobra.Command {
 		interval      time.Duration
 		timeout       time.Duration
 		issues        []int
+		jiraIssues    []string
 		dryRun        bool
 		noCredProxy   bool
 		attach        bool
@@ -85,7 +87,7 @@ each pane's directory in --panes mode).`,
 			} else {
 				workers, err = spawnWorkers(cmd.Context(), client, &workerInput{
 					panes: panes, branches: branches, tasks: tasks, repo: repo,
-				}, issues)
+				}, issues, jiraIssues)
 			}
 			if err != nil {
 				return err
@@ -167,6 +169,7 @@ each pane's directory in --panes mode).`,
 	}
 
 	cmd.Flags().IntSliceVar(&issues, "issues", nil, "issue numbers to fetch from the repo's forge and turn into worker briefs (branch defaults to fix-issue-<n>)")
+	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN")
 	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated); drives worker count in the default mode")
 	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>)")
 	cmd.Flags().StringSliceVar(&panes, "panes", nil, "reuse these existing herdr panes instead of the worktree's own pane")
@@ -248,9 +251,10 @@ type workerInput struct {
 
 // spawnWorkers resolves the spawn-mode inputs into workers: it requires at least
 // one worker source, defaults --repo to the working directory, folds any --issues
-// into tasks/branches by fetching them from the forge, then pairs the slices. It
-// is the non-attach half of supervise, kept out of RunE so each mode reads flat.
-func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int) ([]supervisor.Worker, error) {
+// and --jira-issues into tasks/branches by fetching them from the forge or Jira,
+// then pairs the slices. It is the non-attach half of supervise, kept out of RunE
+// so each mode reads flat.
+func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string) ([]supervisor.Worker, error) {
 	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
@@ -269,6 +273,19 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 	// task string. Generated tasks/branches append to any given explicitly.
 	if len(issues) > 0 {
 		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues)
+		if err != nil {
+			return nil, err
+		}
+		in.tasks = append(in.tasks, fetched...)
+		if len(in.branches) == 0 {
+			in.branches = brs
+		}
+	}
+	// --jira-issues works the same way but reads from Jira Cloud instead of the
+	// repo's forge, since Jira is an issue tracker with no git-host concept to
+	// resolve from the origin remote.
+	if len(jiraIssues) > 0 {
+		fetched, brs, err := jiraTasksFromIssues(ctx, jiraIssues)
 		if err != nil {
 			return nil, err
 		}
@@ -455,6 +472,43 @@ func issuesToTasks(ctx context.Context, f forge.Forge, owner, name string, issue
 			"Fix %s/%s issue #%d: %s\n\n%s\n\nAdd a focused test and keep make ci green. Follow the repo STYLE.md. Do NOT git commit or push; argus ships.",
 			owner, name, n, iss.Title, iss.Body))
 		branches = append(branches, fmt.Sprintf("fix-issue-%d", n))
+	}
+	return tasks, branches, nil
+}
+
+// jiraIssueFetcher is the subset of *jira.Client that jiraIssuesToTasks needs,
+// so it is testable without a network.
+type jiraIssueFetcher interface {
+	FetchIssue(ctx context.Context, key string) (forge.Issue, error)
+}
+
+// jiraTasksFromIssues builds a Jira client from JIRA_BASE_URL, JIRA_EMAIL, and
+// JIRA_API_TOKEN and fetches each key. Unlike tasksFromIssues this does not go
+// through internal/forge or the origin remote: Jira is an issue tracker, not a
+// git host, so there is no owner/repo or PR concept to resolve.
+func jiraTasksFromIssues(ctx context.Context, keys []string) (tasks, branches []string, err error) {
+	c, err := jira.NewFromEnv(nil)
+	if err != nil {
+		return nil, nil, &ui.UserError{
+			Err:  err,
+			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN to fetch --jira-issues",
+		}
+	}
+	return jiraIssuesToTasks(ctx, c, keys)
+}
+
+// jiraIssuesToTasks renders each Jira issue into a worker brief and a default
+// branch name, mirroring issuesToTasks for the git-forge issue pipeline.
+func jiraIssuesToTasks(ctx context.Context, c jiraIssueFetcher, keys []string) (tasks, branches []string, err error) {
+	for _, key := range keys {
+		iss, ferr := c.FetchIssue(ctx, key)
+		if ferr != nil {
+			return nil, nil, fmt.Errorf("fetching jira issue %s: %w", key, ferr)
+		}
+		tasks = append(tasks, fmt.Sprintf(
+			"Fix Jira issue %s: %s\n\n%s\n\nAdd a focused test and keep make ci green. Follow the repo STYLE.md. Do NOT git commit or push; argus ships.",
+			key, iss.Title, iss.Body))
+		branches = append(branches, fmt.Sprintf("fix-%s", strings.ToLower(key)))
 	}
 	return tasks, branches, nil
 }

@@ -48,6 +48,36 @@ func TestIssuesToTasks(t *testing.T) {
 	}
 }
 
+// fakeJira is a jiraIssueFetcher stub for tests: it returns canned issues keyed
+// by Jira key instead of a numeric forge issue number.
+type fakeJira struct {
+	issues map[string]forge.Issue
+}
+
+func (f *fakeJira) FetchIssue(_ context.Context, key string) (forge.Issue, error) {
+	return f.issues[key], nil
+}
+
+func TestJiraIssuesToTasks(t *testing.T) {
+	f := &fakeJira{issues: map[string]forge.Issue{
+		"PROJ-142": {Title: "daemon down warning", Body: "warn when down"},
+		"PROJ-145": {Title: "log backoff", Body: "back off on EACCES"},
+	}}
+	tasks, branches, err := jiraIssuesToTasks(context.Background(), f, []string{"PROJ-142", "PROJ-145"})
+	if err != nil {
+		t.Fatalf("jiraIssuesToTasks: %v", err)
+	}
+	if len(tasks) != 2 || len(branches) != 2 {
+		t.Fatalf("want 2 tasks/branches, got %d/%d", len(tasks), len(branches))
+	}
+	if !strings.Contains(tasks[0], "PROJ-142") || !strings.Contains(tasks[0], "daemon down warning") || !strings.Contains(tasks[0], "warn when down") {
+		t.Errorf("task 0 missing issue content: %q", tasks[0])
+	}
+	if branches[0] != "fix-proj-142" || branches[1] != "fix-proj-145" {
+		t.Errorf("branches: %v", branches)
+	}
+}
+
 func TestBuildPRBodyReport(t *testing.T) {
 	// A git worktree with a real diff plus argus's status and verdict files.
 	wt := t.TempDir()

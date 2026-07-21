@@ -31,6 +31,7 @@ The design follows Adam Jacob's idea of reducing agent token spend by moving the
 * [herdr](https://github.com/ogulcancelik/herdr) on PATH. argus talks to it only through its CLI.
 * The `claude` CLI on PATH, for `argus review` and `supervise --review`.
 * A forge token for the host the worktree points at (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, `FORGE_TOKEN` for GitLab or any self-hosted Gitea/Forgejo, ...), for `argus ship`.
+* `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`, only for `supervise --jira-issues`.
 
 ## Install
 
@@ -82,6 +83,8 @@ argus ship --worktree /path/to/project-feat-retry --issue 42
 | `argus supervise` | Discover or open panes, spawn workers in worktrees, gate their diffs, and watch each through to review |
 | `argus supervise --review` | On a gate escalation, run a headless `claude -p` review instead of only surfacing the decision |
 | `argus supervise --dry-run` | Print the plan and exit without creating worktrees or spawning workers |
+| `argus supervise --issues <n,...>` | Fetch issue numbers from the repo's forge (GitHub/GitLab/Codeberg/Gitea) and turn each into a worker brief |
+| `argus supervise --jira-issues <KEY,...>` | Fetch Jira Cloud issue keys (e.g. `PROJ-123`) and turn each into a worker brief |
 | `argus review --worktree <path>` | Run a one-shot `claude -p` review of a worktree's diff against a base ref |
 | `argus ship --worktree <path>` | Commit, push, and open a pull request (forge auto-detected), refused without an approving verdict unless `--force` |
 | `argus rebase --worktree <path>` | Dispatch the worktree's own worker to resolve a post-merge conflict and force-push |
