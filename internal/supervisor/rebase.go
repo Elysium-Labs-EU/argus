@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -56,12 +57,52 @@ supervisor can make.
 %s`, branch, base, base, base, protocol.WriterBrief)
 }
 
-// WaitForStatus polls a worktree's status file until it reaches a terminal phase
-// or ctx is canceled, returning the last status read and whether a file was seen.
-// It is the single-worker analog of the supervise watch loop, for commands like
-// rebase that dispatch one worker.
-func WaitForStatus(ctx context.Context, worktree string, interval time.Duration) (protocol.Status, bool) {
-	st := &workerState{plan: &WorkerPlan{Worker: Worker{Worktree: worktree}}}
-	pollStatus(ctx, interval, 0, nil, st)
-	return st.status, st.hasFile
+// InvalidateStatus removes a worktree's status and verdict files, if present,
+// before a rebase worker is dispatched into it. Without this, a worker
+// re-dispatched into a worktree that already carries a terminal status.json
+// from an earlier, unrelated task (the normal supervise flow's own
+// awaiting_review, written before this rebase was ever requested) leaves that
+// leftover file for WaitForStatus's poller to read — and since the poller's
+// first tick is immediate, it can report success before the newly spawned
+// worker has done anything at all (argus issue #50). A missing file is not an
+// error.
+func InvalidateStatus(worktree string) error {
+	for _, path := range []string{protocol.StatusPath(worktree), protocol.VerdictPath(worktree)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("removing %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// WaitForStatus polls a worktree's status file until it reports a phase written
+// at or after since, reaches a terminal phase, or ctx is canceled, returning the
+// last such status read and whether one was seen. A status.json whose
+// updated_at is at or before since is a stale leftover — from before this
+// dispatch, or from a race with InvalidateStatus — and is treated the same as
+// no file at all, so a caller can never mistake it for this dispatch's outcome
+// (argus issue #50). since should be no later than the moment the worker was
+// dispatched. It is the single-worker analog of the supervise watch loop, for
+// commands like rebase that dispatch one worker.
+func WaitForStatus(ctx context.Context, worktree string, interval time.Duration, since time.Time) (protocol.Status, bool) {
+	path := protocol.StatusPath(worktree)
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	var last protocol.Status
+	var hasFile bool
+	for {
+		select {
+		case <-ctx.Done():
+			return last, hasFile
+		case <-timer.C:
+			if s, err := protocol.Load(path); err == nil && s.UpdatedAt.After(since) {
+				last = s
+				hasFile = true
+				if protocol.IsTerminal(s.Phase) {
+					return last, hasFile
+				}
+			}
+			timer.Reset(interval)
+		}
+	}
 }

@@ -272,19 +272,29 @@ func TestDispatchRebaseWorkerPaneRunError(t *testing.T) {
 }
 
 // TestDispatchRebaseWorkerSuccessTerminal covers the happy path: herdr opens a
-// pane and runs the worker, and a status.json already at a terminal phase is
-// picked up on WaitForStatus's first (immediate) poll.
+// pane and runs the worker, and a status.json the worker writes *after*
+// dispatch is picked up once WaitForStatus polls again. A stale status.json
+// left over from before dispatch is seeded too, to confirm it gets invalidated
+// rather than short-circuiting the wait (argus issue #50).
 func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()
-	status := &protocol.Status{Phase: protocol.PhaseAwaitingReview}
-	if err := protocol.Write(protocol.StatusPath(worktree), status); err != nil {
-		t.Fatalf("seeding status.json: %v", err)
+	stale := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now().Add(-time.Hour)}
+	if err := protocol.Write(protocol.StatusPath(worktree), stale); err != nil {
+		t.Fatalf("seeding stale status.json: %v", err)
 	}
 
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("w1:p1", nil, nil)
 	var buf bytes.Buffer
+
+	// Simulate the dispatched worker writing its own fresh status shortly after
+	// dispatch, the way a real worker pane eventually would.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		fresh := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now()}
+		_ = protocol.Write(protocol.StatusPath(worktree), fresh)
+	}()
 
 	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
 		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
@@ -294,6 +304,37 @@ func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "dispatched rebase worker") || !strings.Contains(buf.String(), "rebased and ready") {
 		t.Errorf("expected dispatch + outcome messages:\n%s", buf.String())
+	}
+}
+
+// TestDispatchRebaseWorkerIgnoresStaleStatus is the direct regression test for
+// argus issue #50: a worktree carrying a leftover terminal status.json from
+// before this rebase was dispatched (the normal supervise flow's own
+// awaiting_review, unrelated to the rebase) must never be reported as this
+// dispatch's outcome. The fake herdr client never actually runs a worker, so
+// no fresh status is written, and dispatchRebaseWorker must time out instead
+// of reporting the stale phase as success.
+func TestDispatchRebaseWorkerIgnoresStaleStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	stale := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now().Add(-time.Hour)}
+	if err := protocol.Write(protocol.StatusPath(worktree), stale); err != nil {
+		t.Fatalf("seeding stale status.json: %v", err)
+	}
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := dispatchRebaseWorker(ctx, logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no status before the deadline") {
+		t.Fatalf("want the no-status error for a stale pre-dispatch status.json, got %v", err)
+	}
+	if _, lerr := protocol.Load(protocol.StatusPath(worktree)); lerr == nil {
+		t.Errorf("expected the stale status.json to be invalidated (removed) before dispatch")
 	}
 }
 

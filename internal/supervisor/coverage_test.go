@@ -73,15 +73,31 @@ func TestWatchReturnsWhenWorkerReachesTerminal(t *testing.T) {
 
 func TestWaitForStatusReadsTerminal(t *testing.T) {
 	wt := t.TempDir()
-	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Task: "r", Phase: protocol.PhaseBlocked, BlockedReason: "need decision"}); err != nil {
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Task: "r", Phase: protocol.PhaseBlocked, BlockedReason: "need decision", UpdatedAt: time.Now()}); err != nil {
 		t.Fatalf("seeding status: %v", err)
 	}
-	status, seen := WaitForStatus(context.Background(), wt, 5*time.Millisecond)
+	status, seen := WaitForStatus(context.Background(), wt, 5*time.Millisecond, time.Now().Add(-time.Minute))
 	if !seen {
 		t.Fatal("WaitForStatus should have seen the status file")
 	}
 	if status.Phase != protocol.PhaseBlocked {
 		t.Errorf("phase: got %q want blocked", status.Phase)
+	}
+}
+
+// TestWaitForStatusIgnoresStaleStatus is the regression case for argus issue
+// #50: a status.json written before since (the dispatch time) must not be
+// mistaken for the outcome of a worker dispatched after it.
+func TestWaitForStatusIgnoresStaleStatus(t *testing.T) {
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Task: "r", Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("seeding stale status: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, seen := WaitForStatus(ctx, wt, 5*time.Millisecond, time.Now())
+	if seen {
+		t.Fatal("WaitForStatus should not report a status written before since")
 	}
 }
 
