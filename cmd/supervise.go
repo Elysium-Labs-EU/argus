@@ -93,78 +93,13 @@ each pane's directory in --panes mode).`,
 				return err
 			}
 
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return fmt.Errorf("resolving home dir: %w", err)
-			}
-
-			logger, closeLog := openRunLog(cmd, "supervise")
-			defer closeLog()
-
-			cfg := &supervisor.Config{
-				Out:           cmd.OutOrStdout(),
-				Now:           time.Now,
-				Client:        client,
-				Log:           logger,
-				Base:          base,
-				Home:          home,
-				Launcher:      launcher,
-				ScrubEnv:      forge.StandardTokenVars(),
-				Interval:      interval,
-				Timeout:       timeout,
-				WorkerRuntime: workerRuntime,
-				Policy: &supervisor.ReviewPolicy{
-					MaxDiffLines:      maxDiffLines,
-					SharedGlobs:       sharedGlobs,
-					OSPathGlobs:       osGlobs,
-					AlwaysReviewGlobs: reviewGlobs,
-				},
-			}
-			if review {
-				cfg.Reviewer = supervisor.NewCLIReviewer(reviewModel).WithLog(logger)
-			}
-
-			// --attach only watches workers that are already running; it never calls
-			// execute() (the only place cfg.Broker.WorkerEnv is used or a runtime
-			// adapter is invoked), so it needs no credential proxy and applies no
-			// isolation of its own. Warn so the operator knows an attached worker's
-			// isolation is whatever it was started with, not argus-managed, then
-			// return before the credproxy block starts one for nothing.
-			if attach {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s --attach does not manage isolation: an attached worker keeps whatever credential proxy and runtime adapter (if any) it was started with\n",
-					ui.LabelWarning.Render("○"))
-				return supervisor.Attach(cmd.Context(), cfg, workers)
-			}
-
-			// Front the workers' API traffic with a credential proxy so a worker is
-			// not handed the real key in its own environment. It runs only for a
-			// live spawn (a dry run spawns nothing) and only for API-key auth: when
-			// ANTHROPIC_API_KEY is unset (subscription/OAuth), there is no key to
-			// swap and the proxy stays off — in that mode workers reach the host's
-			// ~/.claude credentials directly and get no credential isolation, so it
-			// only holds for hosts that authenticate with an API key.
-			// --no-cred-proxy opts out entirely.
-			if !dryRun && !noCredProxy {
-				if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-					proxy := credproxy.New(
-						func(agent, method, path string) {
-							logger.Action("credproxy", agent, method, path)
-						},
-						credproxy.Anthropic(key),
-					)
-					if err := proxy.Start(); err != nil {
-						return fmt.Errorf("starting credential proxy: %w", err)
-					}
-					defer func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-						defer cancel()
-						_ = proxy.Shutdown(ctx)
-					}()
-					cfg.Broker = proxy
-				}
-			}
-
-			return supervisor.Run(cmd.Context(), cfg, workers, dryRun)
+			return runSupervision(cmd, client, workers, &superviseOpts{
+				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
+				base: base, launcher: launcher, workerRuntime: workerRuntime,
+				interval: interval, timeout: timeout,
+				review: review, reviewModel: reviewModel,
+				maxDiffLines: maxDiffLines, sharedGlobs: sharedGlobs, osGlobs: osGlobs, reviewGlobs: reviewGlobs,
+			})
 		},
 	}
 
@@ -191,6 +126,108 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&worktrees, "worktrees", nil, "with --attach: explicit worktree paths to watch (comma-separated)")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate each worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
 	return cmd
+}
+
+// superviseOpts bundles the flags runSupervision needs once workers are already
+// resolved (attach vs spawn is decided before it is called), so the constructor's
+// RunE can pass them through without runSupervision growing a 15-argument
+// signature.
+type superviseOpts struct {
+	workerRuntime string
+	reviewModel   string
+	base          string
+	launcher      string
+	osGlobs       []string
+	reviewGlobs   []string
+	sharedGlobs   []string
+	interval      time.Duration
+	timeout       time.Duration
+	maxDiffLines  int
+	attach        bool
+	dryRun        bool
+	noCredProxy   bool
+	review        bool
+}
+
+// runSupervision builds the *supervisor.Config for an already-resolved worker
+// set, then either hands off to supervisor.Attach (--attach: no isolation is
+// argus's to manage) or starts the credential proxy for a live spawn and hands
+// off to supervisor.Run. Split out of newSuperviseCmd's RunE so the constructor
+// stays flag registration plus a thin dispatcher, and so this half — the
+// credential-proxy and reviewer wiring — is independently testable.
+func runSupervision(cmd *cobra.Command, client herdr.Client, workers []supervisor.Worker, o *superviseOpts) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home dir: %w", err)
+	}
+
+	logger, closeLog := openRunLog(cmd, "supervise")
+	defer closeLog()
+
+	cfg := &supervisor.Config{
+		Out:           cmd.OutOrStdout(),
+		Now:           time.Now,
+		Client:        client,
+		Log:           logger,
+		Base:          o.base,
+		Home:          home,
+		Launcher:      o.launcher,
+		ScrubEnv:      forge.StandardTokenVars(),
+		Interval:      o.interval,
+		Timeout:       o.timeout,
+		WorkerRuntime: o.workerRuntime,
+		Policy: &supervisor.ReviewPolicy{
+			MaxDiffLines:      o.maxDiffLines,
+			SharedGlobs:       o.sharedGlobs,
+			OSPathGlobs:       o.osGlobs,
+			AlwaysReviewGlobs: o.reviewGlobs,
+		},
+	}
+	if o.review {
+		cfg.Reviewer = supervisor.NewCLIReviewer(o.reviewModel).WithLog(logger)
+	}
+
+	// --attach only watches workers that are already running; it never calls
+	// execute() (the only place cfg.Broker.WorkerEnv is used or a runtime
+	// adapter is invoked), so it needs no credential proxy and applies no
+	// isolation of its own. Warn so the operator knows an attached worker's
+	// isolation is whatever it was started with, not argus-managed, then
+	// return before the credproxy block starts one for nothing.
+	if o.attach {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s --attach does not manage isolation: an attached worker keeps whatever credential proxy and runtime adapter (if any) it was started with\n",
+			ui.LabelWarning.Render("○"))
+		return supervisor.Attach(cmd.Context(), cfg, workers)
+	}
+
+	// Front the workers' API traffic with a credential proxy so a worker is
+	// not handed the real key in its own environment. It runs only for a
+	// live spawn (a dry run spawns nothing) and only for API-key auth: when
+	// ANTHROPIC_API_KEY is unset (subscription/OAuth), there is no key to
+	// swap and the proxy stays off — in that mode workers reach the host's
+	// ~/.claude credentials directly and get no credential isolation, so it
+	// only holds for hosts that authenticate with an API key.
+	// --no-cred-proxy opts out entirely.
+	if !o.dryRun && !o.noCredProxy {
+		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+			proxy := credproxy.New(
+				func(agent, method, path string) {
+					logger.Action("credproxy", agent, method, path)
+				},
+				credproxy.Anthropic(key),
+			)
+			if err := proxy.Start(); err != nil {
+				return fmt.Errorf("starting credential proxy: %w", err)
+			}
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = proxy.Shutdown(ctx)
+			}()
+			cfg.Broker = proxy
+		}
+	}
+
+	return supervisor.Run(cmd.Context(), cfg, workers, o.dryRun)
 }
 
 // attachWorkers resolves --attach targets into workers without creating anything.
