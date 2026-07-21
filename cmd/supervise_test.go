@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -230,6 +232,94 @@ func TestRunSupervisionSpawnDryRunSkipsCredProxy(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "--attach") {
 		t.Errorf("dry-run spawn should not print the attach warning, got %q", buf.String())
+	}
+}
+
+// TestTasksFlagRejectsFreeTextBrief pins down the reported bug (#40): --tasks is
+// parsed as CSV by pflag, so a free-text brief containing commas and quotes fails
+// at flag-parse time with "bare \" in non-quoted-field" rather than being taken
+// literally. --tasks-file (tested below) is the escape hatch for that content.
+func TestTasksFlagRejectsFreeTextBrief(t *testing.T) {
+	cmd := newSuperviseCmd()
+	brief := `Fix the parser: it treats "quoted" text, and commas, as CSV.`
+	err := cmd.Flags().Parse([]string{"--tasks", brief})
+	if err == nil {
+		t.Fatal("want a CSV parse error for a comma-and-quote brief passed to --tasks, got nil")
+	}
+}
+
+// TestLoadTasksFileSurvivesCommasAndQuotes proves --tasks-file sidesteps the CSV
+// parsing entirely: a line containing commas and unescaped quotes comes back
+// byte-for-byte instead of erroring.
+func TestLoadTasksFileSurvivesCommasAndQuotes(t *testing.T) {
+	brief := `Fix the parser: it treats "quoted" text, and commas, as CSV.`
+	path := filepath.Join(t.TempDir(), "tasks.txt")
+	if err := os.WriteFile(path, []byte(brief+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tasks, err := loadTasksFile(path)
+	if err != nil {
+		t.Fatalf("loadTasksFile: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0] != brief {
+		t.Errorf("want the brief back untouched, got %#v", tasks)
+	}
+}
+
+func TestLoadTasksFileMultipleLinesSkipsBlank(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.txt")
+	content := "first task, with a comma\n\nsecond task \"quoted\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tasks, err := loadTasksFile(path)
+	if err != nil {
+		t.Fatalf("loadTasksFile: %v", err)
+	}
+	want := []string{"first task, with a comma", `second task "quoted"`}
+	if len(tasks) != len(want) || tasks[0] != want[0] || tasks[1] != want[1] {
+		t.Errorf("got %#v, want %#v", tasks, want)
+	}
+}
+
+func TestLoadTasksFileEmptyErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.txt")
+	if err := os.WriteFile(path, []byte("\n\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := loadTasksFile(path); err == nil {
+		t.Fatal("want error for a tasks file with no non-empty lines, got nil")
+	}
+}
+
+func TestLoadTasksFileMissingErrors(t *testing.T) {
+	if _, err := loadTasksFile(filepath.Join(t.TempDir(), "missing.txt")); err == nil {
+		t.Fatal("want error for a missing --tasks-file, got nil")
+	}
+}
+
+// TestSpawnWorkersTasksFileAppendsToTasks exercises --tasks-file through
+// spawnWorkers end to end: the file's lines land in in.tasks (appended after any
+// --tasks) and flow into buildWorkers as ordinary task strings, commas and quotes
+// intact.
+func TestSpawnWorkersTasksFileAppendsToTasks(t *testing.T) {
+	client := fakeClient()
+	brief := `Full brief, with commas and "quotes" — not a CSV field.`
+	path := filepath.Join(t.TempDir(), "tasks.txt")
+	if err := os.WriteFile(path, []byte(brief+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	workers, err := spawnWorkers(context.Background(), client, &workerInput{
+		repo: "/pinned", tasksFile: path,
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("spawnWorkers: %v", err)
+	}
+	if len(workers) != 1 || workers[0].Task != brief {
+		t.Errorf("want one worker with the brief as its task, got %+v", workers)
 	}
 }
 

@@ -23,6 +23,7 @@ func newSuperviseCmd() *cobra.Command {
 		panes         []string
 		branches      []string
 		tasks         []string
+		tasksFile     string
 		repo          string
 		base          string
 		launcher      string
@@ -86,7 +87,7 @@ each pane's directory in --panes mode).`,
 				workers, err = attachWorkers(cmd.Context(), client, workspace, worktrees)
 			} else {
 				workers, err = spawnWorkers(cmd.Context(), client, &workerInput{
-					panes: panes, branches: branches, tasks: tasks, repo: repo,
+					panes: panes, branches: branches, tasks: tasks, tasksFile: tasksFile, repo: repo,
 				}, issues, jiraIssues)
 			}
 			if err != nil {
@@ -106,6 +107,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().IntSliceVar(&issues, "issues", nil, "issue numbers to fetch from the repo's forge and turn into worker briefs (branch defaults to fix-issue-<n>)")
 	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN")
 	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated); drives worker count in the default mode")
+	cmd.Flags().StringVar(&tasksFile, "tasks-file", "", "path to a file with one task per line, appended after --tasks; unlike --tasks this is not CSV-parsed, so commas and quotes in a free-text brief are safe")
 	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>)")
 	cmd.Flags().StringSliceVar(&panes, "panes", nil, "reuse these existing herdr panes instead of the worktree's own pane")
 	cmd.Flags().StringVar(&repo, "repo", "", "repo root for all workers (default cwd; or each pane's directory in --panes mode)")
@@ -280,10 +282,11 @@ func attachWorkers(ctx context.Context, client herdr.Client, workspace string, w
 var superviseCmd = newSuperviseCmd()
 
 type workerInput struct {
-	repo     string
-	panes    []string
-	branches []string
-	tasks    []string
+	repo      string
+	tasksFile string
+	panes     []string
+	branches  []string
+	tasks     []string
 }
 
 // spawnWorkers resolves the spawn-mode inputs into workers: it requires at least
@@ -292,10 +295,10 @@ type workerInput struct {
 // then pairs the slices. It is the non-attach half of supervise, kept out of RunE
 // so each mode reads flat.
 func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string) ([]supervisor.Worker, error) {
-	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && len(issues) == 0 && len(jiraIssues) == 0 {
+	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && in.tasksFile == "" && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
-			Hint: "argus supervise --tasks x,y --branches feat-x,feat-y [--repo <path>]  (or --issues n,n or --jira-issues KEY,KEY, or --attach --workspace <id>)",
+			Hint: "argus supervise --tasks x,y --branches feat-x,feat-y [--repo <path>]  (or --tasks-file path, --issues n,n, --jira-issues KEY,KEY, or --attach --workspace <id>)",
 		}
 	}
 	if in.repo == "" && len(in.panes) == 0 {
@@ -305,10 +308,47 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 		}
 		in.repo = wd
 	}
+	if in.tasksFile != "" {
+		fileTasks, err := loadTasksFile(in.tasksFile)
+		if err != nil {
+			return nil, err
+		}
+		in.tasks = append(in.tasks, fileTasks...)
+	}
 	if err := foldIssueSources(ctx, in, issues, jiraIssues); err != nil {
 		return nil, err
 	}
 	return buildWorkers(ctx, client, in)
+}
+
+// loadTasksFile reads --tasks-file into one task per line. --tasks goes through
+// pflag's CSV parsing, which chokes on commas and unescaped quotes in free-text
+// prose (`bare " in non-quoted-field`); a tasks file sidesteps that entirely by
+// only ever splitting on newlines, so a multi-sentence brief with punctuation
+// survives untouched as long as it stays on one line.
+func loadTasksFile(path string) ([]string, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is the operator-supplied --tasks-file, a deliberate local file read, not remote input
+	if err != nil {
+		return nil, &ui.UserError{
+			Err:  fmt.Errorf("reading --tasks-file %s: %w", path, err),
+			Hint: "pass a path to a file with one task per line",
+		}
+	}
+	var tasks []string
+	for line := range strings.SplitSeq(strings.TrimRight(string(data), "\n"), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		tasks = append(tasks, line)
+	}
+	if len(tasks) == 0 {
+		return nil, &ui.UserError{
+			Err:  fmt.Errorf("--tasks-file %s has no non-empty lines", path),
+			Hint: "each line becomes one worker's task",
+		}
+	}
+	return tasks, nil
 }
 
 // foldIssueSources turns --issues and --jira-issues into worker briefs and

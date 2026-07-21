@@ -69,6 +69,10 @@ argus supervise \
 # Turn on the LLM review path for changes the gate escalates
 argus supervise --repo /path/to/project --tasks "risky change" --review
 
+# Free-text briefs (commas, quotes) go in a file instead of --tasks, which is
+# CSV-parsed and breaks on that punctuation: one brief per line.
+argus supervise --repo /path/to/project --tasks-file briefs.txt --branches feat-a,feat-b
+
 # Review one worktree's diff on demand
 argus review --worktree /path/to/project-feat-retry --base origin/main
 
@@ -83,6 +87,7 @@ argus ship --worktree /path/to/project-feat-retry --issue 42
 | `argus supervise` | Discover or open panes, spawn workers in worktrees, gate their diffs, and watch each through to review |
 | `argus supervise --review` | On a gate escalation, run a headless `claude -p` review instead of only surfacing the decision |
 | `argus supervise --dry-run` | Print the plan and exit without creating worktrees or spawning workers |
+| `argus supervise --tasks-file <path>` | Read one task per line from a file, appended after `--tasks`; not CSV-parsed, so free-text briefs with commas and quotes are safe |
 | `argus supervise --issues <n,...>` | Fetch issue numbers from the repo's forge (GitHub/GitLab/Codeberg/Gitea) and turn each into a worker brief |
 | `argus supervise --jira-issues <KEY,...>` | Fetch Jira Cloud issue keys (e.g. `PROJ-123`) and turn each into a worker brief |
 | `argus review --worktree <path>` | Run a one-shot `claude -p` review of a worktree's diff against a base ref |
