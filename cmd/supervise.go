@@ -42,6 +42,7 @@ func newSuperviseCmd() *cobra.Command {
 		workspace     string
 		worktrees     []string
 		workerRuntime string
+		allow         []string
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -99,6 +100,7 @@ each pane's directory in --panes mode).`,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel,
 				maxDiffLines: maxDiffLines, sharedGlobs: sharedGlobs, osGlobs: osGlobs, reviewGlobs: reviewGlobs,
+				allow: allow,
 			})
 		},
 	}
@@ -125,6 +127,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&workspace, "workspace", "", "with --attach: attach to every herdr pane in this workspace id, using each pane's directory as a worktree")
 	cmd.Flags().StringSliceVar(&worktrees, "worktrees", nil, "with --attach: explicit worktree paths to watch (comma-separated)")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate each worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
+	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a repo not built with make)")
 	return cmd
 }
 
@@ -140,6 +143,7 @@ type superviseOpts struct {
 	osGlobs       []string
 	reviewGlobs   []string
 	sharedGlobs   []string
+	allow         []string
 	interval      time.Duration
 	timeout       time.Duration
 	maxDiffLines  int
@@ -176,6 +180,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		Interval:      o.interval,
 		Timeout:       o.timeout,
 		WorkerRuntime: o.workerRuntime,
+		ExtraAllow:    o.allow,
 		Policy: &supervisor.ReviewPolicy{
 			MaxDiffLines:      o.maxDiffLines,
 			SharedGlobs:       o.sharedGlobs,

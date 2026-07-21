@@ -195,7 +195,7 @@ func TestExecuteReportsOrphansOnPartialFailure(t *testing.T) {
 	plans := BuildPlan([]Worker{
 		{Task: "a", Branch: "feat-a", RepoRoot: t.TempDir()},
 		{Task: "b", Branch: "feat-b", RepoRoot: t.TempDir()},
-	})
+	}, nil)
 	if _, err := execute(context.Background(), cfg, plans); err == nil {
 		t.Fatal("execute should return the spawn error")
 	}
