@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -27,7 +28,11 @@ func argusDataDir() (string, error) {
 // it can be exercised in tests without touching the real installed binary or
 // os.Executable() (which, under `go test`, is the test binary itself).
 func runUninstall(_ context.Context, in io.Reader, out io.Writer, exePath, dataDir string, yes, purge bool) error {
-	if !yes && !ui.Confirm(in, out, fmt.Sprintf("Remove argus (%s)?", exePath), false) {
+	// One shared bufio.Reader for both possible prompts below: Confirm reads
+	// ahead past the first "\n", so a fresh bufio.Reader per call would strand
+	// an already-buffered second answer when both are typed/piped together.
+	reader := bufio.NewReader(in)
+	if !yes && !ui.Confirm(reader, out, fmt.Sprintf("Remove argus (%s)?", exePath), false) {
 		_, _ = fmt.Fprintln(out, "Canceled.")
 		return nil
 	}
@@ -43,7 +48,7 @@ func runUninstall(_ context.Context, in io.Reader, out io.Writer, exePath, dataD
 
 	removeData := purge
 	if !removeData && !yes {
-		removeData = ui.Confirm(in, out, fmt.Sprintf("Also remove argus data (%s)?", dataDir), false)
+		removeData = ui.Confirm(reader, out, fmt.Sprintf("Also remove argus data (%s)?", dataDir), false)
 	}
 
 	if removeData {
