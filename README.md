@@ -30,7 +30,7 @@ The design follows Adam Jacob's idea of reducing agent token spend by moving the
 * Go 1.26 or newer, to build from source.
 * [herdr](https://github.com/ogulcancelik/herdr) on PATH. argus talks to it only through its CLI.
 * The `claude` CLI on PATH, for `argus review` and `supervise --review`.
-* A forge token for the host the worktree points at (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, ...), for `argus ship`.
+* A forge token for the host the worktree points at (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, `FORGE_TOKEN` for GitLab or any self-hosted Gitea/Forgejo, ...), for `argus ship`.
 
 ## Install
 
