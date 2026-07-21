@@ -88,6 +88,16 @@ func TestCheckApprovedForceBypassesEverything(t *testing.T) {
 	}
 }
 
+func TestShipCmdHelpDocumentsGitLab(t *testing.T) {
+	long := newShipCmd().Long
+	if !strings.Contains(long, "GitLab") {
+		t.Errorf("ship --help should document GitLab as a supported forge, got: %q", long)
+	}
+	if !strings.Contains(long, "GITLAB_TOKEN") {
+		t.Errorf("ship --help should document GITLAB_TOKEN, got: %q", long)
+	}
+}
+
 func TestRunShipRequiresWorktree(t *testing.T) {
 	cmd := newShipCmd()
 	err := runShip(cmd, &shipArgs{})
