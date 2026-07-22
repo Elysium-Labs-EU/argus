@@ -19,11 +19,27 @@ The point is not just to coordinate. argus is a verifier. The gate checks the re
 
 argus splits supervision into a deterministic majority and a judgment minority.
 
-The deterministic half discovers or opens herdr panes, creates a worktree per worker off a base ref, writes each worker a task brief, launches it in auto mode with a scoped permission file, and then polls its `status.json`. A worker reports a coarse phase (`planning`, `working`, `self_test`, `awaiting_review`, `done`, `blocked`) plus the files it touched, the tests it ran, and its own diff stats. argus stops waiting once a worker reaches a terminal phase.
+The deterministic half discovers or opens herdr panes, creates a worktree per worker, writes a task brief, launches the worker in auto mode with a scoped permission file, then polls its status. A worker reports its phase with `argus worker report <phase>`, piping status JSON (files touched, tests run, diff stats) on stdin. Workers never write `status.json` directly. `report` checks the move against a fixed legal-transition table. Only a legal move gets persisted, and only argus stamps the timestamp.
 
-At that point the gate runs. It applies a review policy (diff ceiling, shared-path globs, OS-integration globs that demand real-world proof) to the worker's reported status, then cross-checks that report against the diff argus measures from git itself. When everything lines up the change auto-approves. When it does not, or when the change touches a risky surface, argus escalates: it surfaces the decision to you, or, with `--review`, runs a headless `claude -p` review of the diff. That review is the only place the LLM re-enters the loop.
+```mermaid
+stateDiagram-v2
+    [*] --> planning
+    planning --> working
+    working --> self_test
+    working --> blocked
+    self_test --> awaiting_review
+    self_test --> working
+    self_test --> blocked
+    awaiting_review --> blocked
+    blocked --> working
+    awaiting_review --> [*]: ship
+```
 
-The design follows Adam Jacob's idea of reducing agent token spend by moving the coordinator out of the model and sliding review intensity to match risk. argus is the application of that idea to a supervise-agents workflow.
+`done` is never worker-reported. Only `ship` sets it, on merge. argus stops waiting once a worker hits a terminal phase: `awaiting_review` or `blocked`.
+
+Then the gate runs. It checks the worker's reported status against a review policy (diff ceiling, shared-path globs, OS-integration globs needing real-world proof), then cross-checks against the diff argus measures from git. A clean match auto-approves. A miss, or a risky surface, escalates: to you, or with `--review`, to a headless `claude -p` review. That review is the only point the LLM re-enters the loop.
+
+The design follows Adam Jacob's idea: move the coordinator out of the model, scale review intensity to risk. argus applies that idea to a supervise-agents workflow.
 
 ## Requirements
 
