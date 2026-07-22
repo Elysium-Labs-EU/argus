@@ -166,7 +166,7 @@ func TestBuildRebaseSpawnLineInjectsCredProxySentinel(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-real-key-should-never-appear")
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 
-	spawnLine, cleanup, err := buildRebaseSpawnLine(context.Background(), logger, "/repo/wt", "feat-x", "claude", "", false)
+	spawnLine, cleanup, err := buildRebaseSpawnLine(context.Background(), logger, "/repo/wt", "feat-x", "claude", "", false, nil)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("buildRebaseSpawnLine: %v", err)
@@ -185,7 +185,7 @@ func TestBuildRebaseSpawnLineNoCredProxyOptOut(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-real-key")
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 
-	spawnLine, cleanup, err := buildRebaseSpawnLine(context.Background(), logger, "/repo/wt", "feat-x", "claude", "", true)
+	spawnLine, cleanup, err := buildRebaseSpawnLine(context.Background(), logger, "/repo/wt", "feat-x", "claude", "", true, nil)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("buildRebaseSpawnLine: %v", err)

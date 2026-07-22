@@ -41,4 +41,5 @@ func init() {
 	rootCmd.AddCommand(rebaseCmd)
 	rootCmd.AddCommand(statsCmd)
 	rootCmd.AddCommand(systemCmd)
+	rootCmd.AddCommand(configCmd)
 }

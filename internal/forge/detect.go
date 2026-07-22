@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/Elysium-Labs-EU/argus/internal/credential"
 )
 
 // Detect parses a git remote URL into the forge host and the owner/repo. It
@@ -66,20 +68,22 @@ func splitOwnerRepo(path string) (owner, repo string, err error) {
 	return parts[len(parts)-2], parts[len(parts)-1], nil
 }
 
-// TokenForHost returns the API token for a forge host, checking the
-// environment first and falling back to the same credential tooling a human
-// would already have configured. github.com uses GITHUB_TOKEN or GH_TOKEN;
-// codeberg.org uses CODEBERG_TOKEN; gitlab.com uses GITLAB_TOKEN; any other
-// host uses <HOST>_TOKEN (non-alphanumerics as underscores) then FORGE_TOKEN.
-// If none of those env vars is set, it shells out to gh/glab/git-credential
-// (see tokenFromHelper) so a caller never has to pre-export the secret into
-// argus's own process env — the same non-interactive path gh and glab use
-// for their own commands.
-func TokenForHost(host string) string {
-	for _, key := range tokenVarsForHost(host) {
-		if v := os.Getenv(key); v != "" {
-			return v
-		}
+// TokenForHost returns the API token for a forge host, checking an operator
+// override first, then the environment, then falling back to the same
+// credential tooling a human would already have configured. overrides maps
+// host -> an alternate env var name that takes priority over the built-in
+// list (see internal/credential and cmd's --credential-env /
+// `argus config set credential.<host>`); it may be nil. github.com uses
+// GITHUB_TOKEN or GH_TOKEN; codeberg.org uses CODEBERG_TOKEN; gitlab.com uses
+// GITLAB_TOKEN; any other host uses <HOST>_TOKEN (non-alphanumerics as
+// underscores) then FORGE_TOKEN. If none of those env vars is set, it shells
+// out to gh/glab/git-credential (see tokenFromHelper) so a caller never has
+// to pre-export the secret into argus's own process env — the same
+// non-interactive path gh and glab use for their own commands.
+func TokenForHost(host string, overrides map[string]string) string {
+	vars := credential.EnvVars(host, overrides, tokenVarsForHost(host))
+	if v := credential.Lookup(vars); v != "" {
+		return v
 	}
 	return tokenFromHelper(host)
 }

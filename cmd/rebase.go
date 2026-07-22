@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/Elysium-Labs-EU/argus/internal/credproxy"
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
@@ -28,6 +26,7 @@ func newRebaseCmd() *cobra.Command {
 		force         bool
 		dryRun        bool
 		noCredProxy   bool
+		credentialEnv map[string]string
 	)
 
 	cmd := &cobra.Command{
@@ -39,6 +38,10 @@ conflict, and dispatches the worktree's own worker to rebase, resolve, re-verify
 and force-push. argus does the deterministic parts (detect, dispatch, wait); the
 conflict resolution itself needs the worker.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			overrides, err := resolveCredentialOverrides(credentialEnv)
+			if err != nil {
+				return err
+			}
 			return runRebase(cmd, herdr.New(), &rebaseOpts{
 				worktree:      worktree,
 				base:          base,
@@ -48,6 +51,7 @@ conflict resolution itself needs the worker.`,
 				force:         force,
 				dryRun:        dryRun,
 				noCredProxy:   noCredProxy,
+				credentialEnv: overrides,
 			})
 		},
 	}
@@ -60,6 +64,7 @@ conflict resolution itself needs the worker.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "detect and print the plan without dispatching a worker")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate the rebase worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front the rebase worker's API traffic with the credential proxy; it inherits the host's real ANTHROPIC_API_KEY")
+	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	return cmd
 }
 
@@ -70,6 +75,7 @@ var rebaseCmd = newRebaseCmd()
 // in a top-level function go-crap can score (and tests can call) on its own,
 // instead of an inline closure whose complexity gets charged to the constructor.
 type rebaseOpts struct {
+	credentialEnv map[string]string
 	worktree      string
 	base          string
 	launcher      string
@@ -164,7 +170,7 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 		return werr
 	}
 
-	spawnLine, cleanup, err := buildRebaseSpawnLine(ctx, logger, opts.worktree, branch, opts.launcher, opts.workerRuntime, opts.noCredProxy)
+	spawnLine, cleanup, err := buildRebaseSpawnLine(ctx, logger, opts.worktree, branch, opts.launcher, opts.workerRuntime, opts.noCredProxy, opts.credentialEnv)
 	defer cleanup()
 	if err != nil {
 		return err
@@ -187,33 +193,26 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 
 // buildRebaseSpawnLine resolves the shell command line argus types into a
 // rebase worker's pane. It fronts the worker's API traffic with the same
-// credproxy sentinel treatment cmd/supervise.go gives spawn-mode workers —
-// this path used to pass workerEnv: nil unconditionally, so a
-// rebase-dispatched worker never got a sentinel even when spawn-mode workers
-// did — then wraps the result via a runtime adapter when one is configured.
-// cleanup shuts down any credproxy this call started and must be deferred by
-// the caller regardless of the returned error.
-func buildRebaseSpawnLine(ctx context.Context, logger *eventlog.Logger, worktree, branch, launcher, workerRuntime string, noCredProxy bool) (spawnLine string, cleanup func(), err error) {
+// generalized credproxy wiring cmd/supervise.go gives spawn-mode workers (see
+// startCredentialProxy) — this path used to pass workerEnv: nil
+// unconditionally, so a rebase-dispatched worker never got a sentinel even
+// when spawn-mode workers did — then wraps the result via a runtime adapter
+// when one is configured. cleanup shuts down any credproxy this call started
+// and must be deferred by the caller regardless of the returned error.
+func buildRebaseSpawnLine(ctx context.Context, logger *eventlog.Logger, worktree, branch, launcher, workerRuntime string, noCredProxy bool, credentialEnv map[string]string) (spawnLine string, cleanup func(), err error) {
 	cleanup = func() {}
+	scrubEnv := forge.StandardTokenVars()
 
 	var workerEnv []string
 	if !noCredProxy {
-		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-			proxy := credproxy.New(
-				func(agent, method, path string) {
-					logger.Action("credproxy", agent, method, path)
-				},
-				credproxy.Anthropic(key),
-			)
-			if serr := proxy.Start(); serr != nil { //nolint:contextcheck // credproxy.Start takes no context; it only binds a loopback listener
-				return "", cleanup, fmt.Errorf("starting credential proxy: %w", serr)
-			}
-			cleanup = func() { //nolint:contextcheck // deliberately decoupled from ctx: this cleanup must still run a shutdown after RunE's ctx is done
-				sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_ = proxy.Shutdown(sctx)
-			}
+		proxy, extraScrub, pcleanup, perr := startCredentialProxy(logger, credentialEnv) //nolint:contextcheck // startCredentialProxy's own proxy.Start() takes no context; it only binds a loopback listener
+		cleanup = pcleanup
+		if perr != nil {
+			return "", cleanup, perr
+		}
+		if proxy != nil {
 			workerEnv = proxy.WorkerEnv(branch, branch)
+			scrubEnv = append(scrubEnv, extraScrub...)
 		}
 	}
 
@@ -223,7 +222,7 @@ func buildRebaseSpawnLine(ctx context.Context, logger *eventlog.Logger, worktree
 	// rather than risk it racing against the new shell's startup.
 	launcher = supervisor.ResolveLauncherPath(launcher)
 
-	spawnLine = supervisor.SpawnCommand(worktree, launcher, forge.StandardTokenVars(), workerEnv)
+	spawnLine = supervisor.SpawnCommand(worktree, launcher, scrubEnv, workerEnv)
 	if workerRuntime != "" && workerRuntime != "none" {
 		line, rerr := supervisor.LaunchViaRuntime(ctx, workerRuntime, worktree, launcher, workerEnv)
 		if rerr != nil {

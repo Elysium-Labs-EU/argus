@@ -92,16 +92,16 @@ func TestTokenForHost(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "gh")
 	t.Setenv("CODEBERG_TOKEN", "cb")
 	t.Setenv("GITEA_EXAMPLE_COM_TOKEN", "gt")
-	if got := TokenForHost("github.com"); got != "gh" {
+	if got := TokenForHost("github.com", nil); got != "gh" {
 		t.Errorf("github token: %q", got)
 	}
-	if got := TokenForHost("codeberg.org"); got != "cb" {
+	if got := TokenForHost("codeberg.org", nil); got != "cb" {
 		t.Errorf("codeberg token: %q", got)
 	}
-	if got := TokenForHost("gitea.example.com"); got != "gt" {
+	if got := TokenForHost("gitea.example.com", nil); got != "gt" {
 		t.Errorf("self-hosted token: %q", got)
 	}
-	if got := TokenForHost("unknown.host"); got != "" {
+	if got := TokenForHost("unknown.host", nil); got != "" {
 		t.Errorf("unknown host should have no token, got %q", got)
 	}
 }
@@ -118,7 +118,7 @@ func TestTokenForHostFallsBackToCredentialHelperWhenEnvUnset(t *testing.T) {
 		return "helper-token"
 	}
 
-	if got := TokenForHost("codeberg.org"); got != "helper-token" {
+	if got := TokenForHost("codeberg.org", nil); got != "helper-token" {
 		t.Errorf("want fallback token from helper, got %q", got)
 	}
 	if gotHost != "codeberg.org" {
@@ -136,8 +136,28 @@ func TestTokenForHostPrefersEnvOverCredentialHelper(t *testing.T) {
 		return ""
 	}
 
-	if got := TokenForHost("codeberg.org"); got != "env-token" {
+	if got := TokenForHost("codeberg.org", nil); got != "env-token" {
 		t.Errorf("want env token, got %q", got)
+	}
+}
+
+func TestTokenForHostPrefersOverrideOverBuiltinEnvVar(t *testing.T) {
+	t.Setenv("CODEBERG_TOKEN", "builtin-token")
+	t.Setenv("MY_CODEBERG_TOKEN", "override-token")
+
+	overrides := map[string]string{"codeberg.org": "MY_CODEBERG_TOKEN"}
+	if got := TokenForHost("codeberg.org", overrides); got != "override-token" {
+		t.Errorf("want override token, got %q", got)
+	}
+}
+
+func TestTokenForHostOverrideFallsBackToBuiltinWhenUnset(t *testing.T) {
+	t.Setenv("CODEBERG_TOKEN", "builtin-token")
+	t.Setenv("MY_CODEBERG_TOKEN", "")
+
+	overrides := map[string]string{"codeberg.org": "MY_CODEBERG_TOKEN"}
+	if got := TokenForHost("codeberg.org", overrides); got != "builtin-token" {
+		t.Errorf("want fallback to builtin token when override var is unset, got %q", got)
 	}
 }
 
