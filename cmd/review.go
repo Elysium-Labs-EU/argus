@@ -98,4 +98,6 @@ func renderReviewResult(out io.Writer, res supervisor.ReviewResult) {
 	for _, f := range res.Findings {
 		_, _ = fmt.Fprintf(out, "  · %s\n", f)
 	}
+	_, _ = fmt.Fprintf(out, "\n%s this verdict is not saved, %s will not see it. Run %s against this worktree to ship.\n",
+		ui.LabelWarning.Render("!"), ui.TextBold.Render("ship"), ui.TextBold.Render("supervise --attach --review"))
 }
