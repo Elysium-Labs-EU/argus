@@ -30,7 +30,7 @@ func TestLaunchViaRuntimeReturnsAdapterStdoutLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LaunchViaRuntime: %v", err)
 	}
-	want := `wrapped: claude --permission-mode auto "` + initialPrompt + `"`
+	want := `wrapped: claude --permission-mode auto "` + InitialPrompt + `"`
 	if line != want {
 		t.Errorf("line: got %q want %q", line, want)
 	}

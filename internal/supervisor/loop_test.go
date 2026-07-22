@@ -302,7 +302,7 @@ echo "$ARGUS_RUNTIME_CMD"
 	if err != nil {
 		t.Fatalf("resolveSpawnLine: %v", err)
 	}
-	want := `claude "` + initialPrompt + `"`
+	want := `claude "` + InitialPrompt + `"`
 	if line != want {
 		t.Errorf("resolveSpawnLine leaked a host-resolved launcher path into the runtime adapter's command: got %q want %q", line, want)
 	}

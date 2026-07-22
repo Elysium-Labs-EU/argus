@@ -150,10 +150,10 @@ func taskLabel(task string) string {
 // DefaultLauncher is the agent argus starts in each worker pane.
 const DefaultLauncher = "claude --permission-mode auto"
 
-// initialPrompt is the one-line prompt argus passes to the launcher. It points the
+// InitialPrompt is the one-line prompt argus passes to the launcher. It points the
 // worker at its brief file rather than pasting a multi-line brief into the TUI —
 // a real agent would submit that at the first newline.
-const initialPrompt = "Read .claude/argus/brief.md and follow it exactly; it is your task brief."
+const InitialPrompt = "Read .claude/argus/brief.md and follow it exactly; it is your task brief."
 
 // ResolveLauncherPath rewrites launcher's first (whitespace-separated) token
 // — the binary name — to its absolute path via a PATH lookup on argus's own
@@ -236,7 +236,7 @@ func SpawnCommand(worktree, launcher string, scrubEnv, workerEnv []string) strin
 	if prefix.Len() > 0 {
 		prefix.WriteByte(' ')
 	}
-	return fmt.Sprintf("cd %s && %s%s %q", shellQuote(worktree), prefix.String(), launcher, initialPrompt)
+	return fmt.Sprintf("cd %s && %s%s %q", shellQuote(worktree), prefix.String(), launcher, InitialPrompt)
 }
 
 // shellQuote wraps s in single quotes for POSIX shells, escaping any embedded
@@ -255,7 +255,7 @@ func launcherCommand(launcher string) string {
 	if launcher == "" {
 		launcher = DefaultLauncher
 	}
-	return fmt.Sprintf("%s %q", launcher, initialPrompt)
+	return fmt.Sprintf("%s %q", launcher, InitialPrompt)
 }
 
 // LaunchViaRuntime resolves the argus-runtime-<name> adapter on $PATH (see

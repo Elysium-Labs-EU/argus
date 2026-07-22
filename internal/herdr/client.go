@@ -18,6 +18,11 @@ import (
 // It is the one effectful seam in this package; tests substitute a fake.
 type Runner func(ctx context.Context, args ...string) ([]byte, error)
 
+// ErrAgentNotFound is what AgentGet's err wraps when herdr reports its
+// "agent_not_found" code: the target pane has no live agent session herdr
+// recognizes (a bare shell prompt), not a transport or decoding failure.
+var ErrAgentNotFound = errors.New("herdr: agent not found")
+
 // Client issues typed calls to herdr.
 type Client struct {
 	run Runner
@@ -40,12 +45,25 @@ func execRunner(bin string) Runner {
 		if err != nil {
 			var ee *exec.ExitError
 			if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+				if errorCode(ee.Stderr) == "agent_not_found" {
+					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentNotFound)
+				}
 				return nil, fmt.Errorf("herdr %s: %w: %s", args[0], err, ee.Stderr)
 			}
 			return nil, fmt.Errorf("herdr %s: %w", args[0], err)
 		}
 		return out, nil
 	}
+}
+
+// errorCode extracts a herdr error envelope's machine-readable code from a
+// failed command's stderr, or "" if stderr isn't a decodable error envelope.
+func errorCode(stderr []byte) string {
+	var env envelope
+	if json.Unmarshal(stderr, &env) != nil || env.Error == nil {
+		return ""
+	}
+	return env.Error.Code
 }
 
 // AgentSession identifies the Claude Code session driving a pane. Its Value is
@@ -77,6 +95,7 @@ type envelope struct {
 }
 
 type envelopeError struct {
+	Code    string `json:"code"`
 	Message string `json:"message"`
 }
 
@@ -138,9 +157,45 @@ func (c Client) PaneSplit(ctx context.Context, paneID string, dir SplitDirection
 	return result.Pane.PaneID, nil
 }
 
-// PaneRun sends a command line plus Enter to a pane, the same as typing it.
+// PaneRun sends a command line plus Enter to a pane, the same as typing it at
+// a bare interactive shell prompt. It is the wrong call for a pane that
+// already has a live agent session running (see AgentGet, AgentPrompt): the
+// agent's own input box would receive the literal shell text as a chat
+// message instead of a command a shell executes.
 func (c Client) PaneRun(ctx context.Context, paneID, command string) error {
 	_, err := c.run(ctx, "pane", "run", paneID, command)
+	return err
+}
+
+// AgentGet reports the agent herdr currently tracks for target (a pane id),
+// and whether one exists at all. ok is false with a nil error when herdr's
+// "agent_not_found" tells us the pane has no live agent — a bare shell
+// prompt — which is an expected outcome for a caller deciding how to
+// dispatch into it, not a failure.
+func (c Client) AgentGet(ctx context.Context, target string) (Pane, bool, error) {
+	out, err := c.run(ctx, "agent", "get", target)
+	if err != nil {
+		if errors.Is(err, ErrAgentNotFound) {
+			return Pane{}, false, nil
+		}
+		return Pane{}, false, err
+	}
+	var result struct {
+		Agent Pane `json:"agent"`
+	}
+	if err := decodeEnvelope(out, &result); err != nil {
+		return Pane{}, false, err
+	}
+	return result.Agent, true, nil
+}
+
+// AgentPrompt submits text as a new prompt to the agent already running in
+// target (a pane id), the same as typing it into that agent's own input box
+// and pressing Enter. Use this — not PaneRun — when AgentGet reports a live
+// agent already occupies the pane; it re-tasks that session instead of
+// trying to launch a second one over it.
+func (c Client) AgentPrompt(ctx context.Context, target, text string) error {
+	_, err := c.run(ctx, "agent", "prompt", target, text)
 	return err
 }
 

@@ -3,6 +3,8 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -102,6 +104,61 @@ func TestWorktreeCreateReturnsRootPane(t *testing.T) {
 	}
 	if wt.Path != "/tmp/wt" {
 		t.Errorf("path: got %q", wt.Path)
+	}
+}
+
+func TestAgentGetReportsLiveAgent(t *testing.T) {
+	reply := `{"id":"cli:agent:get","result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"done"}}}`
+	c := NewWithRunner(fakeRunner(reply, nil))
+	pane, ok, err := c.AgentGet(context.Background(), "w1:p1")
+	if err != nil {
+		t.Fatalf("AgentGet: %v", err)
+	}
+	if !ok {
+		t.Fatal("want ok=true for a live agent")
+	}
+	if pane.PaneID != "w1:p1" || pane.AgentStatus != "done" {
+		t.Errorf("unexpected pane: %+v", pane)
+	}
+}
+
+func TestAgentGetReportsNoAgentWithoutError(t *testing.T) {
+	c := NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
+		return nil, fmt.Errorf("herdr agent get: %w", ErrAgentNotFound)
+	})
+	_, ok, err := c.AgentGet(context.Background(), "w1:p1")
+	if err != nil {
+		t.Fatalf("want no error for agent_not_found, got %v", err)
+	}
+	if ok {
+		t.Error("want ok=false when herdr has no live agent for the target")
+	}
+}
+
+func TestAgentGetPropagatesOtherErrors(t *testing.T) {
+	sentinel := errors.New("herdr: socket unavailable")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	_, ok, err := c.AgentGet(context.Background(), "w1:p1")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want the runner error propagated, got %v", err)
+	}
+	if ok {
+		t.Error("want ok=false on error")
+	}
+}
+
+func TestAgentPromptSendsTextToTarget(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{}}`), nil
+	})
+	if err := c.AgentPrompt(context.Background(), "w1:p1", "hello"); err != nil {
+		t.Fatalf("AgentPrompt: %v", err)
+	}
+	want := []string{"agent", "prompt", "w1:p1", "hello"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("AgentPrompt args = %v, want %v", gotArgs, want)
 	}
 }
 
