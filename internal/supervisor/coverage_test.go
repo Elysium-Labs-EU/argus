@@ -90,8 +90,16 @@ func TestWaitForStatusReadsTerminal(t *testing.T) {
 // mistaken for the outcome of a worker dispatched after it.
 func TestWaitForStatusIgnoresStaleStatus(t *testing.T) {
 	wt := t.TempDir()
-	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Task: "r", Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now().Add(-time.Hour)}); err != nil {
+	path := protocol.StatusPath(wt)
+	if err := protocol.Write(path, &protocol.Status{Task: "r", Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now().Add(-time.Hour)}); err != nil {
 		t.Fatalf("seeding stale status: %v", err)
+	}
+	// Written moments ago in wall-clock terms, but its mtime is set to an hour
+	// back so it reads as a genuine leftover from well outside staleTolerance,
+	// not merely adjacent-in-time to since (which the tolerance must absorb).
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("setting stale mtime: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
@@ -125,6 +133,41 @@ func TestWaitForStatusAcceptsLyingUpdatedAt(t *testing.T) {
 	status, seen := WaitForStatus(ctx, wt, 5*time.Millisecond, since)
 	if !seen {
 		t.Fatal("WaitForStatus discarded a real post-since status because of a lying UpdatedAt")
+	}
+	if status.Phase != protocol.PhaseAwaitingReview {
+		t.Errorf("phase: got %q want awaiting_review", status.Phase)
+	}
+}
+
+// TestWaitForStatusAcceptsMtimeSkewUnderTolerance covers argus issue #94:
+// isStale must give the file's mtime a grace window below since, not an
+// exact boundary, because a filesystem's effective mtime resolution can be
+// coarser than time.Now()'s. A real post-dispatch write can therefore read
+// back an mtime a few hundred milliseconds *before* since despite happening
+// after it. os.Chtimes pins the mtime deterministically so this no longer
+// depends on real clock/filesystem timing racing to reproduce the flake.
+func TestWaitForStatusAcceptsMtimeSkewUnderTolerance(t *testing.T) {
+	wt := t.TempDir()
+	since := time.Now()
+	path := protocol.StatusPath(wt)
+
+	if err := protocol.Write(path, &protocol.Status{
+		Task:      "r",
+		Phase:     protocol.PhaseAwaitingReview,
+		UpdatedAt: since,
+	}); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	skewed := since.Add(-300 * time.Millisecond)
+	if err := os.Chtimes(path, skewed, skewed); err != nil {
+		t.Fatalf("setting skewed mtime: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	status, seen := WaitForStatus(ctx, wt, 5*time.Millisecond, since)
+	if !seen {
+		t.Fatal("WaitForStatus discarded a real post-since status because its mtime skewed slightly before since")
 	}
 	if status.Phase != protocol.PhaseAwaitingReview {
 		t.Errorf("phase: got %q want awaiting_review", status.Phase)
