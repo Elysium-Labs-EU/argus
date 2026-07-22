@@ -479,6 +479,7 @@ func worktreePaths(plans []WorkerPlan) []string {
 // measured, not status, for diff size and files touched.
 type workerState struct {
 	started       time.Time
+	dispatchedAt  time.Time
 	reviewErr     error
 	diffErr       error
 	plan          *WorkerPlan
@@ -522,6 +523,12 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 	for i := range plans {
 		p := &plans[i]
 
+		// Captured before the worktree is touched, so pollStatus rejects any
+		// status.json/verdict.json already sitting in the worktree directory
+		// (see InvalidateStatus and issue #50/#75) even if invalidation below
+		// races with a stray write.
+		dispatchedAt := cfg.Now()
+
 		wt, err := prepareWorktree(ctx, cfg, p)
 		if err != nil {
 			return fail(i, err)
@@ -551,7 +558,7 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 		}
 		cfg.Log.Action("spawn", taskLabel(p.Task), "ok", paneID)
 
-		states[i] = &workerState{plan: p, paneID: paneID, started: cfg.Now()}
+		states[i] = &workerState{plan: p, paneID: paneID, started: cfg.Now(), dispatchedAt: dispatchedAt}
 	}
 	return states, nil
 }
@@ -571,6 +578,16 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	})
 	if err != nil {
 		return herdr.Worktree{}, fmt.Errorf("creating worktree for %s: %w", p.Task, err)
+	}
+	// A worktree directory can carry a leftover status.json/verdict.json from an
+	// unrelated prior task (issue #75) — e.g. directory reuse in worktree
+	// creation. Without this, the watch loop's first poll can read that stale
+	// terminal-phase file and report the worker approved before it has done
+	// anything at all. dispatchedAt (captured before this call) is the
+	// independent second guard: pollStatus also ignores any status whose
+	// UpdatedAt isn't after it.
+	if err := InvalidateStatus(p.Worktree); err != nil {
+		return herdr.Worktree{}, fmt.Errorf("invalidating stale status before dispatching %s: %w", p.Task, err)
 	}
 	if err := WriteSettings(p.Worktree, cfg.ExtraAllow); err != nil {
 		return herdr.Worktree{}, fmt.Errorf("writing settings for %s: %w", p.Task, err)
@@ -675,6 +692,12 @@ func pollStatus(ctx context.Context, interval, timeout time.Duration, log *event
 		case <-timer.C:
 			s, err := protocol.Load(path)
 			switch {
+			case err == nil && !st.dispatchedAt.IsZero() && !s.UpdatedAt.After(st.dispatchedAt):
+				// A status.json at or before dispatchedAt predates this dispatch —
+				// a stale leftover (issue #75), not this worker's report. Treated
+				// the same as no file at all (mirrors WaitForStatus, issue #50).
+				// dispatchedAt is zero for an attach, where no dispatch happened
+				// and any existing status is legitimately this worker's own.
 			case err == nil:
 				st.status = s
 				st.hasFile = true
