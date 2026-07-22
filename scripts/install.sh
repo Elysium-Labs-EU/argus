@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Downloads and installs a released argus binary for the current platform.
 #
 # Usage:
@@ -13,7 +13,7 @@
 #   1. $ARGUS_INSTALL_DIR, if set.
 #   2. ~/.local/bin, if it's already on PATH.
 #   3. /usr/local/bin, via sudo if it isn't writable.
-set -euo pipefail
+set -eu
 
 REPO="Elysium-Labs-EU/argus"
 
@@ -94,7 +94,11 @@ strip_quarantine() {
 # the gap regardless. No-op on non-Darwin or without codesign on PATH.
 resign_darwin_binary() {
   if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
-    codesign --force -s - "$1" 2>/dev/null || true
+    if [ "${2:-}" = "sudo" ]; then
+      sudo codesign --force -s - "$1" 2>/dev/null || true
+    else
+      codesign --force -s - "$1" 2>/dev/null || true
+    fi
   fi
 }
 
@@ -132,37 +136,61 @@ else
 fi
 
 # extract_tag_name prints the first "tag_name" value found in a JSON blob
-# passed on stdin. Reads via a herestring rather than piping a large
-# producer into a `grep -m1` consumer — `-m1` closes its input the instant
-# it matches, and once the JSON is bigger than a single release (e.g. the
-# full /releases list), the upstream writer can catch SIGPIPE mid-write.
+# piped in on stdin (a single release's JSON, always small enough that the
+# writer finishes before `grep -m1` closes its end — unlike the /releases
+# list, see pick_latest_tag below). Callers must pipe in with `printf '%s'
+# "$X" |`, not a `<<<` herestring — this script is invoked via `sh` per its
+# own documented usage, and herestrings are a bash-only extension.
 extract_tag_name() {
   grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
 }
 
-# pick_latest_tag prints the highest-version tag_name from a /releases list
-# JSON blob passed on stdin. GitHub's list endpoint is documented as
-# newest-first but was observed live to return a release out of order (a
-# freshly created release landed 3rd, not 1st) — so list position isn't
-# trustworthy. Pairing tag_name with created_at isn't reliable either: each
-# release's assets array carries its own nested created_at fields, so a flat
-# grep picks up several timestamps per release, not one. tag_name itself
-# only appears at the release level (not on assets), so extracting it alone
-# and version-sorting is both simpler and correct.
+# pick_latest_tag prints a tag_name from a /releases list JSON blob passed
+# on stdin, preferring a non-prerelease over any prerelease (matching what
+# GitHub's own /releases/latest does when it isn't 404ing on us). GitHub's
+# list endpoint is documented as newest-first but was observed live to
+# return a release out of order (a freshly created release landed 3rd, not
+# 1st) — so list position isn't trustworthy, and `sort -V` alone isn't
+# either: every implementation tested (GNU, BSD, uutils, BusyBox) sorts a
+# bare "v0.1.0" *before* "v0.1.0-rc.9", the opposite of semver precedence —
+# so version-sorting the raw tag list would silently prefer a stale
+# prerelease the moment a real v0.1.0 ships. Pairing tag_name with
+# created_at isn't reliable either: each release's assets array carries its
+# own nested created_at fields, so a flat grep picks up several timestamps
+# per release, not one. tag_name and prerelease are both release-level only
+# (never on assets), so they pair up 1:1 in list order.
 pick_latest_tag() {
-  grep -o '"tag_name": *"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/' | sort -V | tail -1
+  json="$(cat)"
+  scratch="$(mktemp -d)"
+  printf '%s' "$json" | grep -o '"tag_name": *"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/' >"$scratch/tags"
+  printf '%s' "$json" | grep -o '"prerelease": *[a-z]*' | sed -E 's/.*: *//' >"$scratch/prerelease"
+  stable="$(paste -d ' ' "$scratch/prerelease" "$scratch/tags" | awk '$1 == "false" { print $2 }' | sort -V | tail -1)"
+  if [ -n "$stable" ]; then
+    printf '%s' "$stable"
+  else
+    sort -V "$scratch/tags" | tail -1
+  fi
+  rm -rf "$scratch"
 }
 
 log "Resolving ${VERSION} release for ${PLATFORM}..."
-if RELEASE_JSON="$(curl -sSfL "$API_URL")"; then
-  TAG="$(extract_tag_name <<<"$RELEASE_JSON")"
+if [ "$VERSION" = "latest" ]; then
+  # A 404 here is an expected, handled case below (every argus release so
+  # far is a prerelease, and this endpoint excludes those) — silence it so
+  # a normal install doesn't print a scary raw curl error on every run.
+  RELEASE_JSON="$(curl -sSfL "$API_URL" 2>/dev/null)" || true
+else
+  RELEASE_JSON="$(curl -sSfL "$API_URL")" || true
+fi
+if [ -n "$RELEASE_JSON" ]; then
+  TAG="$(printf '%s' "$RELEASE_JSON" | extract_tag_name)"
 elif [ "$VERSION" = "latest" ]; then
   # /releases/latest only returns non-prerelease releases; every argus
   # release so far is a prerelease (v0.1.0-rc.N), so it 404s here. Fall
   # back to picking the newest entry in the full release list instead.
-  API_URL="https://api.github.com/repos/${REPO}/releases"
+  API_URL="https://api.github.com/repos/${REPO}/releases?per_page=100"
   RELEASE_JSON="$(curl -sSfL "$API_URL")" || die "fetching release metadata from ${API_URL}"
-  TAG="$(pick_latest_tag <<<"$RELEASE_JSON")"
+  TAG="$(printf '%s' "$RELEASE_JSON" | pick_latest_tag)"
 else
   die "fetching release metadata from ${API_URL}"
 fi
@@ -204,9 +232,7 @@ if [ -w "$INSTALL_DIR" ]; then
 elif command -v sudo >/dev/null 2>&1; then
   log "${INSTALL_DIR} is not writable, using sudo..."
   sudo install -m 0755 "${TMP_DIR}/${ASSET}" "${INSTALL_DIR}/argus"
-  if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
-    sudo codesign --force -s - "${INSTALL_DIR}/argus" 2>/dev/null || true
-  fi
+  resign_darwin_binary "${INSTALL_DIR}/argus" sudo
 else
   die "${INSTALL_DIR} is not writable and sudo is unavailable; set ARGUS_INSTALL_DIR to a writable directory on PATH"
 fi
