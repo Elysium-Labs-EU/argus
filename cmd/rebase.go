@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -119,10 +118,11 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 	// agent, and the pane sits idle forever. Resolved once here, before any
 	// downstream use (WorktreeOpen, InvalidateStatus, WriteBrief, WaitForStatus,
 	// the spawn line), so every one of them agrees on the same absolute path —
-	// mirrors --repo's resolution in spawnWorkers (cmd/supervise.go).
-	abs, err := filepath.Abs(opts.worktree)
+	// see supervisor.ResolveWorktree, which centralizes this for every
+	// --worktree/--repo-shaped flag (rebase, review, ship, supervise).
+	abs, err := supervisor.ResolveWorktree(opts.worktree)
 	if err != nil {
-		return fmt.Errorf("resolving --worktree %q: %w", opts.worktree, err)
+		return err
 	}
 	opts.worktree = abs
 	ctx := cmd.Context()
