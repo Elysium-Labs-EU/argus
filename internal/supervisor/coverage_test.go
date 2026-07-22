@@ -101,6 +101,36 @@ func TestWaitForStatusIgnoresStaleStatus(t *testing.T) {
 	}
 }
 
+// TestWaitForStatusAcceptsLyingUpdatedAt covers argus issue #90 for the
+// rebase call site: WaitForStatus must judge freshness by the status file's
+// mtime, not the worker's self-reported UpdatedAt. A worker that writes a
+// garbage/template UpdatedAt reading as before since must still have its
+// real, post-since write picked up.
+func TestWaitForStatusAcceptsLyingUpdatedAt(t *testing.T) {
+	wt := t.TempDir()
+	since := time.Now()
+
+	// Written after since (a real mtime later than since), but its UpdatedAt
+	// content lies and claims to be from an hour before since.
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task:      "r",
+		Phase:     protocol.PhaseAwaitingReview,
+		UpdatedAt: since.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seeding status with lying UpdatedAt: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	status, seen := WaitForStatus(ctx, wt, 5*time.Millisecond, since)
+	if !seen {
+		t.Fatal("WaitForStatus discarded a real post-since status because of a lying UpdatedAt")
+	}
+	if status.Phase != protocol.PhaseAwaitingReview {
+		t.Errorf("phase: got %q want awaiting_review", status.Phase)
+	}
+}
+
 func TestCurrentBranchAndRemoteOwnerRepo(t *testing.T) {
 	wt := t.TempDir()
 	run := gitInit(t, wt)

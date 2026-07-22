@@ -75,15 +75,36 @@ func InvalidateStatus(worktree string) error {
 	return nil
 }
 
-// WaitForStatus polls a worktree's status file until it reports a phase written
-// at or after since, reaches a terminal phase, or ctx is canceled, returning the
-// last such status read and whether one was seen. A status.json whose
-// updated_at is at or before since is a stale leftover — from before this
-// dispatch, or from a race with InvalidateStatus — and is treated the same as
-// no file at all, so a caller can never mistake it for this dispatch's outcome
-// (argus issue #50). since should be no later than the moment the worker was
-// dispatched. It is the single-worker analog of the supervise watch loop, for
-// commands like rebase that dispatch one worker.
+// isStale reports whether the status file at path was last written at or
+// before since, using the file's own mtime rather than any timestamp the
+// worker self-reported inside it. InvalidateStatus os.Removes status.json
+// before a worker is dispatched, so any file present afterward was
+// necessarily (re)written by this dispatch — its mtime is ground truth,
+// immune to a worker writing a wrong clock value into the JSON body (argus
+// issue #90; the worker-reported UpdatedAt was trusted for this decision
+// before, letting a garbage timestamp make a real, current status look
+// pre-dispatch forever). A file that can't be stat'd is treated as not
+// stale; the caller's own handling of the read error decides that case.
+func isStale(path string, since time.Time) bool {
+	if since.IsZero() {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.ModTime().After(since)
+}
+
+// WaitForStatus polls a worktree's status file until it reports a phase
+// written at or after since, reaches a terminal phase, or ctx is canceled,
+// returning the last such status read and whether one was seen. A status.json
+// whose file mtime is at or before since is a stale leftover — from before
+// this dispatch, or from a race with InvalidateStatus — and is treated the
+// same as no file at all, so a caller can never mistake it for this
+// dispatch's outcome (argus issue #50). since should be no later than the
+// moment the worker was dispatched. It is the single-worker analog of the
+// supervise watch loop, for commands like rebase that dispatch one worker.
 func WaitForStatus(ctx context.Context, worktree string, interval time.Duration, since time.Time) (protocol.Status, bool) {
 	path := protocol.StatusPath(worktree)
 	timer := time.NewTimer(0)
@@ -95,7 +116,7 @@ func WaitForStatus(ctx context.Context, worktree string, interval time.Duration,
 		case <-ctx.Done():
 			return last, hasFile
 		case <-timer.C:
-			if s, err := protocol.Load(path); err == nil && s.UpdatedAt.After(since) {
+			if s, err := protocol.Load(path); err == nil && !isStale(path, since) {
 				last = s
 				hasFile = true
 				if protocol.IsTerminal(s.Phase) {
