@@ -3,11 +3,14 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
@@ -214,6 +217,141 @@ func TestShipChangeReturnsErrorWhenNothingToCommit(t *testing.T) {
 	}
 	if f.opened != nil {
 		t.Error("no PR should be opened when there is nothing to ship")
+	}
+}
+
+// fakeJiraWriter is a jiraIssueWriter stub for tests: it records every
+// Transition/Comment/Assign call, and can be made to fail one of them by
+// name via failOn.
+type fakeJiraWriter struct {
+	failOn      string
+	transitions []string
+	comments    []string
+	assignees   []string
+}
+
+func (f *fakeJiraWriter) Transition(_ context.Context, _, idOrName string) error {
+	if f.failOn == "transition" {
+		return errors.New("boom transition")
+	}
+	f.transitions = append(f.transitions, idOrName)
+	return nil
+}
+
+func (f *fakeJiraWriter) Comment(_ context.Context, _, body string) error {
+	if f.failOn == "comment" {
+		return errors.New("boom comment")
+	}
+	f.comments = append(f.comments, body)
+	return nil
+}
+
+func (f *fakeJiraWriter) Assign(_ context.Context, _, accountID string) error {
+	if f.failOn == "assign" {
+		return errors.New("boom assign")
+	}
+	f.assignees = append(f.assignees, accountID)
+	return nil
+}
+
+// withFakeJiraClient points newJiraClient at w for the duration of one test,
+// restoring the original (jira.NewFromEnv) on cleanup.
+func withFakeJiraClient(t *testing.T, w jiraIssueWriter) {
+	t.Helper()
+	original := newJiraClient
+	newJiraClient = func() (jiraIssueWriter, error) { return w, nil }
+	t.Cleanup(func() { newJiraClient = original })
+}
+
+func shipChangeTestSetup(t *testing.T) (worktree string, cmd *cobra.Command, buf *bytes.Buffer) {
+	t.Helper()
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare init: %v\n%s", err, out)
+	}
+	wt := gitRepo(t,
+		[]string{"checkout", "-q", "-b", "feat-x"},
+		[]string{"remote", "add", "origin", remote},
+	)
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := newShipCmd()
+	var b bytes.Buffer
+	c.SetOut(&b)
+	c.SetErr(&b)
+	c.SetContext(context.Background())
+	return wt, c, &b
+}
+
+// TestShipChangeSkipsJiraHookWhenJiraIssueUnset covers the default-off gate:
+// no --jira-issue means postShipJira never runs, even if newJiraClient is
+// stubbed to succeed.
+func TestShipChangeSkipsJiraHookWhenJiraIssueUnset(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	w := &fakeJiraWriter{}
+	withFakeJiraClient(t, w)
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	if err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target); err != nil {
+		t.Fatalf("shipChange: %v", err)
+	}
+	if len(w.comments) != 0 {
+		t.Errorf("want no Jira calls without --jira-issue, got comments %v", w.comments)
+	}
+}
+
+// TestShipChangeRunsJiraPostShipHook covers the full hook: transition,
+// assign, and a comment linking the opened PR, all issued once --jira-issue
+// (plus --jira-transition/--jira-assignee) are set.
+func TestShipChangeRunsJiraPostShipHook(t *testing.T) {
+	wt, cmd, buf := shipChangeTestSetup(t)
+	w := &fakeJiraWriter{}
+	withFakeJiraClient(t, w)
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	args := &shipArgs{
+		worktree: wt, base: "main",
+		jiraIssue: "PROJ-1", jiraTransition: "In Review", jiraAssignee: "acc-123",
+	}
+	if err := shipChange(cmd, f, args, target); err != nil {
+		t.Fatalf("shipChange: %v", err)
+	}
+
+	if len(w.transitions) != 1 || w.transitions[0] != "In Review" {
+		t.Errorf("transitions = %v, want [In Review]", w.transitions)
+	}
+	if len(w.assignees) != 1 || w.assignees[0] != "acc-123" {
+		t.Errorf("assignees = %v, want [acc-123]", w.assignees)
+	}
+	if len(w.comments) != 1 || !strings.Contains(w.comments[0], "https://fake/pull/99") {
+		t.Errorf("comments = %v, want one linking the opened PR", w.comments)
+	}
+	if strings.Contains(buf.String(), "jira post-ship") {
+		t.Errorf("no jira warning expected on success, got: %q", buf.String())
+	}
+}
+
+// TestShipChangeWarnsButSucceedsWhenJiraHookFails covers the best-effort
+// contract: a Jira post-ship failure is surfaced as a warning but does not
+// fail the ship, which already succeeded (PR opened, branch pushed) by the
+// time the hook runs.
+func TestShipChangeWarnsButSucceedsWhenJiraHookFails(t *testing.T) {
+	wt, cmd, buf := shipChangeTestSetup(t)
+	w := &fakeJiraWriter{failOn: "comment"}
+	withFakeJiraClient(t, w)
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	args := &shipArgs{worktree: wt, base: "main", jiraIssue: "PROJ-1"}
+	if err := shipChange(cmd, f, args, target); err != nil {
+		t.Fatalf("shipChange should still succeed when the jira hook fails: %v", err)
+	}
+	if !strings.Contains(buf.String(), "jira post-ship for PROJ-1") {
+		t.Errorf("want a jira post-ship warning in output, got: %q", buf.String())
 	}
 }
 

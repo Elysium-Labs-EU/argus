@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -247,6 +248,182 @@ func TestFetchIssueSurfacesCloudIDResolutionError(t *testing.T) {
 			t.Errorf("want resolution error, got %v", err)
 		}
 	})
+}
+
+// TestTransitionResolvesNameAndPostsID covers the common case: the caller
+// passes a transition's display name (e.g. "In Review"), Transition resolves
+// it against GET /issue/{key}/transitions, and POSTs the matching numeric ID
+// — not the name itself, which Jira's transitions endpoint rejects.
+func TestTransitionResolvesNameAndPostsID(t *testing.T) {
+	var gotBody map[string]any
+	var gotAuth, gotPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/transitions", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"transitions":[{"id":"21","name":"In Review"},{"id":"31","name":"Done"}]}`))
+		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &gotBody)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	if err := c.Transition(context.Background(), "PROJ-1", "in review"); err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("dev@example.com:secret-token"))
+	if gotAuth != wantAuth {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, wantAuth)
+	}
+	if gotPath != "/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/transitions" {
+		t.Errorf("request path = %q", gotPath)
+	}
+	transition, _ := gotBody["transition"].(map[string]any)
+	if transition["id"] != "21" {
+		t.Errorf("posted transition = %+v, want id 21 (resolved from name)", gotBody)
+	}
+}
+
+// TestTransitionSurfacesUnknownName covers a name/ID with no match among the
+// issue's available transitions: it must fail clearly instead of silently
+// posting a bogus id or an empty one.
+func TestTransitionSurfacesUnknownName(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/transitions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"transitions":[{"id":"21","name":"In Review"}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	err := c.Transition(context.Background(), "PROJ-1", "Nonexistent")
+	if err == nil || !strings.Contains(err.Error(), "no transition") {
+		t.Errorf("want a clear unknown-transition error, got %v", err)
+	}
+}
+
+// TestCommentPostsADFEncodedBody covers Comment encoding a plain-text body as
+// ADF (see textToADF in adf.go) before POSTing, since Jira's comment endpoint
+// rejects a plain string body.
+func TestCommentPostsADFEncodedBody(t *testing.T) {
+	var gotBody map[string]any
+	var gotPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/comment", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		w.WriteHeader(http.StatusCreated)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	if err := c.Comment(context.Background(), "PROJ-1", "Opened https://example.test/pull/1"); err != nil {
+		t.Fatalf("Comment: %v", err)
+	}
+
+	if gotPath != "/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/comment" {
+		t.Errorf("request path = %q", gotPath)
+	}
+	adfBody, _ := gotBody["body"].(map[string]any)
+	if adfBody["type"] != "doc" {
+		t.Errorf("comment body = %+v, want ADF doc envelope", gotBody)
+	}
+}
+
+// TestCommentSurfacesAPIError covers a non-2xx response from POST
+// /issue/{key}/comment surfacing Jira's error message.
+func TestCommentSurfacesAPIError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/comment", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"errorMessages":["not permitted to comment"]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	err := c.Comment(context.Background(), "PROJ-1", "body")
+	if err == nil || !strings.Contains(err.Error(), "not permitted to comment") {
+		t.Errorf("want surfaced API message, got %v", err)
+	}
+}
+
+// TestAssignSetsAccountID covers Assign PUTting the given accountID, and
+// TestAssignEmptyUnassigns covers "" encoding as a null accountId (Jira's own
+// unassign semantics) rather than an empty string.
+func TestAssignSetsAccountID(t *testing.T) {
+	var gotBody map[string]any
+	var gotMethod, gotPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/assignee", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	if err := c.Assign(context.Background(), "PROJ-1", "acc-123"); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+
+	if gotMethod != http.MethodPut {
+		t.Errorf("method = %s, want PUT", gotMethod)
+	}
+	if gotPath != "/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/assignee" {
+		t.Errorf("request path = %q", gotPath)
+	}
+	if gotBody["accountId"] != "acc-123" {
+		t.Errorf("accountId = %+v, want acc-123", gotBody)
+	}
+}
+
+func TestAssignEmptyUnassigns(t *testing.T) {
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/assignee", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	if err := c.Assign(context.Background(), "PROJ-1", ""); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	if v, ok := gotBody["accountId"]; !ok || v != nil {
+		t.Errorf("accountId = %+v (ok=%v), want explicit null", v, ok)
+	}
 }
 
 // noConfigFile points JIRA_CONFIG_FILE at a path that does not exist, so

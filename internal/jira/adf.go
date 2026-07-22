@@ -9,8 +9,36 @@ import "strings"
 // than erroring.
 type adfNode struct {
 	Type    string    `json:"type"`
-	Text    string    `json:"text"`
+	Text    string    `json:"text,omitempty"`
+	Content []adfNode `json:"content,omitempty"`
+}
+
+// adfDoc is the top-level Atlassian Document Format envelope Jira expects
+// wherever it accepts rich text for writing (e.g. a comment body): a doc-typed
+// node plus the version number, neither of which flattenADF's read-side
+// adfNode carries.
+type adfDoc struct {
+	Type    string    `json:"type"`
 	Content []adfNode `json:"content"`
+	Version int       `json:"version"`
+}
+
+// textToADF renders plain text into a minimal ADF document: each line becomes
+// its own paragraph, so a multi-line comment body (e.g. a PR link followed by
+// a status line) doesn't collapse onto one line. It is the encode-side
+// counterpart to flattenADF, needed because Jira's comment endpoint only
+// accepts ADF bodies, never plain text.
+func textToADF(text string) adfDoc {
+	lines := strings.Split(text, "\n")
+	content := make([]adfNode, 0, len(lines))
+	for _, line := range lines {
+		para := adfNode{Type: "paragraph"}
+		if line != "" {
+			para.Content = []adfNode{{Type: "text", Text: line}}
+		}
+		content = append(content, para)
+	}
+	return adfDoc{Type: "doc", Version: 1, Content: content}
 }
 
 // skippedADFNodes are block types whose content is not prose (tables, panels,
