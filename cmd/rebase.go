@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -84,7 +85,25 @@ type rebaseOpts struct {
 	force         bool
 	dryRun        bool
 	noCredProxy   bool
+	// livenessTimeout and livenessInterval bound dispatchIntoPane's post-spawn
+	// poll confirming the newly spawned agent actually came up (see
+	// waitForAgentLive). They are internal knobs, not CLI flags — zero means
+	// "use the package default" (defaultLivenessTimeout / defaultLivenessInterval)
+	// — so a test can override them to run the poll on a fast, deterministic
+	// clock instead of the real 30s/500ms production cadence.
+	livenessTimeout  time.Duration
+	livenessInterval time.Duration
 }
+
+// defaultLivenessTimeout and defaultLivenessInterval are waitForAgentLive's
+// production pace: generous enough that a slow shell rc-file startup or a
+// loaded machine doesn't false-positive, but bounded so a pane whose spawn
+// line silently failed (argus issue #96) is reported in tens of seconds
+// instead of hanging WaitForStatus's open-ended wait forever.
+const (
+	defaultLivenessTimeout  = 30 * time.Second
+	defaultLivenessInterval = 500 * time.Millisecond
+)
 
 // runRebase is newRebaseCmd's RunE body. It detects whether the worktree's branch
 // conflicts with its base, then either reports the plan (--dry-run / no conflict)
@@ -93,6 +112,19 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 	if opts.worktree == "" {
 		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus rebase --worktree <path>"}
 	}
+	// A worktree given relative to argus's own cwd — not the target pane's —
+	// breaks the `cd <worktree> && <launcher> ...` line dispatchIntoPane types
+	// into the pane once herdr reuses a pane already rooted somewhere else
+	// (argus issue #96): the relative cd fails, the && chain never launches the
+	// agent, and the pane sits idle forever. Resolved once here, before any
+	// downstream use (WorktreeOpen, InvalidateStatus, WriteBrief, WaitForStatus,
+	// the spawn line), so every one of them agrees on the same absolute path —
+	// mirrors --repo's resolution in spawnWorkers (cmd/supervise.go).
+	abs, err := filepath.Abs(opts.worktree)
+	if err != nil {
+		return fmt.Errorf("resolving --worktree %q: %w", opts.worktree, err)
+	}
+	opts.worktree = abs
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -214,7 +246,56 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	if err != nil {
 		return err
 	}
-	return client.PaneRun(ctx, paneID, spawnLine)
+	if err := client.PaneRun(ctx, paneID, spawnLine); err != nil {
+		return err
+	}
+	// Only the freshly spawned branch needs this check: AgentPrompt above
+	// re-tasked an agent herdr already confirmed live, but PaneRun just typed a
+	// shell command line into the pane blind — it succeeds whether or not the
+	// `cd` at the front of it actually worked (argus issue #96: a relative
+	// --worktree reused into a pane already rooted there breaks the `cd ... &&
+	// <launcher>` chain, so the launcher never runs and no agent ever comes up).
+	// Confirming liveness here, bounded, catches that before it becomes an
+	// open-ended hang in WaitForStatus below, which is legitimately unbounded
+	// once an agent is known to be live.
+	return waitForAgentLive(ctx, client, paneID, opts.livenessTimeout, opts.livenessInterval)
+}
+
+// waitForAgentLive polls client.AgentGet(paneID) until herdr reports a live
+// agent, a genuine AgentGet error occurs, ctx is canceled, or timeout elapses
+// — whichever comes first. timeout and interval fall back to
+// defaultLivenessTimeout/defaultLivenessInterval when zero. On timeout the
+// returned error names the pane and the likely shell-level cause, since a
+// bare "no status before the deadline" from WaitForStatus later would leave
+// an operator no clue the agent never even started.
+func waitForAgentLive(ctx context.Context, client herdr.Client, paneID string, timeout, interval time.Duration) error {
+	if timeout <= 0 {
+		timeout = defaultLivenessTimeout
+	}
+	if interval <= 0 {
+		interval = defaultLivenessInterval
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("no agent came up in pane %s within %s; the spawn line's `cd && <launcher>` likely failed silently (e.g. the worktree path was already the pane's cwd, or a broken shell rc file)", paneID, timeout)
+		case <-timer.C:
+			_, live, err := client.AgentGet(ctx, paneID)
+			if err != nil {
+				return fmt.Errorf("checking whether the spawned agent in %s came up: %w", paneID, err)
+			}
+			if live {
+				return nil
+			}
+			timer.Reset(interval)
+		}
+	}
 }
 
 // buildRebaseSpawnLine resolves the shell command line argus types into a

@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -37,14 +39,46 @@ func initGitDir(t *testing.T) string {
 	return dir
 }
 
+// initGitDirAt is initGitDir with a caller-chosen path instead of a fresh
+// t.TempDir(), and its own "origin" remote pointing at itself (so FetchBase
+// succeeds against branch itself, the TestRunRebaseDryRunForcesPastNoConflict
+// trick) — needed to test --worktree resolution against a specific relative
+// path/cwd combination, which requires the repo living at an exact,
+// predictable location.
+func initGitDirAt(t *testing.T, dir, branch string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	run("checkout", "-q", "-b", branch)
+	run("commit", "-q", "--allow-empty", "-m", "work")
+	run("remote", "add", "origin", dir)
+}
+
 // fakeRebaseClient routes "herdr worktree ..." and "herdr pane ..." calls to
 // caller-supplied outcomes, so dispatchRebaseWorker's herdr interactions can be
-// tested without a real herdr binary. Its "agent get" reply always reports no
-// live agent (herdr.ErrAgentNotFound) — a bare shell pane, the scenario every
-// existing test here models — so dispatch falls through to the PaneRun spawn
-// path paneErr exercises. TestDispatchRebaseWorkerReusesLiveAgent below covers
-// the opposite branch with its own fake.
+// tested without a real herdr binary. Its "agent get" reply reports no live
+// agent (herdr.ErrAgentNotFound) — a bare shell pane, the scenario every
+// existing test here models — until a "pane run" call succeeds, at which point
+// it starts reporting live: this models a spawn that actually comes up, so
+// dispatchIntoPane's post-spawn liveness poll (waitForAgentLive, argus issue
+// #96) sees a live agent on its very first check and every test here keeps
+// behaving as it did before that poll existed. paneErr exercises the PaneRun
+// failure path instead, in which case no agent ever spawns.
+// TestDispatchRebaseWorkerReusesLiveAgent below covers the reuse-live-agent
+// branch (no spawn, no liveness poll at all) with its own fake.
 func fakeRebaseClient(paneID string, worktreeErr, paneErr error) herdr.Client {
+	var mu sync.Mutex
+	var spawned bool
 	return herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
 		switch {
 		case len(args) > 0 && args[0] == "worktree":
@@ -53,11 +87,22 @@ func fakeRebaseClient(paneID string, worktreeErr, paneErr error) herdr.Client {
 			}
 			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, paneID), nil
 		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
-			return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
-		default:
+			mu.Lock()
+			live := spawned
+			mu.Unlock()
+			if !live {
+				return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+			}
+			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":"done"}}}`, paneID), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
 			if paneErr != nil {
 				return nil, paneErr
 			}
+			mu.Lock()
+			spawned = true
+			mu.Unlock()
+			return []byte(`{"result":{}}`), nil
+		default:
 			return []byte(`{"result":{}}`), nil
 		}
 	})
@@ -445,5 +490,362 @@ func TestDispatchIntoPaneAgentGetError(t *testing.T) {
 	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &rebaseOpts{worktree: t.TempDir(), launcher: "claude"})
 	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
 		t.Fatalf("want the AgentGet error propagated, got %v", err)
+	}
+}
+
+// capturingSpawnClient is fakeRebaseClient's spawn path (no live agent until a
+// "pane run" call succeeds, so waitForAgentLive's first poll finds it live
+// immediately) plus recording of the exact command line PaneRun was asked to
+// type into the pane, so a test can assert on the resolved --worktree's
+// absolute cd target (argus issue #96).
+func capturingSpawnClient(paneID string) (client herdr.Client, spawnLine func() string) {
+	var mu sync.Mutex
+	var spawned bool
+	var line string
+	client = herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "worktree":
+			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, paneID), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			mu.Lock()
+			live := spawned
+			mu.Unlock()
+			if !live {
+				return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+			}
+			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":"done"}}}`, paneID), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			mu.Lock()
+			spawned = true
+			if len(args) > 3 {
+				line = args[3]
+			}
+			mu.Unlock()
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+	return client, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return line
+	}
+}
+
+// TestRebaseSpawnLineUsesAbsoluteWorktree is the direct regression test for
+// argus issue #96: opts.worktree given relative to argus's own cwd (not the
+// target pane's) must be resolved to absolute before it reaches the spawn
+// line's `cd`, in every common relative form an operator or script might
+// pass. A relative cd that a reused pane's own cwd happens to already satisfy
+// silently no-ops the && chain, so the launcher never starts and dispatch
+// hangs forever waiting on a status.json that will never come.
+func TestRebaseSpawnLineUsesAbsoluteWorktree(t *testing.T) {
+	cases := []struct {
+		setup func(t *testing.T, base string) (repoDir, cwd, rel string)
+		name  string
+	}{
+		{
+			name: "nested (.claude/worktrees/x)",
+			setup: func(t *testing.T, base string) (string, string, string) {
+				t.Helper()
+				return filepath.Join(base, ".claude", "worktrees", "featx"), base, filepath.Join(".claude", "worktrees", "featx")
+			},
+		},
+		{
+			name: "dot-slash (./x)",
+			setup: func(t *testing.T, base string) (string, string, string) {
+				t.Helper()
+				return filepath.Join(base, "featx"), base, "./featx"
+			},
+		},
+		{
+			name: "dot-dot-slash (../x)",
+			setup: func(t *testing.T, base string) (string, string, string) {
+				t.Helper()
+				child := filepath.Join(base, "child")
+				if err := os.MkdirAll(child, 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", child, err)
+				}
+				return filepath.Join(base, "featx"), child, filepath.Join("..", "featx")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			base := t.TempDir()
+			repoDir, cwd, rel := tc.setup(t, base)
+			initGitDirAt(t, repoDir, "feat-x")
+			t.Chdir(cwd)
+
+			cmd := newRebaseCmd()
+			var buf bytes.Buffer
+			cmd.SetOut(&buf)
+			cmd.SetErr(&buf)
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			cmd.SetContext(ctx)
+
+			client, spawnLine := capturingSpawnClient("w1:p1")
+			opts := &rebaseOpts{
+				worktree: rel, base: "feat-x", force: true, launcher: "claude", noCredProxy: true,
+				interval: 10 * time.Millisecond, livenessTimeout: 100 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
+			}
+			_ = runRebase(cmd, client, opts) // no status.json ever written; only the spawn line matters here
+
+			if !filepath.IsAbs(opts.worktree) {
+				t.Errorf("opts.worktree = %q after runRebase, want an absolute path", opts.worktree)
+			}
+			wantAbs, err := filepath.Abs(repoDir)
+			if err != nil {
+				t.Fatalf("filepath.Abs(%q): %v", repoDir, err)
+			}
+			wantCd := "cd '" + wantAbs + "' &&"
+			if line := spawnLine(); !strings.Contains(line, wantCd) {
+				t.Errorf("spawn line = %q, want it to contain %q", line, wantCd)
+			}
+		})
+	}
+}
+
+// TestRebaseSpawnLineAbsoluteWorktreePassesThroughUnchanged confirms an
+// already-absolute --worktree is left alone: filepath.Abs is idempotent on a
+// clean absolute path, so runRebase's resolution should neither fail nor
+// rewrite it to something else.
+func TestRebaseSpawnLineAbsoluteWorktreePassesThroughUnchanged(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	repoDir := filepath.Join(t.TempDir(), "featx")
+	initGitDirAt(t, repoDir, "feat-x")
+
+	cmd := newRebaseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	cmd.SetContext(ctx)
+
+	client, spawnLine := capturingSpawnClient("w1:p1")
+	opts := &rebaseOpts{
+		worktree: repoDir, base: "feat-x", force: true, launcher: "claude", noCredProxy: true,
+		interval: 10 * time.Millisecond, livenessTimeout: 100 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
+	}
+	_ = runRebase(cmd, client, opts)
+
+	if opts.worktree != repoDir {
+		t.Errorf("opts.worktree = %q, want the already-absolute %q unchanged", opts.worktree, repoDir)
+	}
+	wantCd := "cd '" + repoDir + "' &&"
+	if line := spawnLine(); !strings.Contains(line, wantCd) {
+		t.Errorf("spawn line = %q, want it to contain %q", line, wantCd)
+	}
+}
+
+// TestRebaseSpawnLineWorktreeWithShellMetacharsSingleQuoted covers a relative
+// --worktree whose final path segment contains spaces and shell
+// metacharacters (a branch-derived directory name, e.g. from `feat
+// $(whoami)`): the resolved absolute path must still land single-quoted in
+// the spawn line, so the metacharacters are inert data to the pane's shell
+// rather than something it evaluates.
+func TestRebaseSpawnLineWorktreeWithShellMetacharsSingleQuoted(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	base := t.TempDir()
+	const segment = "feat $(whoami)"
+	repoDir := filepath.Join(base, segment)
+	initGitDirAt(t, repoDir, "feat-x")
+	t.Chdir(base)
+
+	cmd := newRebaseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	cmd.SetContext(ctx)
+
+	client, spawnLine := capturingSpawnClient("w1:p1")
+	opts := &rebaseOpts{
+		worktree: "./" + segment, base: "feat-x", force: true, launcher: "claude", noCredProxy: true,
+		interval: 10 * time.Millisecond, livenessTimeout: 100 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
+	}
+	_ = runRebase(cmd, client, opts)
+
+	if !filepath.IsAbs(opts.worktree) {
+		t.Errorf("opts.worktree = %q, want an absolute path", opts.worktree)
+	}
+	wantAbs, err := filepath.Abs(repoDir)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q): %v", repoDir, err)
+	}
+	wantCd := "cd '" + wantAbs + "' &&"
+	line := spawnLine()
+	if !strings.Contains(line, wantCd) {
+		t.Errorf("spawn line = %q, want it to contain the single-quoted absolute path %q", line, wantCd)
+	}
+	if strings.Contains(line, "cd "+wantAbs+" &&") { // unquoted form would let the shell evaluate $(whoami)
+		t.Errorf("spawn line = %q, worktree with shell metacharacters must be single-quoted", line)
+	}
+}
+
+// TestDispatchIntoPaneSpawnNeverComesLive is the direct regression test for
+// the second half of argus issue #96: a spawn-new-agent PaneRun that
+// "succeeds" (herdr accepted the keystrokes) but whose `cd && <launcher>`
+// chain silently failed inside the pane (e.g. because --worktree wasn't
+// absolute and the pane was already rooted there) must not hang forever
+// waiting on a status.json that will never be written. It must instead return
+// a bounded, pane-naming error once the liveness poll's deadline passes.
+func TestDispatchIntoPaneSpawnNeverComesLive(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+
+	opts := &rebaseOpts{
+		worktree: t.TempDir(), launcher: "claude", noCredProxy: true,
+		livenessTimeout: 40 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
+	}
+	start := time.Now()
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", opts)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want a bounded liveness error, got nil")
+	}
+	if !strings.Contains(err.Error(), "w1:p1") {
+		t.Errorf("want the error to name the pane, got %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("want dispatchIntoPane to return once the %s liveness deadline passes, not hang; took %s", opts.livenessTimeout, elapsed)
+	}
+}
+
+// TestDispatchIntoPaneSpawnLivenessRecovers confirms a spawned agent that
+// takes a few polls to report live is not mistaken for a hang: dispatch must
+// proceed normally (no error) once herdr eventually reports it live, well
+// within the deadline.
+func TestDispatchIntoPaneSpawnLivenessRecovers(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	var mu sync.Mutex
+	var polls int
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			mu.Lock()
+			polls++
+			n := polls
+			mu.Unlock()
+			if n < 3 {
+				return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+			}
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"live"}}}`), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+
+	opts := &rebaseOpts{
+		worktree: t.TempDir(), launcher: "claude", noCredProxy: true,
+		livenessTimeout: 500 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
+	}
+	if err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", opts); err != nil {
+		t.Fatalf("dispatchIntoPane: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if polls < 3 {
+		t.Errorf("want at least 3 agent-get polls before liveness was reported, got %d", polls)
+	}
+}
+
+// TestDispatchIntoPaneSpawnLivenessAgentGetError confirms a genuine AgentGet
+// failure during the post-spawn liveness poll (a transport/decode error, not
+// herdr's expected "no live agent" outcome) surfaces immediately rather than
+// being retried away until the deadline.
+func TestDispatchIntoPaneSpawnLivenessAgentGetError(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	var mu sync.Mutex
+	var polls int
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			mu.Lock()
+			polls++
+			n := polls
+			mu.Unlock()
+			if n == 1 {
+				// The initial "does this pane already have a live agent?" check.
+				return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+			}
+			return nil, errors.New("herdr: socket unavailable")
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+
+	opts := &rebaseOpts{
+		worktree: t.TempDir(), launcher: "claude", noCredProxy: true,
+		livenessTimeout: 500 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
+	}
+	start := time.Now()
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", opts)
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
+		t.Fatalf("want the AgentGet error surfaced, got %v", err)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("want the error surfaced immediately, not retried until the %s deadline; took %s", opts.livenessTimeout, elapsed)
+	}
+}
+
+// TestDispatchIntoPaneSpawnLivenessContextCanceled confirms the liveness poll
+// returns promptly via ctx.Err() when the parent context is canceled mid-poll,
+// instead of running out its own timeout.
+func TestDispatchIntoPaneSpawnLivenessContextCanceled(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	opts := &rebaseOpts{
+		worktree: t.TempDir(), launcher: "claude", noCredProxy: true,
+		livenessTimeout: 5 * time.Second, livenessInterval: 5 * time.Millisecond,
+	}
+	start := time.Now()
+	err := dispatchIntoPane(ctx, logger, client, "w1:p1", "feat-x", opts)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("want prompt return on ctx cancellation, not waiting out the %s timeout; took %s", opts.livenessTimeout, elapsed)
 	}
 }
