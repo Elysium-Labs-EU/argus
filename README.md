@@ -33,6 +33,8 @@ The design follows Adam Jacob's idea of reducing agent token spend by moving the
 * A forge token for the host the worktree points at (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, `GITLAB_TOKEN` for gitlab.com, `FORGE_TOKEN` for any self-hosted Gitea/Forgejo, ...), for `argus ship`. If the env var isn't set, argus falls back to `gh auth token` on github.com, `glab auth token` on gitlab.com, or `git credential fill` elsewhere (Codeberg/Gitea) — the same non-interactive credential lookup `gh`/`glab` do for their own commands — so a caller never has to export the token into argus's process env itself. Self-hosted GitLab is not yet supported: only the exact host `gitlab.com` gets the GitLab API client — any other host, including a self-hosted GitLab, is treated as Gitea/Forgejo.
 * `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN` — or a JSON config file at `$JIRA_CONFIG_FILE` or `~/.argus/jira.json` (`{"base_url":...,"email":...,"api_token":...}`) — only for `supervise --jira-issues`.
 
+Every env var name above (a forge token, an agent key like `ANTHROPIC_API_KEY`) is just argus's built-in default, not a requirement to use exactly that name. Point argus at a different one with `--credential-env <name>=<ENV_VAR>` (`supervise`/`ship`/`rebase`), e.g. `--credential-env github.com=MY_GH_TOKEN --credential-env anthropic=MY_CLAUDE_KEY`, or persist it once with `argus config set credential.<name> <ENV_VAR>` so you don't have to repeat the flag every invocation. `supervise`'s credential proxy (see below) also fronts any agent key it can resolve this way, not just Anthropic's.
+
 ## Install
 
 **From a release**
@@ -108,6 +110,7 @@ argus ship --worktree /path/to/project-feat-retry --issue 42
 | `argus ship --worktree <path>` | Commit, push, and open a pull request (forge auto-detected), refused without an approving verdict unless `--force` |
 | `argus rebase --worktree <path>` | Dispatch the worktree's own worker to resolve a post-merge conflict and force-push |
 | `argus stats` | Aggregate the run logs under `~/.argus/runs` into escalation rate, review parse-fail rate, and tokens per task |
+| `argus config set credential.<name> <ENV_VAR>` | Persist which env var carries a credential (a forge host or agent-key name) to `~/.argus/config.toml`, so `--credential-env` doesn't need repeating every invocation |
 
 Pass `--debug` on any command to tee the typed event log to stderr as it is written; the log is always persisted under `~/.argus/runs` regardless.
 

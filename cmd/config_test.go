@@ -1,0 +1,96 @@
+package cmd
+
+import (
+	"bytes"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestConfigSetWritesCredentialOverride(t *testing.T) {
+	t.Setenv("ARGUS_CONFIG_FILE", filepath.Join(t.TempDir(), "config.toml"))
+
+	cmd := newConfigCmd()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"set", "credential.github.com", "MY_GH_TOKEN"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config set: %v", err)
+	}
+	if !strings.Contains(buf.String(), "credential.github.com") {
+		t.Errorf("expected confirmation output naming the key, got %q", buf.String())
+	}
+
+	overrides, err := resolveCredentialOverrides(nil)
+	if err != nil {
+		t.Fatalf("resolveCredentialOverrides: %v", err)
+	}
+	if overrides["github.com"] != "MY_GH_TOKEN" {
+		t.Errorf("persisted override = %v, want github.com=MY_GH_TOKEN", overrides)
+	}
+}
+
+func TestConfigSetRejectsUnsupportedKey(t *testing.T) {
+	t.Setenv("ARGUS_CONFIG_FILE", filepath.Join(t.TempDir(), "config.toml"))
+
+	cmd := newConfigCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"set", "launcher", "codex"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error for an unsupported config key, got nil")
+	}
+}
+
+func TestResolveCredentialOverridesCLIWinsOverPersisted(t *testing.T) {
+	t.Setenv("ARGUS_CONFIG_FILE", filepath.Join(t.TempDir(), "config.toml"))
+
+	cmd := newConfigCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"set", "credential.anthropic", "CONFIG_VAR"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config set: %v", err)
+	}
+
+	overrides, err := resolveCredentialOverrides(map[string]string{"anthropic": "CLI_VAR"})
+	if err != nil {
+		t.Fatalf("resolveCredentialOverrides: %v", err)
+	}
+	if overrides["anthropic"] != "CLI_VAR" {
+		t.Errorf("CLI override = %q, want CLI_VAR to win over the persisted CONFIG_VAR", overrides["anthropic"])
+	}
+}
+
+func TestStartCredentialProxyNoneResolvableReturnsNilProxy(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	proxy, extraScrub, cleanup, err := startCredentialProxy(nil, nil)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("startCredentialProxy: %v", err)
+	}
+	if proxy != nil {
+		t.Errorf("expected a nil proxy when no known agent key resolves, got %v", proxy)
+	}
+	if len(extraScrub) != 0 {
+		t.Errorf("expected no extra scrub vars, got %v", extraScrub)
+	}
+}
+
+func TestStartCredentialProxyFrontsOverriddenAgentKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("MY_CLAUDE_KEY", "sk-real-key")
+
+	proxy, extraScrub, cleanup, err := startCredentialProxy(nil, map[string]string{"anthropic": "MY_CLAUDE_KEY"})
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("startCredentialProxy: %v", err)
+	}
+	if proxy == nil {
+		t.Fatal("expected a proxy fronting the overridden anthropic key")
+	}
+	if len(extraScrub) != 1 || extraScrub[0] != "MY_CLAUDE_KEY" {
+		t.Errorf("extraScrub = %v, want [MY_CLAUDE_KEY] so the real secret's var is withheld from the worker", extraScrub)
+	}
+}

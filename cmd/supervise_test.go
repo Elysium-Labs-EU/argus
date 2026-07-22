@@ -33,7 +33,7 @@ func TestSpawnWorkersIssuesOnlyPassesGuard(t *testing.T) {
 	// into tasks/branches. repo is a non-git tempdir so it fails downstream
 	// (resolving the forge) instead — proof the guard itself let it through.
 	client := fakeClient()
-	_, err := spawnWorkers(context.Background(), client, &workerInput{repo: t.TempDir()}, []int{1}, nil)
+	_, err := spawnWorkers(context.Background(), client, &workerInput{repo: t.TempDir()}, []int{1}, nil, nil)
 	if err == nil {
 		t.Fatal("want a downstream error resolving the forge for a non-git repo")
 	}
@@ -44,7 +44,7 @@ func TestSpawnWorkersIssuesOnlyPassesGuard(t *testing.T) {
 
 func TestFoldIssueSourcesNoop(t *testing.T) {
 	in := &workerInput{tasks: []string{"existing"}, branches: []string{"existing-branch"}}
-	if err := foldIssueSources(context.Background(), in, nil, nil); err != nil {
+	if err := foldIssueSources(context.Background(), in, nil, nil, nil); err != nil {
 		t.Fatalf("foldIssueSources: %v", err)
 	}
 	if len(in.tasks) != 1 || len(in.branches) != 1 {
@@ -56,7 +56,7 @@ func TestFoldIssueSourcesIssuesError(t *testing.T) {
 	// repo isn't a git checkout, so resolving the origin remote fails before any
 	// network call — exercises the --issues error path without a real forge.
 	in := &workerInput{repo: t.TempDir()}
-	if err := foldIssueSources(context.Background(), in, []int{1}, nil); err == nil {
+	if err := foldIssueSources(context.Background(), in, []int{1}, nil, nil); err == nil {
 		t.Fatal("want error resolving forge for a non-git repo")
 	}
 }
@@ -69,7 +69,7 @@ func TestFoldIssueSourcesJiraError(t *testing.T) {
 	// doesn't accidentally pass on a machine with a real ~/.argus/jira.json.
 	t.Setenv("JIRA_CONFIG_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
 	in := &workerInput{repo: t.TempDir()}
-	if err := foldIssueSources(context.Background(), in, nil, []string{"PROJ-1"}); err == nil {
+	if err := foldIssueSources(context.Background(), in, nil, []string{"PROJ-1"}, nil); err == nil {
 		t.Fatal("want error building jira client without JIRA_* env vars or a config file")
 	}
 }
@@ -409,7 +409,7 @@ func TestSpawnWorkersTasksFileAppendsToTasks(t *testing.T) {
 
 	workers, err := spawnWorkers(context.Background(), client, &workerInput{
 		repo: "/pinned", tasksFile: path,
-	}, nil, nil)
+	}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("spawnWorkers: %v", err)
 	}

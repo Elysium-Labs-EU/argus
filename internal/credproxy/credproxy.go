@@ -71,29 +71,85 @@ type Upstream struct {
 	Name   string
 }
 
-// Anthropic fronts the Anthropic API with realKey. Workers get the sentinel in
-// ANTHROPIC_API_KEY and their base URL pointed at the proxy; the proxy replaces
-// the sentinel with realKey in the x-api-key header (and supplies the required
-// anthropic-version when the caller omitted it) before forwarding.
-func Anthropic(realKey string) *Upstream {
-	target, _ := url.Parse("https://api.anthropic.com")
-	return &Upstream{
-		Name:   "anthropic",
-		Target: target,
-		inject: func(r *http.Request) {
-			r.Header.Del("Authorization")
-			r.Header.Set("x-api-key", realKey)
-			if r.Header.Get("anthropic-version") == "" {
-				r.Header.Set("anthropic-version", "2023-06-01")
-			}
+// KeySpec describes one known agent-API-key shape credproxy can front: which
+// upstream it targets, which env vars a worker/launcher expects the key and
+// base URL under, and how the real key is injected into an outbound request.
+// Registry lists the shapes credproxy knows out of the box; a caller picks
+// which env var actually carries a given spec's key via the same resolution
+// mechanism forge token lookup uses (see internal/credential and cmd
+// --credential-env), not by editing this list — the hardcoding this
+// generalizes was ever having exactly one shape (Anthropic) wired into the
+// call site at all (see issue #64).
+type KeySpec struct {
+	Inject     func(r *http.Request, realKey string)
+	Name       string
+	Target     string
+	KeyVar     string
+	BaseURLVar string
+}
+
+// Registry lists the agent-key shapes credproxy fronts out of the box. Order
+// is fixed (not map iteration) so callers that front every resolvable spec
+// get deterministic behavior across runs.
+func Registry() []KeySpec {
+	return []KeySpec{
+		{
+			Name:       "anthropic",
+			Target:     "https://api.anthropic.com",
+			KeyVar:     "ANTHROPIC_API_KEY",
+			BaseURLVar: "ANTHROPIC_BASE_URL",
+			Inject: func(r *http.Request, realKey string) {
+				r.Header.Del("Authorization")
+				r.Header.Set("x-api-key", realKey)
+				if r.Header.Get("anthropic-version") == "" {
+					r.Header.Set("anthropic-version", "2023-06-01")
+				}
+			},
 		},
+		{
+			Name:       "openai",
+			Target:     "https://api.openai.com",
+			KeyVar:     "OPENAI_API_KEY",
+			BaseURLVar: "OPENAI_BASE_URL",
+			Inject: func(r *http.Request, realKey string) {
+				r.Header.Set("Authorization", "Bearer "+realKey)
+			},
+		},
+	}
+}
+
+// FromSpec builds an Upstream fronting spec's target with realKey: workers get
+// the sentinel under spec.KeyVar and their base URL (spec.BaseURLVar) pointed
+// at the proxy; spec.Inject swaps the sentinel for realKey on the way out.
+func FromSpec(spec KeySpec, realKey string) *Upstream {
+	target, _ := url.Parse(spec.Target)
+	return &Upstream{
+		Name:   spec.Name,
+		Target: target,
+		inject: func(r *http.Request) { spec.Inject(r, realKey) },
 		env: func(sentinel, baseURL string) []string {
 			return []string{
-				"ANTHROPIC_BASE_URL=" + baseURL + "/anthropic",
-				"ANTHROPIC_API_KEY=" + sentinel,
+				spec.BaseURLVar + "=" + baseURL + "/" + spec.Name,
+				spec.KeyVar + "=" + sentinel,
 			}
 		},
 	}
+}
+
+// Anthropic fronts the Anthropic API with realKey. Workers get the sentinel in
+// ANTHROPIC_API_KEY and their base URL pointed at the proxy; the proxy replaces
+// the sentinel with realKey in the x-api-key header (and supplies the required
+// anthropic-version when the caller omitted it) before forwarding. It is the
+// Registry's "anthropic" spec applied via FromSpec, kept as a named
+// constructor since it predates Registry and existing callers/tests still
+// build a proxy directly from it.
+func Anthropic(realKey string) *Upstream {
+	for _, spec := range Registry() {
+		if spec.Name == "anthropic" {
+			return FromSpec(spec, realKey)
+		}
+	}
+	panic("credproxy: anthropic spec missing from Registry")
 }
 
 // session is the worker behind one sentinel: agent is its log label, branch is

@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Elysium-Labs-EU/argus/internal/credproxy"
+	"github.com/Elysium-Labs-EU/argus/internal/credential"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/jira"
@@ -44,6 +44,7 @@ func newSuperviseCmd() *cobra.Command {
 		worktrees     []string
 		workerRuntime string
 		allow         []string
+		credentialEnv map[string]string
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -63,14 +64,16 @@ each pane's directory in --panes mode).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client := herdr.New()
 
+			overrides, err := resolveCredentialOverrides(credentialEnv)
+			if err != nil {
+				return err
+			}
+
 			// --attach observes workers that are already running in their worktrees
 			// instead of spawning any: no worktree is created and no agent started,
 			// argus just watches their typed status and reports. Everything else
 			// (tasks/branches/issues, worktree creation) belongs to the spawn path.
-			var (
-				workers []supervisor.Worker
-				err     error
-			)
+			var workers []supervisor.Worker
 			if attach {
 				// --attach watches a worktree argus did not create, so it has no
 				// idea what the worker actually branched from. Silently falling
@@ -89,7 +92,7 @@ each pane's directory in --panes mode).`,
 			} else {
 				workers, err = spawnWorkers(cmd.Context(), client, &workerInput{
 					panes: panes, branches: branches, tasks: tasks, tasksFile: tasksFile, repo: repo,
-				}, issues, jiraIssues)
+				}, issues, jiraIssues, overrides)
 			}
 			if err != nil {
 				return err
@@ -101,7 +104,7 @@ each pane's directory in --panes mode).`,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel,
 				maxDiffLines: maxDiffLines, sharedGlobs: sharedGlobs, osGlobs: osGlobs, reviewGlobs: reviewGlobs,
-				allow: allow,
+				allow: allow, credentialEnv: overrides,
 			})
 		},
 	}
@@ -130,6 +133,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&worktrees, "worktrees", nil, "with --attach: explicit worktree paths to watch (comma-separated)")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate each worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
 	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a repo not built with make)")
+	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	return cmd
 }
 
@@ -138,14 +142,15 @@ each pane's directory in --panes mode).`,
 // RunE can pass them through without runSupervision growing a 15-argument
 // signature.
 type superviseOpts struct {
-	workerRuntime string
+	credentialEnv map[string]string
 	reviewModel   string
 	base          string
 	launcher      string
+	workerRuntime string
 	osGlobs       []string
-	reviewGlobs   []string
 	sharedGlobs   []string
 	allow         []string
+	reviewGlobs   []string
 	interval      time.Duration
 	timeout       time.Duration
 	maxDiffLines  int
@@ -178,7 +183,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		Base:          o.base,
 		Home:          home,
 		Launcher:      o.launcher,
-		ScrubEnv:      forge.StandardTokenVars(),
+		ScrubEnv:      append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
 		Interval:      o.interval,
 		Timeout:       o.timeout,
 		WorkerRuntime: o.workerRuntime,
@@ -208,45 +213,38 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 
 	// Front the workers' API traffic with a credential proxy so a worker is
 	// not handed the real key in its own environment. It runs only for a
-	// live spawn (a dry run spawns nothing) and only for API-key auth: when
-	// ANTHROPIC_API_KEY is unset (subscription/OAuth), there is no key to
-	// swap and the proxy stays off. For an unwrapped worker (no runtime
-	// adapter) that is still fine — it reaches the host's ~/.claude
-	// credentials directly and gets no credential isolation, but it works.
-	// An isolated worker has no such fallback; see the check below.
-	// --no-cred-proxy opts out entirely.
+	// live spawn (a dry run spawns nothing) and only when some known agent
+	// key actually resolves (see startCredentialProxy/credproxy.Registry) —
+	// when none does (e.g. subscription/OAuth, no key to swap), the proxy
+	// stays off. For an unwrapped worker (no runtime adapter) that is still
+	// fine — it reaches the host's own credentials (e.g. ~/.claude) directly
+	// and gets no credential isolation, but it works. An isolated worker has
+	// no such fallback; see the check below. --no-cred-proxy opts out
+	// entirely.
 	if !o.dryRun && !o.noCredProxy {
-		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-			proxy := credproxy.New(
-				func(agent, method, path string) {
-					logger.Action("credproxy", agent, method, path)
-				},
-				credproxy.Anthropic(key),
-			)
-			if err := proxy.Start(); err != nil {
-				return fmt.Errorf("starting credential proxy: %w", err)
-			}
-			defer func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_ = proxy.Shutdown(ctx)
-			}()
+		proxy, extraScrub, cleanup, err := startCredentialProxy(logger, o.credentialEnv)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		if proxy != nil {
 			cfg.Broker = proxy
+			cfg.ScrubEnv = append(cfg.ScrubEnv, extraScrub...)
 		}
 	}
 
 	// A runtime adapter's whole point is that the worker's filesystem does not
 	// contain ~/.claude (see docs/worker-runtime-protocol.md), so unlike the
 	// unwrapped path above, an isolated worker has no fallback credential
-	// source: if cfg.Broker is still nil here (no ANTHROPIC_API_KEY, or
-	// --no-cred-proxy), the worker gets nothing at all and fails deep inside
-	// the container with a bare "Not logged in" (issue #57). Fail fast at the
-	// one place that knows both facts at once, instead of letting that
-	// surprise happen mid-run.
+	// source: if cfg.Broker is still nil here (no known agent key resolved —
+	// see credproxy.Registry/startCredentialProxy — or --no-cred-proxy), the
+	// worker gets nothing at all and fails deep inside the container with a
+	// bare "Not logged in" (issue #57). Fail fast at the one place that knows
+	// both facts at once, instead of letting that surprise happen mid-run.
 	if !o.dryRun && cfg.Broker == nil && o.workerRuntime != "" && o.workerRuntime != "none" {
 		return &ui.UserError{
-			Err:  fmt.Errorf("--worker-runtime %s has no credential path: ANTHROPIC_API_KEY is unset (or --no-cred-proxy was passed), and an isolated worker cannot reach the host's ~/.claude", o.workerRuntime),
-			Hint: fmt.Sprintf("export ANTHROPIC_API_KEY=... to bridge credentials via credproxy, or drop --worker-runtime %s to run unwrapped (shares host ~/.claude directly)", o.workerRuntime),
+			Err:  fmt.Errorf("--worker-runtime %s has no credential path: no known agent key resolved (e.g. ANTHROPIC_API_KEY is unset, or --no-cred-proxy was passed), and an isolated worker cannot reach the host's own credentials", o.workerRuntime),
+			Hint: fmt.Sprintf("export ANTHROPIC_API_KEY=... (or the key for whichever agent --launcher runs) to bridge credentials via credproxy, or drop --worker-runtime %s to run unwrapped (shares the host's credentials directly)", o.workerRuntime),
 		}
 	}
 
@@ -315,7 +313,7 @@ type workerInput struct {
 // and --jira-issues into tasks/branches by fetching them from the forge or Jira,
 // then pairs the slices. It is the non-attach half of supervise, kept out of RunE
 // so each mode reads flat.
-func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string) ([]supervisor.Worker, error) {
+func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string) ([]supervisor.Worker, error) {
 	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && in.tasksFile == "" && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
@@ -336,7 +334,7 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 		}
 		in.tasks = append(in.tasks, fileTasks...)
 	}
-	if err := foldIssueSources(ctx, in, issues, jiraIssues); err != nil {
+	if err := foldIssueSources(ctx, in, issues, jiraIssues, credentialOverrides); err != nil {
 		return nil, err
 	}
 	return buildWorkers(ctx, client, in)
@@ -378,10 +376,10 @@ func loadTasksFile(path string) ([]string, error) {
 // branches only fill in.branches when it is still empty, so explicit
 // --branches always wins. Split out of spawnWorkers to keep each source's
 // fetch-and-fold step independently testable and readable.
-func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string) error {
+func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string) error {
 	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
-		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues)
+		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues, credentialOverrides)
 		if err != nil {
 			return err
 		}
@@ -540,8 +538,8 @@ func at(s []string, i int) string {
 // tasksFromIssues resolves the repo's forge from its origin remote, then fetches
 // each issue and renders it into a worker brief. It works for GitHub, GitLab, and
 // Codeberg/Gitea-family hosts without extra flags.
-func tasksFromIssues(ctx context.Context, repoPath string, issues []int) (tasks, branches []string, err error) {
-	f, owner, name, err := resolveForge(ctx, repoPath)
+func tasksFromIssues(ctx context.Context, repoPath string, issues []int, credentialOverrides map[string]string) (tasks, branches []string, err error) {
+	f, owner, name, err := resolveForge(ctx, repoPath, credentialOverrides)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -549,8 +547,10 @@ func tasksFromIssues(ctx context.Context, repoPath string, issues []int) (tasks,
 }
 
 // resolveForge detects the forge host and owner/repo from a repo path's origin
-// remote and returns an authenticated client.
-func resolveForge(ctx context.Context, repoPath string) (f forge.Forge, owner, name string, err error) {
+// remote and returns an authenticated client. credentialOverrides maps a forge
+// host to an alternate env var name that takes priority over argus's built-in
+// token var list (see internal/credential and --credential-env); it may be nil.
+func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[string]string) (f forge.Forge, owner, name string, err error) {
 	remote, err := supervisor.RemoteURL(ctx, repoPath)
 	if err != nil {
 		return nil, "", "", err
@@ -559,7 +559,7 @@ func resolveForge(ctx context.Context, repoPath string) (f forge.Forge, owner, n
 	if err != nil {
 		return nil, "", "", err
 	}
-	token := forge.TokenForHost(host)
+	token := forge.TokenForHost(host, credentialOverrides)
 	if token == "" {
 		return nil, "", "", &ui.UserError{
 			Err:  fmt.Errorf("no API token for %s (needed to fetch issues)", host),

@@ -17,13 +17,14 @@ import (
 
 func newShipCmd() *cobra.Command {
 	var (
-		worktree string
-		base     string
-		title    string
-		repo     string
-		issue    int
-		force    bool
-		dryRun   bool
+		worktree      string
+		base          string
+		title         string
+		repo          string
+		issue         int
+		force         bool
+		dryRun        bool
+		credentialEnv map[string]string
 	)
 
 	cmd := &cobra.Command{
@@ -38,9 +39,13 @@ gitlab.com gets the GitLab API client; self-hosted GitLab is not yet supported a
 is treated as Gitea/Forgejo. Repo owner/name and branch are derived from the
 worktree unless overridden.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			overrides, err := resolveCredentialOverrides(credentialEnv)
+			if err != nil {
+				return err
+			}
 			return runShip(cmd, &shipArgs{
 				worktree: worktree, base: base, title: title, repo: repo,
-				issue: issue, force: force, dryRun: dryRun,
+				issue: issue, force: force, dryRun: dryRun, credentialEnv: overrides,
 			})
 		},
 	}
@@ -52,6 +57,7 @@ worktree unless overridden.`,
 	cmd.Flags().StringVar(&repo, "repo", "", "owner/name override (default: parsed from the worktree's origin remote)")
 	cmd.Flags().BoolVar(&force, "force", false, "ship even without an approving argus verdict (skips the gate/review check)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be committed and opened, without doing it")
+	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	return cmd
 }
 
@@ -60,13 +66,14 @@ var shipCmd = newShipCmd()
 // shipArgs holds newShipCmd's flag values so runShip can be tested directly,
 // without going through cobra flag parsing.
 type shipArgs struct {
-	worktree string
-	base     string
-	title    string
-	repo     string
-	issue    int
-	force    bool
-	dryRun   bool
+	credentialEnv map[string]string
+	worktree      string
+	base          string
+	title         string
+	repo          string
+	issue         int
+	force         bool
+	dryRun        bool
 }
 
 // shipTarget is the forge/branch/PR identity runShip resolves before deciding
@@ -106,7 +113,7 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 		return nil
 	}
 
-	token := forge.TokenForHost(host)
+	token := forge.TokenForHost(host, a.credentialEnv)
 	if token == "" {
 		return &ui.UserError{
 			Err:  fmt.Errorf("no API token for %s", host),

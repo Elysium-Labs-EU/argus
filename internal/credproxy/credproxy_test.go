@@ -261,6 +261,71 @@ func TestConcurrentRegisterAndGate(t *testing.T) {
 	wg.Wait()
 }
 
+// TestFromSpecFrontsANonAnthropicUpstream proves credproxy can front an
+// arbitrary registered agent-key shape, not just Anthropic's — the gap issue
+// #64 closes. It builds a bearer-auth upstream (openai's shape) pointed at a
+// fake server and confirms the sentinel is swapped for the real key in the
+// Authorization header.
+func TestFromSpecFrontsANonAnthropicUpstream(t *testing.T) {
+	var gotAuth, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+
+	var spec KeySpec
+	for _, s := range Registry() {
+		if s.Name == "openai" {
+			spec = s
+		}
+	}
+	if spec.Name == "" {
+		t.Fatal("Registry has no openai spec")
+	}
+
+	const realKey = "sk-real-openai-key"
+	u := FromSpec(spec, realKey)
+	u.Target, _ = url.Parse(server.URL)
+
+	p := New(nil, u)
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = p.Shutdown(ctx)
+	})
+
+	env := p.WorkerEnv("agent-1", "feat/x")
+	var sentinel, base string
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			switch k {
+			case "OPENAI_API_KEY":
+				sentinel = v
+			case "OPENAI_BASE_URL":
+				base = v
+			}
+		}
+	}
+	if sentinel == "" || base == "" {
+		t.Fatalf("missing OPENAI_API_KEY/OPENAI_BASE_URL in %v", env)
+	}
+
+	if resp := do(t, http.MethodGet, base+"/v1/models", sentinel); resp != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp)
+	}
+	if gotAuth != "Bearer "+realKey {
+		t.Fatalf("upstream saw Authorization %q, want Bearer %s", gotAuth, realKey)
+	}
+	if gotPath != "/v1/models" {
+		t.Fatalf("upstream path = %q, want /v1/models", gotPath)
+	}
+}
+
 // do issues a request carrying token as x-api-key and returns the status code.
 func do(t *testing.T, method, rawurl, token string) int {
 	t.Helper()
