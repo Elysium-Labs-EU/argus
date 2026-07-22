@@ -1,6 +1,6 @@
 ---
 name: argus
-description: "Supervise parallel herdr worker agents through to a Codeberg PR using the argus binary, which runs the mechanical half of supervision (spawn workers in worktrees, gate diffs against git, ship only on an approving verdict) as plain Go instead of inside the LLM. Use when the user says 'supervise the panes with argus', 'run argus', 'gate these workers', 'ship with argus', or hands you parallel agent tasks and argus is on PATH. Prefer this over hand-running the supervise loop when argus is available."
+description: "Supervise parallel herdr worker agents through to a forge PR (GitHub, GitLab, Codeberg/Gitea) using the argus binary, which runs the mechanical half of supervision (spawn workers in worktrees, gate diffs against git, ship only on an approving verdict) as plain Go instead of inside the LLM. Use when the user says 'supervise the panes with argus', 'run argus', 'gate these workers', 'ship with argus', or hands you parallel agent tasks and argus is on PATH. Prefer this over hand-running the supervise loop when argus is available."
 ---
 
 # argus — deterministic agent supervisor
@@ -22,12 +22,14 @@ argus escalates to you.
 
 ```bash
 command -v argus herdr claude    # all three must resolve
-echo "$CODEBERG_TOKEN"           # required only for `argus ship`
 ```
 
 - `herdr` on PATH — argus talks to it over its CLI. You are usually already inside herdr.
 - `claude` on PATH — needed for `argus review` and `supervise --review`.
-- `CODEBERG_TOKEN` in env — needed for `argus ship` only.
+- A forge token in env, needed only for `argus ship` — GitHub uses `GITHUB_TOKEN`/`GH_TOKEN`,
+  Codeberg/Gitea uses `CODEBERG_TOKEN` (self-hosted: `<HOST>_TOKEN` or `FORGE_TOKEN`), GitLab
+  uses `GITLAB_TOKEN`. None of these need pre-exporting if `gh`/`glab` is already authenticated
+  or git's credential helper has the host configured — argus falls back to those.
 
 If `argus` is missing, fall back to the [[supervise-agents]] skill and say so.
 
@@ -102,8 +104,8 @@ argus review --worktree <path> --base origin/main --task "issue 142" --reasons "
 ## 3. Ship
 
 `ship` refuses without an approving verdict from a prior gate or review — that is the
-point, so a request-changes actually blocks the PR. It opens the PR via the Codeberg API
-and unstages argus's own control-plane files (`.claude/argus`, scoped permission files)
+point, so a request-changes actually blocks the PR. It opens the PR via the detected
+forge's API (GitHub, GitLab, or Codeberg/Gitea) and unstages argus's own control-plane files (`.claude/argus`, scoped permission files)
 so they never reach the PR.
 
 ```bash
