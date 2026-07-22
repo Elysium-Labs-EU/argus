@@ -6,10 +6,14 @@ import "strings"
 // ADF is a recursive JSON tree (doc -> content[] -> node -> content[] -> ...);
 // this struct only names the fields the walker reads, so unknown attrs (marks,
 // attrs, table layout, etc.) decode into the zero value and are ignored rather
-// than erroring.
+// than erroring. Attrs carries taskItem's completion state, the one attrs
+// value the read-side walker (flattenADF) inspects. For the write side —
+// building an ADF body to send to Jira — see adfDoc/textToADF below, which
+// wrap adfNode in the envelope Jira expects instead of reusing adfNode itself.
 type adfNode struct {
 	Type    string    `json:"type"`
 	Text    string    `json:"text,omitempty"`
+	Attrs   adfAttrs  `json:"attrs"`
 	Content []adfNode `json:"content,omitempty"`
 }
 
@@ -41,6 +45,12 @@ func textToADF(text string) adfDoc {
 	return adfDoc{Type: "doc", Version: 1, Content: content}
 }
 
+// adfAttrs is the subset of a node's attrs object the walker reads: only
+// taskItem's completion state (TODO/DONE) so far.
+type adfAttrs struct {
+	State string `json:"state"`
+}
+
 // skippedADFNodes are block types whose content is not prose (tables, panels,
 // media, mentions, dividers): the walker skips them and their children
 // entirely rather than dumping raw cell/attr text into the brief.
@@ -59,11 +69,12 @@ var skippedADFNodes = map[string]bool{
 }
 
 // flattenADF walks an ADF document tree and returns its plain-text rendering:
-// each paragraph/heading becomes one line and each codeBlock becomes a
-// fenced line, joined with newlines. Unknown node types are traversed for
-// nested paragraphs (lists, blockquotes, expands) so content isn't silently
-// dropped; known non-prose types (tables, panels, mentions, media) are
-// skipped entirely rather than erroring.
+// each paragraph/heading becomes one line, each codeBlock becomes a fenced
+// block, and each taskItem becomes a "- [ ]"/"- [x]" checkbox line, joined
+// with newlines. Unknown node types are traversed for nested paragraphs
+// (lists, blockquotes, expands, taskList) so content isn't silently dropped;
+// known non-prose types (tables, panels, mentions, media) are skipped
+// entirely rather than erroring.
 func flattenADF(doc adfNode) string {
 	var lines []string
 	var walkBlock func(n adfNode)
@@ -84,6 +95,17 @@ func flattenADF(doc adfNode) string {
 			// silently produce nothing.
 			if text := walkInline(n); text != "" {
 				lines = append(lines, "```\n"+text+"\n```")
+			}
+		case "taskItem":
+			// Like codeBlock, a taskItem's content is text nodes directly (no
+			// paragraph wrapper), so walkInline extracts it; render as a
+			// Claude-Code-task-list-shaped checkbox line keyed off attrs.state.
+			if text := walkInline(n); text != "" {
+				box := "[ ]"
+				if n.Attrs.State == "DONE" {
+					box = "[x]"
+				}
+				lines = append(lines, "- "+box+" "+text)
 			}
 		default:
 			// doc, blockquote, bulletList, orderedList, listItem, expand, and any

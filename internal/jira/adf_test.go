@@ -176,6 +176,37 @@ func TestTextToADFDocEnvelope(t *testing.T) {
 	}
 }
 
+func TestFlattenADFTaskList(t *testing.T) {
+	raw := `{
+		"type": "doc",
+		"content": [
+			{"type": "paragraph", "content": [{"type": "text", "text": "Checklist:"}]},
+			{"type": "taskList", "attrs": {"localId": "abc"}, "content": [
+				{"type": "taskItem", "attrs": {"localId": "1", "state": "TODO"}, "content": [
+					{"type": "text", "text": "unchecked item"}
+				]},
+				{"type": "taskItem", "attrs": {"localId": "2", "state": "DONE"}, "content": [
+					{"type": "text", "text": "checked item"}
+				]}
+			]},
+			{"type": "paragraph", "content": [{"type": "text", "text": "after"}]}
+		]
+	}`
+	var doc adfNode
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+
+	got := flattenADF(doc)
+	want := "Checklist:\n" +
+		"- [ ] unchecked item\n" +
+		"- [x] checked item\n" +
+		"after"
+	if got != want {
+		t.Errorf("flattenADF mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
 func TestFlattenADFHardBreak(t *testing.T) {
 	raw := `{
 		"type": "doc",
