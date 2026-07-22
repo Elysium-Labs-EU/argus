@@ -97,6 +97,12 @@ type shipTarget struct {
 	commitMsg         string
 }
 
+// currentBranch is a var, not a plain call to supervisor.CurrentBranch, so a
+// test driving runShip through cmd.SetArgs + cmd.Execute can intercept the
+// worktree path this — the first supervisor call runShip makes — receives,
+// without needing a real git remote/push.
+var currentBranch = supervisor.CurrentBranch
+
 // runShip is newShipCmd's RunE body, extracted so the decision logic (commit,
 // push, open PR) is independently testable and the constructor itself stays
 // flag-registration-only.
@@ -104,9 +110,18 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	if a.worktree == "" {
 		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus ship --worktree <path> --issue <n>"}
 	}
+	// See supervisor.ResolveWorktree: a --worktree given relative to argus's
+	// own cwd must be resolved before it reaches CurrentBranch/CommitAll/Push
+	// or protocol.Load/LoadApproval, so every downstream call agrees on the
+	// same absolute path (argus issue #98).
+	resolved, err := supervisor.ResolveWorktree(a.worktree)
+	if err != nil {
+		return err
+	}
+	a.worktree = resolved
 	ctx := cmd.Context()
 
-	branch, err := supervisor.CurrentBranch(ctx, a.worktree)
+	branch, err := currentBranch(ctx, a.worktree)
 	if err != nil {
 		return err
 	}

@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -103,6 +105,116 @@ func TestRunReviewReviewerError(t *testing.T) {
 	err := runReview(cmd, dir, "HEAD", "task", nil, fakeReviewer{err: wantErr}, nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
+	}
+}
+
+// capturingReviewer is a supervisor.Reviewer test double that records the
+// Worktree field of the request it receives, so a test can assert on the
+// path runReview actually resolved rather than the raw flag value.
+type capturingReviewer struct{ got *string }
+
+func (c capturingReviewer) Review(_ context.Context, req *supervisor.ReviewRequest) (supervisor.ReviewResult, error) {
+	*c.got = req.Worktree
+	return supervisor.ReviewResult{Decision: "approve", Summary: "ok"}, nil
+}
+
+// initReviewGitRepoAt inits a one-commit git repo at dir with an uncommitted
+// edit, so `git diff HEAD` against it is non-empty — mirroring reviewGitRepo
+// but at a caller-chosen path instead of a fresh t.TempDir(), since the
+// relative-worktree regression test below needs repoDir, cwd, and the
+// relative path between them to be independently controlled.
+func initReviewGitRepoAt(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	reviewGitCmd(t, dir, "init", "-q")
+	reviewGitCmd(t, dir, "config", "user.email", "t@t")
+	reviewGitCmd(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	reviewGitCmd(t, dir, "add", "f.txt")
+	reviewGitCmd(t, dir, "commit", "-q", "-m", "base")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatalf("edit file: %v", err)
+	}
+}
+
+// TestReviewUsesAbsoluteWorktree is the direct regression test for argus
+// issue #98: a relative --worktree fed through the real cobra command (not
+// just runReview called directly) must reach both DiffFor's git -C call and
+// the ReviewRequest handed to the reviewer as an absolute path, in every
+// common relative form an operator might pass. Mirrors
+// TestRebaseSpawnLineUsesAbsoluteWorktree (cmd/rebase_test.go, issue #96).
+func TestReviewUsesAbsoluteWorktree(t *testing.T) {
+	cases := []struct {
+		setup func(t *testing.T, base string) (repoDir, cwd, rel string)
+		name  string
+	}{
+		{
+			name: "nested (.claude/worktrees/x)",
+			setup: func(_ *testing.T, base string) (string, string, string) {
+				return filepath.Join(base, ".claude", "worktrees", "featx"), base, filepath.Join(".claude", "worktrees", "featx")
+			},
+		},
+		{
+			name: "dot-slash (./x)",
+			setup: func(_ *testing.T, base string) (string, string, string) {
+				return filepath.Join(base, "featx"), base, "./featx"
+			},
+		},
+		{
+			name: "dot-dot-slash (../x)",
+			setup: func(t *testing.T, base string) (string, string, string) {
+				t.Helper()
+				child := filepath.Join(base, "child")
+				if err := os.MkdirAll(child, 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", child, err)
+				}
+				return filepath.Join(base, "featx"), child, filepath.Join("..", "featx")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			base := t.TempDir()
+			repoDir, cwd, rel := tc.setup(t, base)
+			initReviewGitRepoAt(t, repoDir)
+			t.Chdir(cwd)
+
+			var captured string
+			original := newReviewer
+			newReviewer = func(_ string, _ *eventlog.Logger) supervisor.Reviewer {
+				return capturingReviewer{got: &captured}
+			}
+			t.Cleanup(func() { newReviewer = original })
+
+			cmd := newReviewCmd()
+			var buf bytes.Buffer
+			cmd.SetOut(&buf)
+			cmd.SetErr(&buf)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd.SetContext(ctx)
+			cmd.SetArgs([]string{"--worktree", rel, "--base", "HEAD"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("cmd.Execute: %v", err)
+			}
+
+			if !filepath.IsAbs(captured) {
+				t.Errorf("reviewer received worktree %q, want an absolute path", captured)
+			}
+			wantAbs, err := filepath.Abs(repoDir)
+			if err != nil {
+				t.Fatalf("filepath.Abs(%q): %v", repoDir, err)
+			}
+			if captured != wantAbs {
+				t.Errorf("reviewer received worktree %q, want %q", captured, wantAbs)
+			}
+		})
 	}
 }
 

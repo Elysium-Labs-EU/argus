@@ -311,6 +311,52 @@ func TestResolveLauncherPathEmptyUnchanged(t *testing.T) {
 	}
 }
 
+func TestResolveWorktreeRelativeBecomesAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	got, err := ResolveWorktree(filepath.Join(".", "featx"))
+	if err != nil {
+		t.Fatalf("ResolveWorktree: %v", err)
+	}
+	want := filepath.Join(dir, "featx")
+	if got != want {
+		t.Errorf("ResolveWorktree(%q) = %q, want %q", "./featx", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("ResolveWorktree(%q) = %q, want an absolute path", "./featx", got)
+	}
+}
+
+func TestResolveWorktreeAbsolutePassesThroughUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	got, err := ResolveWorktree(dir)
+	if err != nil {
+		t.Fatalf("ResolveWorktree: %v", err)
+	}
+	if got != dir {
+		t.Errorf("ResolveWorktree(%q) = %q, want unchanged", dir, got)
+	}
+}
+
+// TestResolveWorktreeEmptyResolvesToCwd documents (rather than special-cases)
+// filepath.Abs's own behavior for "": every caller already refuses an empty
+// --worktree with its own "no worktree given" ui.UserError before ever
+// reaching ResolveWorktree, so this is what a caller that skipped that guard
+// would get, not a contract ResolveWorktree enforces itself.
+func TestResolveWorktreeEmptyResolvesToCwd(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	got, err := ResolveWorktree("")
+	if err != nil {
+		t.Fatalf("ResolveWorktree(\"\"): %v", err)
+	}
+	if got != dir {
+		t.Errorf(`ResolveWorktree("") = %q, want cwd %q`, got, dir)
+	}
+}
+
 func hasReasonContaining(reasons []string, sub string) bool {
 	for _, r := range reasons {
 		if strings.Contains(r, sub) {

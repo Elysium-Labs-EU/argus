@@ -109,6 +109,104 @@ func TestRunShipRequiresWorktree(t *testing.T) {
 	}
 }
 
+// initShipGitRepoAt inits a one-commit git repo at dir with a fake GitHub
+// origin remote, so resolveRepo's forge detection has something real to
+// parse without needing network access.
+func initShipGitRepoAt(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	run("commit", "-q", "--allow-empty", "-m", "base")
+	run("remote", "add", "origin", "git@github.com:acme/widget.git")
+}
+
+// TestShipUsesAbsoluteWorktree is the direct regression test for argus issue
+// #98: a relative --worktree fed through the real cobra command (not just
+// runShip called directly) must reach currentBranch — the first supervisor
+// call runShip makes — as an absolute path, in every common relative form an
+// operator might pass. --force and --dry-run keep the test from needing a
+// real forge token or push. Mirrors TestRebaseSpawnLineUsesAbsoluteWorktree
+// (cmd/rebase_test.go, issue #96).
+func TestShipUsesAbsoluteWorktree(t *testing.T) {
+	cases := []struct {
+		setup func(t *testing.T, base string) (repoDir, cwd, rel string)
+		name  string
+	}{
+		{
+			name: "nested (.claude/worktrees/x)",
+			setup: func(_ *testing.T, base string) (string, string, string) {
+				return filepath.Join(base, ".claude", "worktrees", "featx"), base, filepath.Join(".claude", "worktrees", "featx")
+			},
+		},
+		{
+			name: "dot-slash (./x)",
+			setup: func(_ *testing.T, base string) (string, string, string) {
+				return filepath.Join(base, "featx"), base, "./featx"
+			},
+		},
+		{
+			name: "dot-dot-slash (../x)",
+			setup: func(t *testing.T, base string) (string, string, string) {
+				t.Helper()
+				child := filepath.Join(base, "child")
+				if err := os.MkdirAll(child, 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", child, err)
+				}
+				return filepath.Join(base, "featx"), child, filepath.Join("..", "featx")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			base := t.TempDir()
+			repoDir, cwd, rel := tc.setup(t, base)
+			initShipGitRepoAt(t, repoDir)
+			t.Chdir(cwd)
+
+			var captured string
+			original := currentBranch
+			currentBranch = func(_ context.Context, worktree string) (string, error) {
+				captured = worktree
+				return "feat-x", nil
+			}
+			t.Cleanup(func() { currentBranch = original })
+
+			cmd := newShipCmd()
+			var buf bytes.Buffer
+			cmd.SetOut(&buf)
+			cmd.SetErr(&buf)
+			cmd.SetContext(context.Background())
+			cmd.SetArgs([]string{"--worktree", rel, "--base", "main", "--force", "--dry-run"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("cmd.Execute: %v", err)
+			}
+
+			if !filepath.IsAbs(captured) {
+				t.Errorf("currentBranch received worktree %q, want an absolute path", captured)
+			}
+			wantAbs, err := filepath.Abs(repoDir)
+			if err != nil {
+				t.Fatalf("filepath.Abs(%q): %v", repoDir, err)
+			}
+			if captured != wantAbs {
+				t.Errorf("currentBranch received worktree %q, want %q", captured, wantAbs)
+			}
+		})
+	}
+}
+
 func TestRunShipDryRunPrintsPlanWithoutShipping(t *testing.T) {
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
 

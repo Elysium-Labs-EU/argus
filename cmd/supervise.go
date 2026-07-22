@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -261,7 +260,17 @@ func attachWorkers(ctx context.Context, client herdr.Client, workspace string, w
 	type target struct{ worktree, paneID string }
 	var targets []target
 	for _, wt := range worktrees {
-		targets = append(targets, target{worktree: wt})
+		// --worktrees is --worktree-shaped like --repo/rebase's/review's/ship's
+		// flags, so it gets the same resolution even though a repo-wide sweep
+		// for issue #96 found this particular path unreachable from that bug
+		// today (Attach skips execute() entirely) — fixed defensively anyway,
+		// since this is exactly the class of bug that shouldn't need a live
+		// repro to be worth closing off (argus issue #98).
+		abs, err := supervisor.ResolveWorktree(wt)
+		if err != nil {
+			return nil, fmt.Errorf("resolving --worktrees entry %q: %w", wt, err)
+		}
+		targets = append(targets, target{worktree: abs})
 	}
 	if workspace != "" {
 		panes, err := client.PaneList(ctx)
@@ -329,9 +338,9 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 		in.repo = wd
 	}
 	if in.repo != "" {
-		abs, err := filepath.Abs(in.repo)
+		abs, err := supervisor.ResolveWorktree(in.repo)
 		if err != nil {
-			return nil, fmt.Errorf("resolving --repo %q: %w", in.repo, err)
+			return nil, err
 		}
 		in.repo = abs
 	}

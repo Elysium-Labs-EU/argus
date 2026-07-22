@@ -31,7 +31,7 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 			logger, closeLog := openRunLog(cmd, "review")
 			defer closeLog()
 
-			reviewer := supervisor.NewCLIReviewer(reviewModel).WithLog(logger)
+			reviewer := newReviewer(reviewModel, logger)
 			return runReview(cmd, worktree, base, task, reasons, reviewer, logger)
 		},
 	}
@@ -46,12 +46,29 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 
 var reviewCmd = newReviewCmd()
 
+// newReviewer builds the reviewer newReviewCmd's RunE hands runReview. It is a
+// var, not a plain call, so a test driving the command through cmd.SetArgs +
+// cmd.Execute (rather than calling runReview directly) can substitute a fake
+// Reviewer without shelling out to the real claude CLI.
+var newReviewer = func(model string, logger *eventlog.Logger) supervisor.Reviewer {
+	return supervisor.NewCLIReviewer(model).WithLog(logger)
+}
+
 // runReview is newReviewCmd's RunE body, pulled out so tests can drive it
 // directly with a fake supervisor.Reviewer instead of shelling out to claude.
 func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string, reviewer supervisor.Reviewer, logger *eventlog.Logger) error {
 	if worktree == "" {
 		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus review --worktree <path>"}
 	}
+	// See supervisor.ResolveWorktree: a --worktree given relative to argus's
+	// own cwd must be resolved before it reaches DiffFor's git -C call or the
+	// ReviewRequest handed to the reviewer, so every downstream use agrees on
+	// the same absolute path (argus issue #98).
+	resolved, err := supervisor.ResolveWorktree(worktree)
+	if err != nil {
+		return err
+	}
+	worktree = resolved
 	ctx := cmd.Context()
 	diff, err := supervisor.DiffFor(ctx, worktree, base)
 	if err != nil {

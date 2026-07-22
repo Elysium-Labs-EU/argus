@@ -184,6 +184,31 @@ func ResolveLauncherPath(launcher string) string {
 	return resolved + rest
 }
 
+// ResolveWorktree makes path absolute against argus's own working directory,
+// wrapping any error with context. Every command that accepts a --worktree
+// (or --repo/--worktrees) flag must pass it through here before handing it to
+// a git -C call, a pane's `cd`, or protocol.Load/LoadApproval — anything that
+// interprets the path against a cwd that may not be argus's own. A path given
+// relative to argus's own cwd breaks the moment it is used against a pane
+// whose cwd differs, or is reused against a worktree already rooted
+// elsewhere; resolving once, immediately after the flag's own empty-string
+// check, means every downstream call agrees on the same absolute path. This
+// is the 4th independent report of that exact bug (issues #29, #68, #96,
+// #98) — a 5th caller should reach for this helper instead of adding another
+// inline filepath.Abs.
+//
+// path == "" resolves to argus's own cwd (filepath.Abs's own behavior) rather
+// than erroring: every caller already has its own "no worktree given"
+// ui.UserError check before it ever calls this, so ResolveWorktree does not
+// need to special-case the empty string itself.
+func ResolveWorktree(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolving worktree path %q: %w", path, err)
+	}
+	return abs, nil
+}
+
 // SpawnCommand is the shell line argus runs in a worker's pane: cd into the
 // worktree, then start the launcher with the initial prompt as its argument. The
 // worktree path is single-quoted because it is data (a path that may contain
