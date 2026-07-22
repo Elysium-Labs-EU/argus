@@ -42,4 +42,5 @@ func init() {
 	rootCmd.AddCommand(statsCmd)
 	rootCmd.AddCommand(systemCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(workerCmd)
 }

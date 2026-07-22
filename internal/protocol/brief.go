@@ -2,22 +2,24 @@ package protocol
 
 // WriterBrief is the instruction block argus injects into every worker pane's
 // task brief. It is the writer half of this package's contract: it tells the
-// worker to persist exactly the Status shape that Load decodes, at exactly the
-// StatusPath location, after every phase transition. Keeping the writer spec in
-// the same package as the reader is what stops the two halves from drifting —
-// if the struct changes, this text is right next to it.
+// worker to report exactly the Status shape that Load decodes through the
+// guarded `argus worker report` subcommand (issue #92), after every phase
+// transition. Keeping the writer spec in the same package as the reader and the
+// transition table (see transition.go) is what stops the three from drifting —
+// if the struct or the legal-transition table changes, this text is right next
+// to them.
 const WriterBrief = `## Status reporting (required)
 
-After each phase of your work, write your current status to
-` + "`.claude/argus/status.json`" + ` in your worktree, overwriting it each time.
-Your supervisor (argus) reads this file instead of your terminal output, so keep
-it accurate. Write valid JSON in exactly this shape:
+After each phase of your work, report your status by running:
 
+    argus worker report <phase>
+
+piping the rest of the status as a JSON body on stdin, in exactly this shape:
+
+    argus worker report working <<'JSON'
     {
-      "updated_at": "2026-07-18T12:00:00Z",   // RFC3339, current time
       "task": "<issue id or one-line brief>",
       "branch": "<your branch name>",
-      "phase": "planning|working|self_test|awaiting_review|done|blocked",
       "real_world_proof": "<how you verified against a real target, or \"\" if n/a>",
       "pr_url": "<set once the PR exists, else \"\">",
       "blocked_reason": "<set only when phase is blocked, else \"\">",
@@ -27,8 +29,17 @@ it accurate. Write valid JSON in exactly this shape:
       ],
       "diff_stat": {"files": 0, "insertions": 0, "deletions": 0}
     }
+    JSON
 
-Set phase to "awaiting_review" when you want the diff reviewed, "blocked" (with
-blocked_reason) when you need a decision only the supervisor can make, and "done"
-only once the change is shipped. Update the file at every transition, not just at
-the end.`
+Do not write ` + "`.claude/argus/status.json`" + ` yourself — argus loads your
+current status, rejects <phase> if it is not a legal move from it, and only
+then stamps the timestamp itself and persists. You do not set (and should not
+send) an updated_at; argus's clock is the only one that counts.
+
+<phase> is one of: planning, working, self_test, awaiting_review, blocked. Set
+it to "awaiting_review" when you want the diff reviewed, "blocked" (with
+blocked_reason in the body) when you need a decision only the supervisor can
+make. "done" is never a phase you report — argus sets that once the change is
+shipped. Report again at every transition, not just at the end; a rejected
+transition means you called it out of order — check your current phase (argus
+prints the legal next phases in the error) and retry with the right one.`
