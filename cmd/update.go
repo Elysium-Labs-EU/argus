@@ -36,8 +36,9 @@ type Asset struct {
 
 // Release is the subset of GitHub's release API response argus needs.
 type Release struct {
-	TagName string  `json:"tag_name"`
-	Assets  []Asset `json:"assets"`
+	TagName    string  `json:"tag_name"`
+	Assets     []Asset `json:"assets"`
+	Prerelease bool    `json:"prerelease"`
 }
 
 // AssetFor returns the release asset for argus on platform (a
@@ -62,50 +63,134 @@ func (r Release) ChecksumsAsset() (Asset, bool) {
 	return Asset{}, false
 }
 
-// fetchLatestRelease fetches the latest argus release from GitHub.
-// GitHub's "latest" endpoint only ever returns stable (non-prerelease)
-// releases, so when includePre is true this instead lists all releases
-// (newest first) and returns the first one — the only way to reach a
-// release while every published version is still a pre-release.
-func fetchLatestRelease(ctx context.Context, includePre bool) (Release, error) {
-	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", argusRepo)
-	if includePre {
-		reqURL = fmt.Sprintf("https://api.github.com/repos/%s/releases", argusRepo)
-	}
+// doReleaseRequest issues a GET against reqURL, a hardcoded GitHub API URL.
+func doReleaseRequest(ctx context.Context, reqURL string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return Release{}, fmt.Errorf("building release request: %w", err)
+		return nil, fmt.Errorf("building release request: %w", err)
 	}
 
 	resp, err := httpClient.Do(req) // #nosec G704 -- URL is constructed from a hardcoded GitHub API base, not user input
 	if err != nil {
-		return Release{}, fmt.Errorf("fetching latest release: %w", err)
+		return nil, fmt.Errorf("fetching latest release: %w", err)
 	}
 	if resp == nil {
-		return Release{}, fmt.Errorf("fetching latest release: nil response")
+		return nil, fmt.Errorf("fetching latest release: nil response")
+	}
+	return resp, nil
+}
+
+// listReleases fetches every release from GitHub's list endpoint. The list
+// is documented as newest-first but has been observed live to return an
+// entry out of order (a freshly created release landed 3rd, not 1st), so
+// callers must never trust list position and instead pick by semver (see
+// highestBySemver).
+func listReleases(ctx context.Context) ([]Release, error) {
+	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/releases", argusRepo)
+	resp, err := doReleaseRequest(ctx, reqURL)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return Release{}, fmt.Errorf("fetching latest release: unexpected status %s", resp.Status)
+		return nil, fmt.Errorf("fetching latest release: unexpected status %s", resp.Status)
 	}
 
-	if includePre {
-		var releases []Release
-		if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-			return Release{}, fmt.Errorf("decoding release response: %w", err)
-		}
-		if len(releases) == 0 {
-			return Release{}, fmt.Errorf("no releases found")
-		}
-		return releases[0], nil
+	var releases []Release
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, fmt.Errorf("decoding release response: %w", err)
+	}
+	if len(releases) == 0 {
+		return nil, fmt.Errorf("no releases found")
+	}
+	return releases, nil
+}
+
+// latestStableRelease fetches GitHub's "latest" endpoint, which only ever
+// returns a stable (non-prerelease) release. ok is false when the endpoint
+// 404s, which happens whenever every published release is a pre-release.
+func latestStableRelease(ctx context.Context) (rel Release, ok bool, err error) {
+	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", argusRepo)
+	resp, err := doReleaseRequest(ctx, reqURL)
+	if err != nil {
+		return Release{}, false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return Release{}, false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return Release{}, false, fmt.Errorf("fetching latest release: unexpected status %s", resp.Status)
 	}
 
-	var rel Release
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return Release{}, fmt.Errorf("decoding release response: %w", err)
+		return Release{}, false, fmt.Errorf("decoding release response: %w", err)
 	}
-	return rel, nil
+	return rel, true, nil
+}
+
+// highestBySemver returns the release with the highest tag_name among
+// releases, comparing by semver rather than list order. Releases whose
+// tag_name isn't a valid semver are ignored.
+func highestBySemver(releases []Release) (Release, error) {
+	var best Release
+	found := false
+	for _, r := range releases {
+		v := normalizeSemver(r.TagName)
+		if !semver.IsValid(v) {
+			continue
+		}
+		if !found || semver.Compare(v, normalizeSemver(best.TagName)) > 0 {
+			best, found = r, true
+		}
+	}
+	if !found {
+		return Release{}, fmt.Errorf("no release with a valid semver tag found")
+	}
+	return best, nil
+}
+
+// fetchLatestRelease fetches the latest argus release from GitHub.
+//
+// When includePre is true, pre-releases are eligible candidates: it lists
+// every release and picks the highest by semver, stable or not.
+//
+// When includePre is false, it prefers GitHub's "latest" endpoint, which
+// excludes pre-releases entirely. That endpoint 404s if every published
+// release is a pre-release; when it does, this falls back to the full
+// release list and picks the highest stable release by semver, or the
+// highest pre-release if no stable release exists at all.
+func fetchLatestRelease(ctx context.Context, includePre bool) (Release, error) {
+	if includePre {
+		releases, err := listReleases(ctx)
+		if err != nil {
+			return Release{}, err
+		}
+		return highestBySemver(releases)
+	}
+
+	if rel, ok, err := latestStableRelease(ctx); err != nil {
+		return Release{}, err
+	} else if ok {
+		return rel, nil
+	}
+
+	releases, err := listReleases(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+	var stable []Release
+	for _, r := range releases {
+		if !r.Prerelease {
+			stable = append(stable, r)
+		}
+	}
+	if len(stable) > 0 {
+		return highestBySemver(stable)
+	}
+	return highestBySemver(releases)
 }
 
 // downloadFile fetches downloadURL to destPath. It refuses anything but a
