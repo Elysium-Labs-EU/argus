@@ -140,17 +140,29 @@ extract_tag_name() {
   grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
 }
 
+# pick_latest_tag prints the highest-version tag_name from a /releases list
+# JSON blob passed on stdin. GitHub's list endpoint is documented as
+# newest-first but was observed live to return a release out of order (a
+# freshly created release landed 3rd, not 1st) — so list position isn't
+# trustworthy. Pairing tag_name with created_at isn't reliable either: each
+# release's assets array carries its own nested created_at fields, so a flat
+# grep picks up several timestamps per release, not one. tag_name itself
+# only appears at the release level (not on assets), so extracting it alone
+# and version-sorting is both simpler and correct.
+pick_latest_tag() {
+  grep -o '"tag_name": *"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/' | sort -V | tail -1
+}
+
 log "Resolving ${VERSION} release for ${PLATFORM}..."
 if RELEASE_JSON="$(curl -sSfL "$API_URL")"; then
   TAG="$(extract_tag_name <<<"$RELEASE_JSON")"
 elif [ "$VERSION" = "latest" ]; then
   # /releases/latest only returns non-prerelease releases; every argus
   # release so far is a prerelease (v0.1.0-rc.N), so it 404s here. Fall
-  # back to the most recent entry in the full release list instead (the
-  # API returns releases newest-first).
+  # back to picking the newest entry in the full release list instead.
   API_URL="https://api.github.com/repos/${REPO}/releases"
   RELEASE_JSON="$(curl -sSfL "$API_URL")" || die "fetching release metadata from ${API_URL}"
-  TAG="$(extract_tag_name <<<"$RELEASE_JSON")"
+  TAG="$(pick_latest_tag <<<"$RELEASE_JSON")"
 else
   die "fetching release metadata from ${API_URL}"
 fi
