@@ -75,21 +75,34 @@ func InvalidateStatus(worktree string) error {
 	return nil
 }
 
-// isStale reports whether the status file at path was last written strictly
-// before since, using the file's own mtime rather than any timestamp the
-// worker self-reported inside it. InvalidateStatus os.Removes status.json
-// before a worker is dispatched, so any file present afterward was
-// necessarily (re)written by this dispatch — its mtime is ground truth,
+// staleTolerance absorbs the gap between since (an in-process time.Now(),
+// nanosecond precision) and a file's mtime as reported back by the OS, which
+// on some filesystems/runners rounds to coarser resolution. A genuine
+// post-dispatch write can therefore read back a few milliseconds to low
+// single-digit seconds "before" since even though the write happened after
+// it (argus issue #94, which flaked make ci for the v0.1.0-rc.17 release: the
+// same commit passed and failed WaitForStatus's mtime check on identical CI
+// hardware minutes apart). Widening the boundary by this much is still safe
+// against what isStale actually guards against — a leftover file from before
+// this dispatch — because InvalidateStatus removes that file immediately
+// before dispatch; a leftover would need a genuinely concurrent write, not
+// mere clock/mtime skew, to slip through.
+const staleTolerance = 2 * time.Second
+
+// isStale reports whether the status file at path was last written more than
+// staleTolerance before since, using the file's own mtime rather than any
+// timestamp the worker self-reported inside it. InvalidateStatus os.Removes
+// status.json before a worker is dispatched, so any file present afterward
+// was necessarily (re)written by this dispatch — its mtime is ground truth,
 // immune to a worker writing a wrong clock value into the JSON body (argus
 // issue #90; the worker-reported UpdatedAt was trusted for this decision
 // before, letting a garbage timestamp make a real, current status look
-// pre-dispatch forever). The comparison is strict (mtime == since counts as
-// fresh, not stale) because some filesystems record mtime at coarser
-// resolution than time.Now(): a real post-dispatch write can round down to
-// exactly since, and since the file is never rewritten again in that case, an
-// inclusive "at or before" comparison would misclassify it as stale forever
-// instead of just for one instant. A file that can't be stat'd is treated as
-// not stale; the caller's own handling of the read error decides that case.
+// pre-dispatch forever). The comparison gives mtime a grace window below
+// since (see staleTolerance) rather than an exact boundary, because some
+// filesystems record mtime at coarser resolution than time.Now(), and a real
+// post-dispatch write can round down to just under since (argus issue #94).
+// A file that can't be stat'd is treated as not stale; the caller's own
+// handling of the read error decides that case.
 func isStale(path string, since time.Time) bool {
 	if since.IsZero() {
 		return false
@@ -98,14 +111,15 @@ func isStale(path string, since time.Time) bool {
 	if err != nil {
 		return false
 	}
-	return info.ModTime().Before(since)
+	return info.ModTime().Before(since.Add(-staleTolerance))
 }
 
 // WaitForStatus polls a worktree's status file until it reports a phase
 // written at or after since, reaches a terminal phase, or ctx is canceled,
 // returning the last such status read and whether one was seen. A status.json
-// whose file mtime is strictly before since is a stale leftover — from
-// before this dispatch, or from a race with InvalidateStatus — and is
+// whose file mtime is more than staleTolerance before since is a stale
+// leftover — from before this dispatch, or from a race with
+// InvalidateStatus — and is
 // treated the same as no file at all, so a caller can never mistake it for
 // this dispatch's outcome (argus issue #50). since should be no later than
 // the moment the worker was dispatched. It is the single-worker analog of the
