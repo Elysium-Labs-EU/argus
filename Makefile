@@ -1,4 +1,4 @@
-.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus fix setup ci clean release pre-release changelog changelog-preview
+.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus eventlog-gate fix setup ci clean release pre-release changelog changelog-preview
 
 COVERAGE_THRESHOLD ?= 75
 BINARY_NAME=argus
@@ -42,6 +42,9 @@ sg: ## Scan codebase with ast-grep rules (skipped until rules/ ported)
 gitnexus: ## Index this repo with GitNexus for AI-assisted code search (no install needed, runs via npx)
 	npx gitnexus analyze
 
+eventlog-gate: ## Fail if any _test.go file calls eventlog.Open directly instead of eventlog.OpenForTest
+	bash scripts/check-eventlog-open.sh
+
 crap: test-coverage-check ## go-crap change-risk gate on changed functions only (vs origin/main)
 	@command -v go-crap >/dev/null 2>&1 || { echo "go-crap not found. Run: make setup"; exit 1; }
 	bash scripts/go-crap-gate.sh .
@@ -64,7 +67,7 @@ setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same
 	@command -v ast-grep >/dev/null 2>&1 || echo "ast-grep not found — install with: brew install ast-grep (or see https://ast-grep.github.io/guide/quick-start.html)"
 	@echo "Setup complete."
 
-ci: test lint sg nilcheck test-coverage-check crap ## Run all CI checks locally
+ci: test lint sg nilcheck test-coverage-check crap eventlog-gate ## Run all CI checks locally
 	@echo "All CI checks passed!"
 
 release: ## Update changelog, tag and push a release (requires TAG=v1.2.0)
