@@ -535,3 +535,109 @@ func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 		t.Errorf("pollStatus should have returned on terminal phase, not on timeout")
 	}
 }
+
+// TestPollStatusIgnoresStatusFromBeforeDispatch covers argus issue #75: a
+// worktree can carry a stale terminal-phase status.json from an unrelated
+// prior task even after InvalidateStatus runs (e.g. a race, or invalidation
+// failing silently in some other caller). pollStatus's own dispatchedAt
+// comparison is the independent second guard: it must not report success for
+// a status file that predates dispatch.
+func TestPollStatusIgnoresStatusFromBeforeDispatch(t *testing.T) {
+	wt := t.TempDir()
+	dispatchedAt := time.Now()
+
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task:      "unrelated-old-task",
+		Phase:     protocol.PhaseDone,
+		UpdatedAt: dispatchedAt.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seeding stale status: %v", err)
+	}
+
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}, dispatchedAt: dispatchedAt}
+
+	// No fresh write ever arrives, so a correct pollStatus can only reach its
+	// deadline — reporting hasFile/PhaseDone here would mean the stale file
+	// was mistaken for this worker's own outcome.
+	pollStatus(context.Background(), 5*time.Millisecond, 40*time.Millisecond, nil, st)
+
+	if st.hasFile {
+		t.Error("pollStatus treated a pre-dispatch stale status as this worker's report")
+	}
+	if st.status.Phase == protocol.PhaseDone {
+		t.Error("stale phase leaked into workerState.status")
+	}
+}
+
+// TestPollStatusAcceptsStatusWrittenAfterDispatch guards against the
+// dispatchedAt filter being too strict: a real worker's own terminal status,
+// timestamped after dispatch, must still be picked up immediately.
+func TestPollStatusAcceptsStatusWrittenAfterDispatch(t *testing.T) {
+	wt := t.TempDir()
+	dispatchedAt := time.Now()
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}, dispatchedAt: dispatchedAt}
+
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task:      "a",
+		Phase:     protocol.PhaseDone,
+		UpdatedAt: dispatchedAt.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	pollStatus(ctx, 10*time.Millisecond, 0, nil, st)
+
+	if !st.hasFile || st.status.Phase != protocol.PhaseDone {
+		t.Fatalf("pollStatus should accept a status written after dispatch, got hasFile=%v phase=%q", st.hasFile, st.status.Phase)
+	}
+}
+
+// TestExecuteInvalidatesStaleStatusBeforeSpawn covers argus issue #75: a
+// worktree directory can carry a leftover status.json/verdict.json from an
+// unrelated prior task even though the branch itself is freshly created
+// (e.g. directory reuse in worktree creation). execute must remove both
+// before the worker's pane is spawned, mirroring InvalidateStatus's existing
+// use in cmd/rebase.go (issue #50).
+func TestExecuteInvalidatesStaleStatusBeforeSpawn(t *testing.T) {
+	repo := t.TempDir()
+	wt := filepath.Join(repo, ".claude", "worktrees", "feat-x")
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + wt + `"}}}`), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	}
+
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task:  "unrelated-old-task",
+		Phase: protocol.PhaseDone,
+	}); err != nil {
+		t.Fatalf("seeding stale status: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(protocol.VerdictPath(wt)), 0o750); err != nil {
+		t.Fatalf("seeding verdict dir: %v", err)
+	}
+	if err := os.WriteFile(protocol.VerdictPath(wt), []byte(`{"approved":true}`), 0o600); err != nil {
+		t.Fatalf("seeding stale verdict: %v", err)
+	}
+
+	cfg := &Config{
+		Client: herdr.NewWithRunner(runner),
+		Now:    time.Now,
+		Base:   "main",
+	}
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
+
+	if _, err := execute(context.Background(), cfg, plans); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if _, err := os.Stat(protocol.StatusPath(wt)); !os.IsNotExist(err) {
+		t.Errorf("stale status.json should have been removed before spawn, stat err = %v", err)
+	}
+	if _, err := os.Stat(protocol.VerdictPath(wt)); !os.IsNotExist(err) {
+		t.Errorf("stale verdict.json should have been removed before spawn, stat err = %v", err)
+	}
+}

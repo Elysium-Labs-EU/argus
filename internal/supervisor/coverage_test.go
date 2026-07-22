@@ -140,22 +140,29 @@ func TestPushToBareRemote(t *testing.T) {
 }
 
 func TestRunFullPathToReport(t *testing.T) {
-	// A git worktree with an uncommitted change and a seeded terminal status, so
-	// Run exercises execute -> watch -> reconcile -> gate -> report end to end
-	// without a real worker or herdr.
+	// A git worktree with an uncommitted change, so Run exercises execute ->
+	// watch -> reconcile -> gate -> report end to end without a real worker or
+	// herdr. The terminal status is written from the "pane run" leg of the mock
+	// runner rather than seeded upfront, since execute now invalidates any
+	// status.json already sitting in the worktree before it spawns (issue #75)
+	// — a status written before dispatch would be discarded as stale, same as
+	// it must be for a real leftover file.
 	wt := gitWorktreeWithDiff(t)
-	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
-		Task:     "t",
-		Phase:    protocol.PhaseAwaitingReview,
-		DiffStat: protocol.DiffStat{Files: 1, Insertions: 2},
-		Tests:    []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
-	}); err != nil {
-		t.Fatalf("seeding status: %v", err)
-	}
 
 	runner := func(_ context.Context, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
 			return []byte(`{"result":{"root_pane":{"pane_id":"w:p1"}}}`), nil
+		}
+		if len(args) >= 2 && args[0] == "pane" && args[1] == "run" {
+			if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+				Task:      "t",
+				Phase:     protocol.PhaseAwaitingReview,
+				UpdatedAt: time.Now(),
+				DiffStat:  protocol.DiffStat{Files: 1, Insertions: 2},
+				Tests:     []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
+			}); err != nil {
+				t.Errorf("writing status from mock worker: %v", err)
+			}
 		}
 		return []byte(`{"result":{}}`), nil
 	}
