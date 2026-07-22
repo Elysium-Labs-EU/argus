@@ -143,6 +143,39 @@ func TestFlattenADFCodeBlock(t *testing.T) {
 	}
 }
 
+// TestTextToADFRoundTripsThroughFlattenADF encodes text with textToADF, then
+// marshals and unmarshals it through the wire shape (json.Marshal ->
+// adfNode) and flattens it back with flattenADF, asserting the round trip
+// reproduces the original text. This is the encode-side counterpart to the
+// flattenADF fixtures above, and exercises both directions of the same
+// contract Comment (see jira.go) depends on.
+func TestTextToADFRoundTripsThroughFlattenADF(t *testing.T) {
+	for _, text := range []string{
+		"Opened https://example.test/pull/1",
+		"line one\nline two",
+	} {
+		doc := textToADF(text)
+		raw, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var decoded adfNode
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got := flattenADF(decoded); got != text {
+			t.Errorf("round trip mismatch:\ngot:  %q\nwant: %q", got, text)
+		}
+	}
+}
+
+func TestTextToADFDocEnvelope(t *testing.T) {
+	doc := textToADF("hello")
+	if doc.Type != "doc" || doc.Version != 1 {
+		t.Errorf("doc envelope = %+v, want type=doc version=1", doc)
+	}
+}
+
 func TestFlattenADFHardBreak(t *testing.T) {
 	raw := `{
 		"type": "doc",

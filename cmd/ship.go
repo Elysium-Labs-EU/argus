@@ -9,7 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
+	"github.com/Elysium-Labs-EU/argus/internal/jira"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
@@ -17,14 +19,17 @@ import (
 
 func newShipCmd() *cobra.Command {
 	var (
-		worktree      string
-		base          string
-		title         string
-		repo          string
-		issue         int
-		force         bool
-		dryRun        bool
-		credentialEnv map[string]string
+		worktree       string
+		base           string
+		title          string
+		repo           string
+		issue          int
+		force          bool
+		dryRun         bool
+		credentialEnv  map[string]string
+		jiraIssue      string
+		jiraTransition string
+		jiraAssignee   string
 	)
 
 	cmd := &cobra.Command{
@@ -46,6 +51,7 @@ worktree unless overridden.`,
 			return runShip(cmd, &shipArgs{
 				worktree: worktree, base: base, title: title, repo: repo,
 				issue: issue, force: force, dryRun: dryRun, credentialEnv: overrides,
+				jiraIssue: jiraIssue, jiraTransition: jiraTransition, jiraAssignee: jiraAssignee,
 			})
 		},
 	}
@@ -58,6 +64,9 @@ worktree unless overridden.`,
 	cmd.Flags().BoolVar(&force, "force", false, "ship even without an approving argus verdict (skips the gate/review check)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be committed and opened, without doing it")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
+	cmd.Flags().StringVar(&jiraIssue, "jira-issue", "", "Jira issue key (e.g. PROJ-123) to update once the PR is open; unset by default, which skips the Jira post-ship hook entirely. Requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
+	cmd.Flags().StringVar(&jiraTransition, "jira-transition", "", "with --jira-issue: transition name or ID to move the issue to (e.g. \"In Review\"); no transition is made if unset")
+	cmd.Flags().StringVar(&jiraAssignee, "jira-assignee", "", "with --jira-issue: Jira accountID to assign the issue to; not reassigned if unset")
 	return cmd
 }
 
@@ -66,14 +75,17 @@ var shipCmd = newShipCmd()
 // shipArgs holds newShipCmd's flag values so runShip can be tested directly,
 // without going through cobra flag parsing.
 type shipArgs struct {
-	credentialEnv map[string]string
-	worktree      string
-	base          string
-	title         string
-	repo          string
-	issue         int
-	force         bool
-	dryRun        bool
+	credentialEnv  map[string]string
+	worktree       string
+	base           string
+	title          string
+	repo           string
+	jiraIssue      string
+	jiraTransition string
+	jiraAssignee   string
+	issue          int
+	force          bool
+	dryRun         bool
 }
 
 // shipTarget is the forge/branch/PR identity runShip resolves before deciding
@@ -161,7 +173,64 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	}
 	logger.Action("open_pr", target.branch, "ok", pr.HTMLURL)
 	_, _ = fmt.Fprintf(out, "%s opened PR #%d: %s\n", ui.LabelSuccess.Render("✓"), pr.Number, pr.HTMLURL)
+
+	if a.jiraIssue != "" {
+		postShipJira(ctx, out, logger, a, pr)
+	}
 	return nil
+}
+
+// newJiraClient is a var so tests can inject a fake jiraIssueWriter without a
+// real JIRA_BASE_URL/EMAIL/API_TOKEN or network; non-test callers get
+// jira.NewFromEnv unchanged.
+var newJiraClient = func() (jiraIssueWriter, error) { return jira.NewFromEnv(nil) }
+
+// jiraIssueWriter is the subset of *jira.Client postShipJira needs, so it is
+// testable without a network.
+type jiraIssueWriter interface {
+	Transition(ctx context.Context, key, idOrName string) error
+	Comment(ctx context.Context, key, body string) error
+	Assign(ctx context.Context, key, accountID string) error
+}
+
+// postShipJira closes the loop back to Jira once a PR has actually been
+// opened: optionally moves the issue to a new status, optionally reassigns
+// it, and always leaves a comment linking the PR — so an operator using
+// --jira-issues as work input (see cmd/supervise.go) doesn't have to update
+// the ticket by hand afterward. It only runs when --jira-issue is set (see
+// shipChange) and is entirely best-effort: a failure here is logged and
+// printed as a warning but never undoes the ship, which has already
+// succeeded by the time this runs.
+func postShipJira(ctx context.Context, out io.Writer, logger *eventlog.Logger, a *shipArgs, pr forge.PR) {
+	c, err := newJiraClient()
+	if err != nil {
+		warnJiraPostShip(out, logger, a.jiraIssue, err)
+		return
+	}
+	if a.jiraTransition != "" {
+		if terr := c.Transition(ctx, a.jiraIssue, a.jiraTransition); terr != nil {
+			warnJiraPostShip(out, logger, a.jiraIssue, terr)
+		} else {
+			logger.Action("jira_transition", a.jiraIssue, "ok", a.jiraTransition)
+		}
+	}
+	if a.jiraAssignee != "" {
+		if aerr := c.Assign(ctx, a.jiraIssue, a.jiraAssignee); aerr != nil {
+			warnJiraPostShip(out, logger, a.jiraIssue, aerr)
+		} else {
+			logger.Action("jira_assign", a.jiraIssue, "ok", a.jiraAssignee)
+		}
+	}
+	if cerr := c.Comment(ctx, a.jiraIssue, "Opened "+pr.HTMLURL); cerr != nil {
+		warnJiraPostShip(out, logger, a.jiraIssue, cerr)
+		return
+	}
+	logger.Action("jira_comment", a.jiraIssue, "ok", pr.HTMLURL)
+}
+
+func warnJiraPostShip(out io.Writer, logger *eventlog.Logger, key string, err error) {
+	logger.Fail("jira_post_ship", key, err)
+	_, _ = fmt.Fprintf(out, "%s jira post-ship for %s: %v\n", ui.LabelWarning.Render("!"), key, err)
 }
 
 // checkApproved refuses to ship a worktree that argus never cleared. supervise

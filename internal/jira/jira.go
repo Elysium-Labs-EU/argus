@@ -6,6 +6,7 @@
 package jira
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -268,6 +269,158 @@ func (c *Client) FetchIssue(ctx context.Context, key string) (forge.Issue, error
 		Body:   flattenADF(iss.Fields.Description),
 		Number: numberFromKey(iss.Key),
 	}, nil
+}
+
+// transitionsResponse is the subset of GET /issue/{key}/transitions we read to
+// resolve a transition name (e.g. "In Review") to the numeric ID Jira's POST
+// endpoint requires.
+type transitionsResponse struct {
+	Transitions []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"transitions"`
+}
+
+// Transition moves an issue to a new status. idOrName may be either the
+// transition's numeric ID or its display name (e.g. "In Review") —
+// transitions are workflow-specific and their IDs vary by project, so a
+// caller driving this from a project-agnostic config (e.g. a post-ship hook)
+// almost always knows the name, not the ID. The available transitions for
+// key are fetched first so a name can be resolved and so an unavailable
+// transition (wrong workflow state, typo) surfaces as a clear error instead
+// of Jira's opaque 400.
+func (c *Client) Transition(ctx context.Context, key, idOrName string) error {
+	base, err := c.resolvedBase(ctx)
+	if err != nil {
+		return err
+	}
+
+	id, err := c.resolveTransitionID(ctx, base, key, idOrName)
+	if err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"transition": map[string]string{"id": id},
+	})
+	if err != nil {
+		return fmt.Errorf("encoding transition request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/rest/api/3/issue/%s/transitions", base, key)
+	return c.write(ctx, http.MethodPost, url, payload)
+}
+
+// resolveTransitionID returns idOrName unchanged if it already matches one of
+// key's available transition IDs, else resolves it by name (case-insensitive).
+func (c *Client) resolveTransitionID(ctx context.Context, base, key, idOrName string) (string, error) {
+	url := fmt.Sprintf("%s/rest/api/3/issue/%s/transitions", base, key)
+	var parsed transitionsResponse
+	if err := c.readJSON(ctx, url, &parsed); err != nil {
+		return "", err
+	}
+	for _, t := range parsed.Transitions {
+		if t.ID == idOrName || strings.EqualFold(t.Name, idOrName) {
+			return t.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no transition %q available for %s", idOrName, key)
+}
+
+// Comment posts body as a new comment on key, encoding it via textToADF (see
+// adf.go) since Jira's comment endpoint rejects plain text.
+func (c *Client) Comment(ctx context.Context, key, body string) error {
+	base, err := c.resolvedBase(ctx)
+	if err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(map[string]any{"body": textToADF(body)})
+	if err != nil {
+		return fmt.Errorf("encoding comment request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/rest/api/3/issue/%s/comment", base, key)
+	return c.write(ctx, http.MethodPost, url, payload)
+}
+
+// Assign sets key's assignee to accountID, Jira Cloud's opaque per-user
+// identifier (not an email or username). Passing "" unassigns the issue,
+// matching Jira's own PUT /assignee semantics for a null accountId.
+func (c *Client) Assign(ctx context.Context, key, accountID string) error {
+	base, err := c.resolvedBase(ctx)
+	if err != nil {
+		return err
+	}
+
+	var accountIDField any = accountID
+	if accountID == "" {
+		accountIDField = nil
+	}
+	payload, err := json.Marshal(map[string]any{"accountId": accountIDField})
+	if err != nil {
+		return fmt.Errorf("encoding assign request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/rest/api/3/issue/%s/assignee", base, key)
+	return c.write(ctx, http.MethodPut, url, payload)
+}
+
+// readJSON performs an authenticated GET and decodes a 2xx JSON body into
+// out, turning a non-2xx response into a clear error carrying Jira's message
+// (see apiMessage). It is the shared GET path Transition's lookup uses;
+// FetchIssue predates it and decodes inline instead of being rewired onto it.
+func (c *Client) readJSON(ctx context.Context, url string, out any) error {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("building request: %w", err)
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Authorization", "Basic "+basicAuth(c.email, c.token))
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", url, err)
+	}
+	if resp == nil {
+		return fmt.Errorf("GET %s: nil response", url)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("GET %s returned %s: %s", url, resp.Status, apiMessage(body))
+	}
+	return json.Unmarshal(body, out)
+}
+
+// write performs an authenticated POST/PUT and turns a non-2xx response into
+// a clear error carrying Jira's message. None of Transition, Comment, or
+// Assign need the response body on success (Jira returns 204/200 with an
+// empty or echoed-back payload), unlike FetchIssue's GET.
+func (c *Client) write(ctx context.Context, method, url string, payload []byte) error {
+	httpReq, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("building request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Authorization", "Basic "+basicAuth(c.email, c.token))
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", method, url, err)
+	}
+	if resp == nil {
+		return fmt.Errorf("%s %s: nil response", method, url)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s %s returned %s: %s", method, url, resp.Status, apiMessage(body))
+	}
+	return nil
 }
 
 // basicAuth returns the base64(email:token) credential for a Basic
