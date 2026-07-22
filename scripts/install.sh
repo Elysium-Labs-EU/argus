@@ -131,9 +131,29 @@ else
   API_URL="https://api.github.com/repos/${REPO}/releases/tags/${VERSION}"
 fi
 
+# extract_tag_name prints the first "tag_name" value found in a JSON blob
+# passed on stdin. Reads via a herestring rather than piping a large
+# producer into a `grep -m1` consumer — `-m1` closes its input the instant
+# it matches, and once the JSON is bigger than a single release (e.g. the
+# full /releases list), the upstream writer can catch SIGPIPE mid-write.
+extract_tag_name() {
+  grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+}
+
 log "Resolving ${VERSION} release for ${PLATFORM}..."
-RELEASE_JSON="$(curl -sSfL "$API_URL")" || die "fetching release metadata from ${API_URL}"
-TAG="$(printf '%s' "$RELEASE_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+if RELEASE_JSON="$(curl -sSfL "$API_URL")"; then
+  TAG="$(extract_tag_name <<<"$RELEASE_JSON")"
+elif [ "$VERSION" = "latest" ]; then
+  # /releases/latest only returns non-prerelease releases; every argus
+  # release so far is a prerelease (v0.1.0-rc.N), so it 404s here. Fall
+  # back to the most recent entry in the full release list instead (the
+  # API returns releases newest-first).
+  API_URL="https://api.github.com/repos/${REPO}/releases"
+  RELEASE_JSON="$(curl -sSfL "$API_URL")" || die "fetching release metadata from ${API_URL}"
+  TAG="$(extract_tag_name <<<"$RELEASE_JSON")"
+else
+  die "fetching release metadata from ${API_URL}"
+fi
 [ -n "$TAG" ] || die "could not determine release tag from ${API_URL}"
 
 ASSET="argus-${PLATFORM}"
