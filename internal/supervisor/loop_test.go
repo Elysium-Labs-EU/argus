@@ -540,20 +540,28 @@ func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 // worktree can carry a stale terminal-phase status.json from an unrelated
 // prior task even after InvalidateStatus runs (e.g. a race, or invalidation
 // failing silently in some other caller). pollStatus's own dispatchedAt
-// comparison is the independent second guard: it must not report success for
+// comparison, based on the file's real mtime rather than its self-reported
+// UpdatedAt, is the independent second guard: it must not report success for
 // a status file that predates dispatch.
 func TestPollStatusIgnoresStatusFromBeforeDispatch(t *testing.T) {
 	wt := t.TempDir()
-	dispatchedAt := time.Now()
+	path := protocol.StatusPath(wt)
 
-	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+	if err := protocol.Write(path, &protocol.Status{
 		Task:      "unrelated-old-task",
 		Phase:     protocol.PhaseDone,
-		UpdatedAt: dispatchedAt.Add(-time.Hour),
+		UpdatedAt: time.Now().Add(-time.Hour),
 	}); err != nil {
 		t.Fatalf("seeding stale status: %v", err)
 	}
+	// Back-date the file's real mtime so it genuinely predates dispatchedAt,
+	// as a leftover from an unrelated prior task would.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("backdating mtime: %v", err)
+	}
 
+	dispatchedAt := time.Now()
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}, dispatchedAt: dispatchedAt}
 
 	// No fresh write ever arrives, so a correct pollStatus can only reach its
@@ -566,6 +574,38 @@ func TestPollStatusIgnoresStatusFromBeforeDispatch(t *testing.T) {
 	}
 	if st.status.Phase == protocol.PhaseDone {
 		t.Error("stale phase leaked into workerState.status")
+	}
+}
+
+// TestPollStatusAcceptsStatusWithLyingUpdatedAt covers argus issue #90: the
+// staleness guard above must judge freshness by the status file's own mtime,
+// not by the worker's self-reported UpdatedAt field. A worker that writes a
+// garbage/template UpdatedAt (e.g. copied from an example in its brief) that
+// reads as before dispatchedAt must still have its real, post-dispatch write
+// picked up — the #80 hang was exactly this: the guard trusted the lying
+// UpdatedAt and discarded every poll forever.
+func TestPollStatusAcceptsStatusWithLyingUpdatedAt(t *testing.T) {
+	wt := t.TempDir()
+	dispatchedAt := time.Now()
+
+	// The file is written after dispatchedAt (a real mtime later than
+	// dispatch), but its UpdatedAt content lies and claims to be from before.
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task:      "a",
+		Phase:     protocol.PhaseAwaitingReview,
+		UpdatedAt: dispatchedAt.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seeding status with lying UpdatedAt: %v", err)
+	}
+
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}, dispatchedAt: dispatchedAt}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	pollStatus(ctx, 10*time.Millisecond, 0, nil, st)
+
+	if !st.hasFile || st.status.Phase != protocol.PhaseAwaitingReview {
+		t.Fatalf("pollStatus discarded a real post-dispatch status because of a lying UpdatedAt: hasFile=%v phase=%q", st.hasFile, st.status.Phase)
 	}
 }
 

@@ -117,7 +117,7 @@ bad = [e for e in touched_funcs.values()
 if bad:
     print(f"go-crap gate FAILED: {len(bad)} changed function(s) exceed CRAP {threshold:g}:")
     for e in sorted(bad, key=lambda x: -x["crap"]):
-        print(f'  CRAP {e["crap"]:8.2f}  cov {e["coverage"]:5.1f}%  '
+        print(f'  CRAP {e["crap"]:8.2f}  cov {e.get("coverage", 0.0):5.1f}%  '
               f'{e["function"]}  ({e["file"]}:{e["line"]})')
     print("\nReduce complexity or add test coverage for these functions, or split them.")
     sys.exit(1)

@@ -681,6 +681,7 @@ func pollStatus(ctx context.Context, interval, timeout time.Duration, log *event
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	var lastErr string
+	var loggedStale bool
 	for {
 		select {
 		case <-ctx.Done():
@@ -692,12 +693,22 @@ func pollStatus(ctx context.Context, interval, timeout time.Duration, log *event
 		case <-timer.C:
 			s, err := protocol.Load(path)
 			switch {
-			case err == nil && !st.dispatchedAt.IsZero() && !s.UpdatedAt.After(st.dispatchedAt):
-				// A status.json at or before dispatchedAt predates this dispatch —
-				// a stale leftover (issue #75), not this worker's report. Treated
-				// the same as no file at all (mirrors WaitForStatus, issue #50).
-				// dispatchedAt is zero for an attach, where no dispatch happened
-				// and any existing status is legitimately this worker's own.
+			case err == nil && !st.dispatchedAt.IsZero() && isStale(path, st.dispatchedAt):
+				// A status.json whose file mtime is strictly before
+				// dispatchedAt predates this dispatch — a stale leftover
+				// (issue #75), not this worker's report. Judged by mtime, not
+				// the worker's self-reported
+				// UpdatedAt (issue #90), since InvalidateStatus removes the file
+				// before dispatch so any file present afterward was necessarily
+				// written by this dispatch regardless of what clock value the
+				// worker put inside it. Treated the same as no file at all
+				// (mirrors WaitForStatus, issue #50). dispatchedAt is zero for an
+				// attach, where no dispatch happened and any existing status is
+				// legitimately this worker's own.
+				if !loggedStale {
+					loggedStale = true
+					log.Action("status_stale", st.plan.Task, "discarded", string(s.Phase))
+				}
 			case err == nil:
 				st.status = s
 				st.hasFile = true
