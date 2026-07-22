@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
@@ -37,19 +39,27 @@ func initGitDir(t *testing.T) string {
 
 // fakeRebaseClient routes "herdr worktree ..." and "herdr pane ..." calls to
 // caller-supplied outcomes, so dispatchRebaseWorker's herdr interactions can be
-// tested without a real herdr binary.
+// tested without a real herdr binary. Its "agent get" reply always reports no
+// live agent (herdr.ErrAgentNotFound) — a bare shell pane, the scenario every
+// existing test here models — so dispatch falls through to the PaneRun spawn
+// path paneErr exercises. TestDispatchRebaseWorkerReusesLiveAgent below covers
+// the opposite branch with its own fake.
 func fakeRebaseClient(paneID string, worktreeErr, paneErr error) herdr.Client {
 	return herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
-		if len(args) > 0 && args[0] == "worktree" {
+		switch {
+		case len(args) > 0 && args[0] == "worktree":
 			if worktreeErr != nil {
 				return nil, worktreeErr
 			}
 			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, paneID), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+		default:
+			if paneErr != nil {
+				return nil, paneErr
+			}
+			return []byte(`{"result":{}}`), nil
 		}
-		if paneErr != nil {
-			return nil, paneErr
-		}
-		return []byte(`{"result":{}}`), nil
 	})
 }
 
@@ -352,5 +362,88 @@ func TestDispatchRebaseWorkerNoStatus(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "no status before the deadline") {
 		t.Fatalf("want the no-status error, got %v", err)
+	}
+}
+
+// TestDispatchRebaseWorkerReusesLiveAgent is the regression test for argus issue
+// #88: rebase targets a worktree an earlier task's worker already ran in, so its
+// root pane very often still holds that worker's live, idle Claude Code session
+// rather than a bare shell. When herdr's "agent get" reports one, dispatch must
+// re-task it via AgentPrompt (the same as a human typing a new instruction into
+// that session) instead of typing a `cd && claude ...` shell command line into the
+// agent's own input box via PaneRun — which is what used to silently no-op,
+// leaving the branch untouched with no status.json ever written. This fake's
+// "agent get" reports a live agent, so a "pane run" call here would mean the fix
+// regressed to the broken path.
+func TestDispatchRebaseWorkerReusesLiveAgent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+
+	var mu sync.Mutex
+	var calls [][]string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		mu.Lock()
+		calls = append(calls, append([]string(nil), args...))
+		mu.Unlock()
+		switch {
+		case args[0] == "worktree":
+			return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"}}}`), nil
+		case args[0] == "agent" && args[1] == "get":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"done"}}}`), nil
+		case args[0] == "pane" && args[1] == "run":
+			t.Errorf("dispatch used PaneRun (spawn) instead of AgentPrompt for a pane with a live agent: %v", args)
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		fresh := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now()}
+		_ = protocol.Write(protocol.StatusPath(worktree), fresh)
+	}()
+
+	var buf bytes.Buffer
+	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("dispatchRebaseWorker: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawPrompt bool
+	for _, c := range calls {
+		if len(c) > 2 && c[0] == "agent" && c[1] == "prompt" && c[2] == "w1:p1" {
+			sawPrompt = true
+			if c[3] != supervisor.InitialPrompt {
+				t.Errorf("agent prompt text = %q, want %q", c[3], supervisor.InitialPrompt)
+			}
+		}
+	}
+	if !sawPrompt {
+		t.Errorf("want an `agent prompt` call re-tasking the live agent, calls: %v", calls)
+	}
+}
+
+// TestDispatchIntoPaneAgentGetError confirms a genuine AgentGet failure (not
+// herdr's "no live agent" outcome) aborts dispatch instead of falling through to
+// spawning a second worker over an agent whose state herdr couldn't determine.
+func TestDispatchIntoPaneAgentGetError(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		if args[0] == "agent" && args[1] == "get" {
+			return nil, errors.New("herdr: socket unavailable")
+		}
+		t.Fatalf("unexpected call: %v", args)
+		return nil, nil
+	})
+
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &rebaseOpts{worktree: t.TempDir(), launcher: "claude"})
+	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
+		t.Fatalf("want the AgentGet error propagated, got %v", err)
 	}
 }

@@ -3,6 +3,8 @@ package herdr
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -78,5 +80,60 @@ func TestNewUsesRealBinaryAndSurfacesExecError(t *testing.T) {
 	c := New()
 	if _, err := c.PaneList(context.Background()); err == nil {
 		t.Error("PaneList should error when the herdr binary is absent")
+	}
+}
+
+// fakeHerdrBinary drops an executable named "herdr" into a fresh directory
+// that prints reply to stderr and exits 1 — the real shape of a failing herdr
+// invocation (see execRunner) — and returns that directory for PATH.
+func fakeHerdrBinary(t *testing.T, reply string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "herdr")
+	body := "#!/bin/sh\nprintf '%s' " + shellSingleQuote(reply) + " 1>&2\nexit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("writing fake herdr binary: %v", err)
+	}
+	return dir
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// TestExecRunnerMapsAgentNotFoundToSentinel exercises execRunner's real
+// ExitError/stderr path (not the fake Runner tests substitute elsewhere) to
+// confirm a genuine herdr "agent_not_found" envelope becomes ErrAgentNotFound,
+// which AgentGet depends on to distinguish "no live agent" from a real failure.
+func TestExecRunnerMapsAgentNotFoundToSentinel(t *testing.T) {
+	dir := fakeHerdrBinary(t, `{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"}}`)
+	t.Setenv("PATH", dir)
+
+	c := New()
+	_, ok, err := c.AgentGet(context.Background(), "w1:p1")
+	if err != nil {
+		t.Fatalf("AgentGet: want no error for agent_not_found, got %v", err)
+	}
+	if ok {
+		t.Error("want ok=false for agent_not_found")
+	}
+}
+
+// TestExecRunnerPreservesOtherErrorCodes confirms only "agent_not_found" is
+// special-cased: a different herdr error code still surfaces as a real error.
+func TestExecRunnerPreservesOtherErrorCodes(t *testing.T) {
+	dir := fakeHerdrBinary(t, `{"error":{"code":"pane_not_found","message":"pane w1:p1 not found"}}`)
+	t.Setenv("PATH", dir)
+
+	c := New()
+	_, ok, err := c.AgentGet(context.Background(), "w1:p1")
+	if err == nil {
+		t.Fatal("want an error for pane_not_found")
+	}
+	if ok {
+		t.Error("want ok=false on error")
+	}
+	if !strings.Contains(err.Error(), "pane_not_found") {
+		t.Errorf("want the original error code surfaced, got %v", err)
 	}
 }
