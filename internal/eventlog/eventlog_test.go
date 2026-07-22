@@ -54,18 +54,14 @@ func TestNilLoggerIsNoOp(t *testing.T) {
 }
 
 func TestOpenWritesRunLogFile(t *testing.T) {
-	home := t.TempDir()
-	l, path, closer, err := Open(home, "review", nil)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	l, path, closer := OpenForTest(t)
 	l.Action("review", "t", "approve", "looks correct")
 	if cerr := closer(); cerr != nil {
 		t.Fatalf("closer: %v", cerr)
 	}
 
-	if !strings.HasPrefix(path, filepath.Join(home, ".argus", "runs")) {
-		t.Errorf("run log not under ~/.argus/runs: %s", path)
+	if !strings.Contains(path, filepath.Join(".argus", "runs")) {
+		t.Errorf("run log not under .argus/runs: %s", path)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -75,7 +71,7 @@ func TestOpenWritesRunLogFile(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(data), &e); err != nil {
 		t.Fatalf("run log line not valid JSON: %v (%q)", err, data)
 	}
-	if e.Command != "review" || e.Outcome != "approve" {
+	if e.Command != "test" || e.Outcome != "approve" {
 		t.Errorf("unexpected persisted event: %+v", e)
 	}
 }

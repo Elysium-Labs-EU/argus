@@ -157,6 +157,7 @@ func TestRunShipFailsWithoutForgeToken(t *testing.T) {
 }
 
 func TestShipChangeCommitsPushesAndOpensPR(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // openRunLog writes under ~/.argus
 	remote := t.TempDir()
 	if out, err := exec.Command("git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
 		t.Fatalf("bare init: %v\n%s", err, out)
@@ -199,6 +200,7 @@ func TestShipChangeCommitsPushesAndOpensPR(t *testing.T) {
 }
 
 func TestShipChangeReturnsErrorWhenNothingToCommit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // openRunLog writes under ~/.argus
 	remote := t.TempDir()
 	if out, err := exec.Command("git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
 		t.Fatalf("bare init: %v\n%s", err, out)
