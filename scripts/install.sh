@@ -83,6 +83,21 @@ strip_quarantine() {
   fi
 }
 
+# resign_darwin_binary re-applies an ad-hoc codesign to a binary at its final
+# installed path. Go's linker already ad-hoc-signs arm64 binaries at build
+# time, but the kernel's per-vnode code-signature cache can go stale when a
+# Mach-O's bytes land on a path that reuses an inode (e.g. a prior install at
+# the same path) — see issue #66 for the reproduced SIGKILL/CODESIGNING
+# failure and cited golang/go#42684, golang/go#63997. This script's
+# mktemp+install pattern already avoids the specific in-place-overwrite
+# trigger, but re-signing after final placement is cheap, local, and closes
+# the gap regardless. No-op on non-Darwin or without codesign on PATH.
+resign_darwin_binary() {
+  if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+    codesign --force -s - "$1" 2>/dev/null || true
+  fi
+}
+
 PRINT_INSTALL_DIR_ONLY=false
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -153,9 +168,13 @@ mkdir -p "$INSTALL_DIR" 2>/dev/null || true
 
 if [ -w "$INSTALL_DIR" ]; then
   install -m 0755 "${TMP_DIR}/${ASSET}" "${INSTALL_DIR}/argus"
+  resign_darwin_binary "${INSTALL_DIR}/argus"
 elif command -v sudo >/dev/null 2>&1; then
   log "${INSTALL_DIR} is not writable, using sudo..."
   sudo install -m 0755 "${TMP_DIR}/${ASSET}" "${INSTALL_DIR}/argus"
+  if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+    sudo codesign --force -s - "${INSTALL_DIR}/argus" 2>/dev/null || true
+  fi
 else
   die "${INSTALL_DIR} is not writable and sudo is unavailable; set ARGUS_INSTALL_DIR to a writable directory on PATH"
 fi
