@@ -694,9 +694,10 @@ func pollStatus(ctx context.Context, interval, timeout time.Duration, log *event
 			s, err := protocol.Load(path)
 			switch {
 			case err == nil && !st.dispatchedAt.IsZero() && isStale(path, st.dispatchedAt):
-				// A status.json whose file mtime is at or before dispatchedAt
-				// predates this dispatch — a stale leftover (issue #75), not this
-				// worker's report. Judged by mtime, not the worker's self-reported
+				// A status.json whose file mtime is strictly before
+				// dispatchedAt predates this dispatch — a stale leftover
+				// (issue #75), not this worker's report. Judged by mtime, not
+				// the worker's self-reported
 				// UpdatedAt (issue #90), since InvalidateStatus removes the file
 				// before dispatch so any file present afterward was necessarily
 				// written by this dispatch regardless of what clock value the
