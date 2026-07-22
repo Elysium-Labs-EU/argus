@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -326,6 +327,13 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 			return nil, fmt.Errorf("resolving working directory: %w", err)
 		}
 		in.repo = wd
+	}
+	if in.repo != "" {
+		abs, err := filepath.Abs(in.repo)
+		if err != nil {
+			return nil, fmt.Errorf("resolving --repo %q: %w", in.repo, err)
+		}
+		in.repo = abs
 	}
 	if in.tasksFile != "" {
 		fileTasks, err := loadTasksFile(in.tasksFile)

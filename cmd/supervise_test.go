@@ -418,6 +418,40 @@ func TestSpawnWorkersTasksFileAppendsToTasks(t *testing.T) {
 	}
 }
 
+// TestSpawnWorkersRelativeRepoResolvesAbsolute guards against a bug (argus
+// issue #68) where an explicit `--repo .` (or any relative --repo) flowed
+// through to the worker's RepoRoot unresolved. internal/supervisor/loop.go
+// then joins RepoRoot with ".claude/worktrees/<branch>" to build the
+// worktree path — filepath.Join collapses a leading "." so the resulting
+// worktree path was itself relative, and the "cd <path> && claude ..." line
+// argus types into the worker's pane silently failed whenever the pane's
+// shell wasn't sitting at exactly the directory --repo was relative to.
+func TestSpawnWorkersRelativeRepoResolvesAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	client := fakeClient()
+	workers, err := spawnWorkers(context.Background(), client, &workerInput{
+		repo: ".", tasks: []string{"eos#1"},
+	}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("spawnWorkers: %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("want 1 worker, got %d", len(workers))
+	}
+	if !filepath.IsAbs(workers[0].RepoRoot) {
+		t.Errorf("RepoRoot from relative --repo should be resolved absolute, got %q", workers[0].RepoRoot)
+	}
+	wantAbs, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+	if workers[0].RepoRoot != wantAbs {
+		t.Errorf("RepoRoot: got %q want %q", workers[0].RepoRoot, wantAbs)
+	}
+}
+
 func TestValidBranch(t *testing.T) {
 	ok := []string{"feat-x", "fix/started-at-144", "release_1.2.3", "a/b/c"}
 	bad := []string{"feat x", "feat$(cmd)", "a;b", "-leading", "/abs", "back`tick", ""}
