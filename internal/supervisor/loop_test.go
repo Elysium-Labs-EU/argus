@@ -400,8 +400,10 @@ func TestReviewEscalationsAutoApprovesCleanAndReviewsEscalated(t *testing.T) {
 	policy := DefaultReviewPolicy()
 
 	clean := &workerState{
-		hasFile: true,
-		plan:    &WorkerPlan{Worker: Worker{Task: "clean", Branch: "b", Worktree: wt}},
+		hasFile:         true,
+		planEvidenceOK:  true,
+		hasPlanEvidence: true,
+		plan:            &WorkerPlan{Worker: Worker{Task: "clean", Branch: "b", Worktree: wt}},
 		status: protocol.Status{
 			Phase:    protocol.PhaseAwaitingReview,
 			DiffStat: protocol.DiffStat{Files: 1, Insertions: 3},

@@ -19,7 +19,7 @@ The point is not just to coordinate. argus is a verifier. The gate checks the re
 
 argus splits supervision into a deterministic majority and a judgment minority.
 
-The deterministic half discovers or opens herdr panes, creates a worktree per worker, writes a task brief, launches the worker in auto mode with a scoped permission file, then polls its status. A worker reports its phase with `argus worker report <phase>`, piping status JSON (files touched, tests run, diff stats) on stdin. Workers never write `status.json` directly. `report` checks the move against a fixed legal-transition table. Only a legal move gets persisted, and only argus stamps the timestamp.
+The deterministic half discovers or opens herdr panes, creates a worktree per worker, writes a task brief, launches the worker in auto mode with a scoped permission file, then polls its status. A worker reports its phase with `argus worker report <phase>`, piping status JSON (files touched, tests run, diff stats, its plan/todo list) on stdin. Workers never write `status.json` directly. `report` checks the move against a fixed legal-transition table. Only a legal move gets persisted, and only argus stamps the timestamp.
 
 ```mermaid
 stateDiagram-v2
@@ -134,10 +134,11 @@ Pass `--debug` on any command to tee the typed event log to stderr as it is writ
 
 The gate is the cheap path. It auto-approves a worker only when the worker is actually ready for review, every reported test passed, the diff is within the ceiling, no shared path was touched, and any OS-integration change carries real-world proof. Everything else escalates with a recorded reason.
 
-Two of those checks the worker cannot talk its way past, because argus measures the diff from git rather than trusting the number in `status.json`:
+Three of those checks the worker cannot talk its way past, because argus verifies against ground truth instead of trusting `status.json`:
 
 * If argus cannot measure the diff, the self-report is unverifiable and the change escalates.
 * If the measured diff materially exceeds what the worker claimed, argus treats it as an under-report and escalates.
+* If the worker's session transcript has no real `TodoWrite`/`TaskCreate` tool call, a `planning` report's `plan` field is an unverified claim and the change escalates. The same evidence also gates the `planning` -> `working` move itself: that transition is rejected outright if the planning report on file never carried a non-empty `plan` array.
 
 Tune the gate with `--max-diff-lines`, `--shared-glob`, and `--os-glob` on `supervise`.
 

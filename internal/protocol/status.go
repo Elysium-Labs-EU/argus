@@ -62,8 +62,16 @@ type Status struct {
 	PRURL          string    `json:"pr_url"`
 	BlockedReason  string    `json:"blocked_reason"`
 	FilesTouched   []string  `json:"files_touched"`
-	Tests          []TestRun `json:"tests"`
-	DiffStat       DiffStat  `json:"diff_stat"`
+	// Plan is the worker's todo list, reported during the planning phase (issue
+	// #103). It is the typed evidence RequiresPlanEvidence checks before
+	// letting a report move planning -> working: a prose "write a todo list
+	// first" instruction in the brief went unenforced (a worker could and did
+	// skip it, twice, in real sessions), so this field plus the transcript
+	// cross-check in internal/supervisor/planevidence.go make it a checked
+	// contract instead.
+	Plan     []string  `json:"plan"`
+	Tests    []TestRun `json:"tests"`
+	DiffStat DiffStat  `json:"diff_stat"`
 }
 
 // IsTerminal reports whether a phase is one argus stops waiting on. A worker is

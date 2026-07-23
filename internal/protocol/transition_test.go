@@ -42,6 +42,24 @@ func TestIsLegalTransition(t *testing.T) {
 	}
 }
 
+func TestRequiresPlanEvidence(t *testing.T) {
+	if !RequiresPlanEvidence(PhasePlanning, PhaseWorking) {
+		t.Error("RequiresPlanEvidence(planning, working) = false, want true")
+	}
+	other := []struct{ cur, next Phase }{
+		{PhaseWorking, PhaseSelfTest},
+		{PhaseSelfTest, PhaseWorking},
+		{PhaseBlocked, PhaseWorking},
+		{Phase(""), PhasePlanning},
+		{PhasePlanning, PhasePlanning},
+	}
+	for _, tc := range other {
+		if RequiresPlanEvidence(tc.cur, tc.next) {
+			t.Errorf("RequiresPlanEvidence(%q, %q) = true, want false", tc.cur, tc.next)
+		}
+	}
+}
+
 func TestLegalNext(t *testing.T) {
 	if got := LegalNext(PhaseWorking); len(got) != 2 || got[0] != PhaseSelfTest || got[1] != PhaseBlocked {
 		t.Errorf("LegalNext(working) = %v, want [self_test blocked]", got)
