@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,6 +58,74 @@ func TestResolveCredentialOverridesCLIWinsOverPersisted(t *testing.T) {
 	}
 	if overrides["anthropic"] != "CLI_VAR" {
 		t.Errorf("CLI override = %q, want CLI_VAR to win over the persisted CONFIG_VAR", overrides["anthropic"])
+	}
+}
+
+func TestConfigCheckReportsMissingAllowlistEntry(t *testing.T) {
+	repo := t.TempDir()
+
+	cmd := newConfigCheckCmd()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--repo", repo})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected an error when no allow entry covers argus")
+	}
+	if !strings.Contains(buf.String(), "no Bash permission allowlist entry for argus") {
+		t.Errorf("expected a warning naming the gap, got %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "Bash(argus *)") {
+		t.Errorf("expected the fix snippet to name the default entry, got %q", buf.String())
+	}
+}
+
+func TestConfigCheckReportsExistingAllowlistEntry(t *testing.T) {
+	repo := t.TempDir()
+	settingsPath := filepath.Join(repo, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"permissions":{"allow":["Bash(argus *)"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newConfigCheckCmd()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--repo", repo})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config check: %v", err)
+	}
+	if !strings.Contains(buf.String(), "argus is allowlisted") {
+		t.Errorf("expected a success message, got %q", buf.String())
+	}
+}
+
+func TestConfigCheckWriteAddsEntry(t *testing.T) {
+	repo := t.TempDir()
+
+	cmd := newConfigCheckCmd()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--repo", repo, "--write"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config check --write: %v", err)
+	}
+	if !strings.Contains(buf.String(), "added Bash(argus *)") {
+		t.Errorf("expected a confirmation naming the added entry, got %q", buf.String())
+	}
+
+	// A second run must find it already covered rather than writing again.
+	cmd2 := newConfigCheckCmd()
+	buf2 := &bytes.Buffer{}
+	cmd2.SetOut(buf2)
+	cmd2.SetArgs([]string{"--repo", repo})
+	if err := cmd2.Execute(); err != nil {
+		t.Fatalf("config check (second run): %v", err)
+	}
+	if !strings.Contains(buf2.String(), "argus is allowlisted") {
+		t.Errorf("expected the written entry to be picked up, got %q", buf2.String())
 	}
 }
 
