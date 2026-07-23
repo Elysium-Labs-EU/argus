@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -298,12 +299,36 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
+// resignBinary re-applies an ad-hoc codesign to the binary at path, mirroring
+// scripts/install.sh's resign_darwin_binary. Go's linker already ad-hoc-signs
+// arm64 binaries at build time, but the kernel's per-vnode code-signature
+// cache can go stale when a Mach-O's bytes land on a path that reuses an
+// inode (e.g. this same update overwriting itself) — see issue #66. No-op on
+// non-Darwin or without codesign on PATH; goos is a parameter (rather than
+// reading runtime.GOOS directly) so the non-Darwin no-op path is testable
+// cross-platform.
+func resignBinary(ctx context.Context, goos, path string) error {
+	if goos != "darwin" {
+		return nil
+	}
+	if _, err := exec.LookPath("codesign"); err != nil {
+		return nil //nolint:nilerr // no codesign on PATH is a valid no-op, not a failure
+	}
+	out, err := exec.CommandContext(ctx, "codesign", "--force", "-s", "-", path).CombinedOutput() //nolint:gosec // path is the just-installed dstPath, not user input
+	if err != nil {
+		return fmt.Errorf("codesign %s: %w (%s)", path, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // replaceBinary installs newPath over dstPath, which may be the currently
 // running executable: it copies to a same-directory temp file, chmods it
 // executable, then renames over dstPath. The rename is atomic on the same
 // filesystem, and the OS keeps the old inode open for any process (e.g. the
-// one calling this function) that's already running it.
-func replaceBinary(newPath, dstPath string) error {
+// one calling this function) that's already running it. On Darwin it then
+// re-signs dstPath in place, without which the installed binary is
+// Gatekeeper-killed on next launch (issue #124).
+func replaceBinary(ctx context.Context, newPath, dstPath string) error {
 	tmp := dstPath + ".tmp"
 	if err := copyFile(newPath, tmp); err != nil {
 		return err
@@ -315,6 +340,9 @@ func replaceBinary(newPath, dstPath string) error {
 	if err := os.Rename(tmp, dstPath); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("installing %s: %w", dstPath, err)
+	}
+	if err := resignBinary(ctx, runtime.GOOS, dstPath); err != nil {
+		return fmt.Errorf("re-signing %s: %w", dstPath, err)
 	}
 	return nil
 }
@@ -440,7 +468,7 @@ func runUpdate(ctx context.Context, out io.Writer, exePath, currentVersion strin
 		_, _ = fmt.Fprintf(out, "%s backed up current binary to %s\n", ui.TextMuted.Render("i"), backupPath)
 	}
 
-	if replaceErr := replaceBinary(binTmp, exePath); replaceErr != nil {
+	if replaceErr := replaceBinary(ctx, binTmp, exePath); replaceErr != nil {
 		return fmt.Errorf("installing new binary: %w", replaceErr)
 	}
 
