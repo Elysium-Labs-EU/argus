@@ -25,6 +25,7 @@ func TestRenderReportShowsVerdictAndReview(t *testing.T) {
 	states := []*workerState{
 		{ // clean → auto-approve, no reviewer call
 			plan: &WorkerPlan{Worker: Worker{Task: "clean-a"}}, paneID: "1-2", hasFile: true, started: start,
+			planEvidenceOK: true, hasPlanEvidence: true,
 			status: protocol.Status{
 				Phase:        protocol.PhaseAwaitingReview,
 				Tests:        []protocol.TestRun{{Cmd: "make test", Result: protocol.ResultPass}},

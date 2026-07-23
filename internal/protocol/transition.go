@@ -36,3 +36,17 @@ func IsLegalTransition(cur, next Phase) bool {
 func LegalNext(cur Phase) []Phase {
 	return legalTransitions[cur]
 }
+
+// RequiresPlanEvidence reports whether moving a status from cur to next is the
+// one edge that additionally demands non-empty Plan evidence on cur, on top of
+// being phase-legal (issue #103): planning -> working. Every worker brief has
+// long said "write a todo list before anything else," but that was prose a
+// worker could (and, in two real sessions, did) ignore entirely — the
+// legal-transition table above only ever checked the phase name, not whether
+// planning did anything. Gating this one edge on cur.Plan turns "write a todo
+// list" from an instruction into a checked precondition of the worker's own
+// phase contract, the same way IsLegalTransition already turned "report phases
+// in order" into one.
+func RequiresPlanEvidence(cur, next Phase) bool {
+	return cur == PhasePlanning && next == PhaseWorking
+}

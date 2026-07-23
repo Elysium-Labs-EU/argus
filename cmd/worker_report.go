@@ -57,8 +57,12 @@ claim of what phase comes next is trusted; argus decides both.
 "done" is never accepted here — only argus's ship path sets it.
 
 The body is the same JSON shape status.json used to be written as directly
-(task, branch, real_world_proof, pr_url, blocked_reason, files_touched,
-tests, diff_stat) minus updated_at, which is ignored even if present.`,
+(task, branch, real_world_proof, pr_url, blocked_reason, files_touched, plan,
+tests, diff_stat) minus updated_at, which is ignored even if present.
+
+Reporting "planning" with an empty (or missing) plan array is accepted, but the
+next report is not: moving from planning to working is rejected unless the
+planning report already on file carried a non-empty plan array.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wt := worktree
@@ -138,16 +142,23 @@ func readReportBody(cmd *cobra.Command, file string) ([]byte, error) {
 
 // runWorkerReport is the guarded transition + write at the heart of `argus
 // worker report` (issue #92): it loads the worktree's current status, rejects
-// next if it is not a legal move from the current phase, and only then stamps
-// UpdatedAt with now() — argus's clock, never the caller's — before persisting.
-// Split out of the RunE closure so it is directly testable without going
-// through cobra flag parsing or stdin.
+// next if it is not a legal move from the current phase, rejects planning ->
+// working if the on-file planning report carries no plan evidence (issue
+// #103), and only then stamps UpdatedAt with now() — argus's clock, never the
+// caller's — before persisting. Split out of the RunE closure so it is
+// directly testable without going through cobra flag parsing or stdin.
 func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status, now func() time.Time) error {
 	cur, _ := protocol.Load(protocol.StatusPath(worktree))
 	if !protocol.IsLegalTransition(cur.Phase, next) {
 		return &ui.UserError{
 			Err:  fmt.Errorf("illegal status transition %q -> %q", cur.Phase, next),
 			Hint: fmt.Sprintf("legal from %q: %v", cur.Phase, protocol.LegalNext(cur.Phase)),
+		}
+	}
+	if protocol.RequiresPlanEvidence(cur.Phase, next) && len(cur.Plan) == 0 {
+		return &ui.UserError{
+			Err:  fmt.Errorf("cannot move %q -> %q: no plan/todo evidence reported during planning", cur.Phase, next),
+			Hint: `report phase "planning" again with a non-empty "plan" array listing your todo items before moving to "working"`,
 		}
 	}
 	rest.Phase = next

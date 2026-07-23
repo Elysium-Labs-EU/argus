@@ -132,6 +132,24 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 				fmt.Sprintf("worker reports phase %q but git shows zero files changed against base — status may be stale or unverified", eff.Phase))
 		}
 	}
+
+	// The unfakeable backstop for the planning phase's self-reported Plan
+	// field (issue #103): a status.json claiming a plan/todo list, with no
+	// matching TodoWrite/TaskCreate tool call anywhere in the worker's own
+	// transcript, escalates exactly like a diff under-report does above —
+	// only checked once the worker is asking to be judged, mirroring the diff
+	// checks' own gating on a terminal phase.
+	if eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone {
+		switch {
+		case st.planEvidenceErr != nil:
+			v.AutoApprove = false
+			v.Reasons = append(v.Reasons, "could not verify plan evidence in worker transcript: "+st.planEvidenceErr.Error())
+		case st.planEvidenceOK && !st.hasPlanEvidence:
+			v.AutoApprove = false
+			v.Reasons = append(v.Reasons,
+				"no TodoWrite/TaskCreate tool call found in worker's session transcript — planning claim unverified")
+		}
+	}
 	return v
 }
 

@@ -396,7 +396,8 @@ func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
 	return superviseStates(ctx, cfg, states)
 }
 
-// reconcile computes each worker's real diff from git so the gate and report use
+// reconcile computes each worker's real diff from git, and independently checks
+// its session transcript for real plan/todo evidence, so the gate and report use
 // ground truth rather than the worker's self-report. A measurement failure is
 // recorded (and later surfaced) rather than silently trusting status.json.
 func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
@@ -413,6 +414,20 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		st.measured = ds
 		st.measuredFiles = files
 		st.measuredOK = true
+	}
+
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ok, err := HasPlanEvidence(cfg.Home, st.plan.Worktree)
+		if err != nil {
+			st.planEvidenceErr = err
+			cfg.Log.Fail("plan_evidence", st.plan.Task, err)
+			continue
+		}
+		st.hasPlanEvidence = ok
+		st.planEvidenceOK = true
 	}
 }
 
@@ -501,20 +516,27 @@ func worktreePaths(plans []WorkerPlan) []string {
 
 // workerState tracks one worker across the watch loop. status is what the worker
 // reported; measured is the ground truth argus computed from git. The gate trusts
-// measured, not status, for diff size and files touched.
+// measured, not status, for diff size and files touched. planEvidenceErr and
+// planEvidenceOK mirror diffErr/measuredOK for the transcript-based plan-evidence
+// check (issue #103): planEvidenceOK true means HasPlanEvidence ran without error
+// and hasPlanEvidence holds its result; planEvidenceErr set means the check itself
+// could not run.
 type workerState struct {
-	started       time.Time
-	dispatchedAt  time.Time
-	reviewErr     error
-	diffErr       error
-	plan          *WorkerPlan
-	review        *ReviewResult
-	paneID        string
-	measuredFiles []string
-	status        protocol.Status
-	measured      protocol.DiffStat
-	hasFile       bool
-	measuredOK    bool
+	started         time.Time
+	dispatchedAt    time.Time
+	reviewErr       error
+	diffErr         error
+	planEvidenceErr error
+	plan            *WorkerPlan
+	review          *ReviewResult
+	paneID          string
+	measuredFiles   []string
+	status          protocol.Status
+	measured        protocol.DiffStat
+	hasFile         bool
+	measuredOK      bool
+	planEvidenceOK  bool
+	hasPlanEvidence bool
 }
 
 // effective returns the status the gate should judge: the worker's reported phase,

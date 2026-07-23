@@ -68,6 +68,48 @@ func TestRunWorkerReportStampsArgusClockNotCallers(t *testing.T) {
 	}
 }
 
+func TestRunWorkerReportRejectsWorkingWithoutPlanEvidence(t *testing.T) {
+	wt := t.TempDir()
+	// Planning report on file has no plan array — the exact "wrote no todo
+	// list" case issue #103 is about.
+	seed := protocol.Status{Phase: protocol.PhasePlanning}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	err := runWorkerReport(wt, protocol.PhaseWorking, &protocol.Status{}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error moving planning -> working with no plan evidence, got nil")
+	}
+	if !strings.Contains(err.Error(), "no plan/todo evidence") {
+		t.Errorf("error = %q, want it to mention missing plan evidence", err.Error())
+	}
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if got.Phase != protocol.PhasePlanning {
+		t.Errorf("status.json Phase = %q, want unchanged planning (rejected transition must not persist)", got.Phase)
+	}
+}
+
+func TestRunWorkerReportAcceptsWorkingWithPlanEvidence(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{Phase: protocol.PhasePlanning, Plan: []string{"read the brief", "write the fix"}}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	if err := runWorkerReport(wt, protocol.PhaseWorking, &protocol.Status{}, fixedNow(time.Now())); err != nil {
+		t.Fatalf("legal transition with plan evidence rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Phase != protocol.PhaseWorking {
+		t.Errorf("Phase = %q, want working", got.Phase)
+	}
+}
+
 func TestRunWorkerReportFullLegalSequence(t *testing.T) {
 	wt := t.TempDir()
 	now := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
@@ -79,7 +121,11 @@ func TestRunWorkerReportFullLegalSequence(t *testing.T) {
 	}
 	for _, phase := range seq {
 		now = now.Add(time.Minute)
-		if err := runWorkerReport(wt, phase, &protocol.Status{Task: "t", Branch: "b"}, fixedNow(now)); err != nil {
+		body := &protocol.Status{Task: "t", Branch: "b"}
+		if phase == protocol.PhasePlanning {
+			body.Plan = []string{"read the brief", "write the fix"}
+		}
+		if err := runWorkerReport(wt, phase, body, fixedNow(now)); err != nil {
 			t.Fatalf("transition to %q rejected: %v", phase, err)
 		}
 	}

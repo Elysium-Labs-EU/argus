@@ -24,6 +24,7 @@ piping the rest of the status as a JSON body on stdin, in exactly this shape:
       "pr_url": "<set once the PR exists, else \"\">",
       "blocked_reason": "<set only when phase is blocked, else \"\">",
       "files_touched": ["path/one.go", "path/two.go"],
+      "plan": ["<todo item 1>", "<todo item 2>"],
       "tests": [
         {"cmd": "make test", "target": "./internal/...", "result": "pass|fail|skipped"}
       ],
@@ -35,6 +36,13 @@ Do not write ` + "`.claude/argus/status.json`" + ` yourself — argus loads your
 current status, rejects <phase> if it is not a legal move from it, and only
 then stamps the timestamp itself and persists. You do not set (and should not
 send) an updated_at; argus's clock is the only one that counts.
+
+When you report phase "planning", ` + "`plan`" + ` must be a non-empty array of
+your actual todo items (write them with your todo-list tool first, then list
+them here) — argus rejects the move from "planning" to "working" if the
+planning report on file has no plan evidence, and independently checks your
+own session transcript for a real todo-list tool call before approving your
+work. A plan array with no matching tool call does not count.
 
 <phase> is one of: planning, working, self_test, awaiting_review, blocked. Set
 it to "awaiting_review" when you want the diff reviewed, "blocked" (with
