@@ -374,6 +374,11 @@ argus worktree prune --branch <name>
 argus worktree prune --merged                    # sweep every worktree under the repo
 ```
 
+Prune also closes the herdr pane it spawned for that worktree — and the workspace
+too, if that pane was the only one left in it — so a cleaned worktree doesn't leave
+an orphaned empty pane/workspace behind. Best-effort: a herdr-side failure here is
+printed as a warning, not a reason to leave the worktree itself uncleaned.
+
 ## Inspect / update the binary
 
 ```bash

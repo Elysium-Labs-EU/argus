@@ -162,6 +162,52 @@ func TestAgentPromptSendsTextToTarget(t *testing.T) {
 	}
 }
 
+func TestPaneCloseSendsPaneCloseCommand(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{}}`), nil
+	})
+	if err := c.PaneClose(context.Background(), "w1:p1"); err != nil {
+		t.Fatalf("PaneClose: %v", err)
+	}
+	want := []string{"pane", "close", "w1:p1"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("PaneClose args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestPaneClosePropagatesRunnerError(t *testing.T) {
+	sentinel := errors.New("herdr: no such pane")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	if err := c.PaneClose(context.Background(), "w1:p1"); !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped runner error, got %v", err)
+	}
+}
+
+func TestWorkspaceCloseSendsWorkspaceCloseCommand(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{}}`), nil
+	})
+	if err := c.WorkspaceClose(context.Background(), "w1"); err != nil {
+		t.Fatalf("WorkspaceClose: %v", err)
+	}
+	want := []string{"workspace", "close", "w1"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("WorkspaceClose args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestWorkspaceClosePropagatesRunnerError(t *testing.T) {
+	sentinel := errors.New("herdr: no such workspace")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	if err := c.WorkspaceClose(context.Background(), "w1"); !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped runner error, got %v", err)
+	}
+}
+
 func TestPaneSplitReturnsNewID(t *testing.T) {
 	reply := `{"id":"cli:pane:split","result":{"pane":{"pane_id":"wZ:p2"}}}`
 	c := NewWithRunner(fakeRunner(reply, nil))

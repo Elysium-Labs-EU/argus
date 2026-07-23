@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
@@ -75,9 +76,16 @@ func parseWorktreePorcelain(out string) []WorktreeEntry {
 // specific reasons, so a manager relays a real decision instead of
 // re-deriving it from raw git/PR-state calls by hand.
 type PruneCandidate struct {
-	Path        string
-	Branch      string
-	PRURL       string
+	Path   string
+	Branch string
+	PRURL  string
+	// PaneID is the herdr pane recorded for this worktree in the repo's pane
+	// registry, if any (see protocol.PaneRegistry, written by prepareWorktree)
+	// — CleanWorktree closes it, and its workspace if left empty, once the
+	// candidate is confirmed safe to clean. Resolved from the registry, not
+	// the worktree's own lifecycle.json, so it is still known even when the
+	// worktree directory (and everything inside it) is already gone.
+	PaneID      string
 	Reasons     []string
 	Merged      bool
 	DirGone     bool
@@ -87,12 +95,21 @@ type PruneCandidate struct {
 // EvaluateCandidate is the deterministic (no LLM) safety check behind prune:
 // is the branch's PR merged, and — when the working directory still exists —
 // is it free of uncommitted changes, unpushed commits, and stash entries. See
-// resolveMergeState for how the merge check is sourced. dryRun must be true
-// for a --dry-run invocation: it still reads lifecycle.json to decide
+// resolveMergeState for how the merge check is sourced. repoRoot is the main
+// repository (not worktree, which may itself be a linked worktree already
+// deleted) — it is where the pane registry lives, so PaneID resolves
+// correctly even when the worktree directory is gone. dryRun must be true for
+// a --dry-run invocation: it still reads lifecycle.json to decide
 // safe-to-clean, but never writes a state transition to disk — "confirm
 // first, no changes" means no changes, not even to argus's own bookkeeping.
-func EvaluateCandidate(ctx context.Context, f forge.Forge, owner, repo, worktree, branch string, dirGone, dryRun bool) (*PruneCandidate, error) {
+func EvaluateCandidate(ctx context.Context, f forge.Forge, owner, repo, repoRoot, worktree, branch string, dirGone, dryRun bool) (*PruneCandidate, error) {
 	c := &PruneCandidate{Path: worktree, Branch: branch, DirGone: dirGone}
+
+	reg, regErr := protocol.LoadPaneRegistry(repoRoot)
+	if regErr != nil {
+		return nil, regErr
+	}
+	c.PaneID = reg.Panes[worktree]
 
 	merged, prFound, prURL, prState, err := resolveMergeState(ctx, f, owner, repo, worktree, branch, dirGone, dryRun)
 	if err != nil {
@@ -251,18 +268,51 @@ func hasUnpushedCommits(ctx context.Context, worktree string) bool {
 // scoped to a single entry at all. It returns the path content was moved to
 // (empty when the directory was already gone), so a caller can tell an
 // operator where to look to undo it.
-func CleanWorktree(ctx context.Context, repoRoot string, c *PruneCandidate) (trashPath string, err error) {
+//
+// When c.PaneID is set, it also closes that herdr pane — and the pane's
+// workspace too, if it was left as the only one there — mirroring how
+// prepareWorktree spawns a worktree and its pane together. This step is
+// best-effort: the worktree itself is already fully cleaned by the time it
+// runs, so a herdr-side failure (already closed by hand, herdr not reachable)
+// is reported back as paneWarning rather than turned into err.
+func CleanWorktree(ctx context.Context, repoRoot string, client herdr.Client, c *PruneCandidate) (trashPath, paneWarning string, err error) {
 	if !c.DirGone {
 		markLifecyclePruned(c.Path)
 		trashPath, err = recoverableRemove(ctx, repoRoot, c.Path)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 	if _, err := git(ctx, repoRoot, "worktree", "remove", "--force", c.Path); err != nil {
-		return trashPath, fmt.Errorf("cleaning worktree registration for %s: %w", c.Path, err)
+		return trashPath, "", fmt.Errorf("cleaning worktree registration for %s: %w", c.Path, err)
 	}
-	return trashPath, nil
+	if c.PaneID != "" {
+		if cerr := ClosePaneAndEmptyWorkspace(ctx, client, c.PaneID); cerr != nil {
+			paneWarning = fmt.Sprintf("worktree cleaned, but closing herdr pane %s failed: %v", c.PaneID, cerr)
+		}
+		forgetPaneRecord(repoRoot, c.Path)
+	}
+	return trashPath, paneWarning, nil
+}
+
+// forgetPaneRecord removes worktree's entry from repoRoot's pane registry
+// once CleanWorktree is done with it. Best-effort and silent, like
+// markLifecyclePruned: a stale registry entry pointing at a worktree that
+// git no longer even lists is dead weight, but a bookkeeping write must never
+// surface as a prune failure once the worktree itself is already gone —
+// regardless of whether the herdr close above succeeded, there is no future
+// prune run left that could retry it (the worktree registration is gone from
+// git too by this point).
+func forgetPaneRecord(repoRoot, worktree string) {
+	reg, err := protocol.LoadPaneRegistry(repoRoot)
+	if err != nil {
+		return
+	}
+	if _, ok := reg.Panes[worktree]; !ok {
+		return
+	}
+	delete(reg.Panes, worktree)
+	_ = protocol.WritePaneRegistry(repoRoot, reg)
 }
 
 // markLifecyclePruned advances a worktree's existing lifecycle record to its
