@@ -586,6 +586,11 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 			return fail(i, err)
 		}
 
+		if err = ensureFreshPane(ctx, cfg.Client, paneID, taskLabel(p.Task)); err != nil {
+			cfg.Log.Fail("spawn", taskLabel(p.Task), err)
+			return fail(i, err)
+		}
+
 		// When a broker is configured, the launch line carries this worker's
 		// phantom credentials inline, so the agent authenticates through argus
 		// and is not handed a real key in its own environment.
@@ -657,6 +662,46 @@ func resolvePaneID(p *WorkerPlan, wt herdr.Worktree) (string, error) {
 		return wt.RootPaneID, nil
 	}
 	return "", fmt.Errorf("worker %s has no pane and herdr returned no root pane for its worktree", p.Task)
+}
+
+// ensureFreshPane confirms paneID has no live agent session before argus types
+// a launch command into it. This is the root-cause fix for issue #15: PaneRun's
+// own doc comment already says it "is the wrong call for a pane that already
+// has a live agent session running... the agent's own input box would receive
+// the literal shell text as a chat message instead of a command a shell
+// executes" — but execute previously never checked, so a stale live session
+// sitting in the resolved pane (most plausibly a reused --panes value, since a
+// pane herdr just opened for a brand-new worktree should always be a bare
+// shell) would silently swallow the "cd <worktree> && claude ..." line as a
+// chat message into its own, unrelated conversation. That old session then
+// carries on with its own prior task and can write its own plausible-looking
+// status.json/verdict.json into the new worktree, indistinguishable at a
+// glance from a worker that actually ran there — exactly the symptom #15
+// reported ("verbatim content from an unrelated, real session from the day
+// before"). AgentGet is the only way to know pane occupancy in advance, so it
+// must run unconditionally on every spawn, not just when a caller-supplied
+// pane makes the hazard obvious.
+//
+// PR #17 (closing #15) added a gate that escalates a *terminal-phase* worker
+// reporting zero measured file changes — a useful backstop, but it only fires
+// after the fact, only for terminal phases, and not at all if the stolen
+// session happens to leave some incidental file change behind. Refusing to
+// spawn into an occupied pane prevents the attachment itself rather than
+// hoping to catch one of its symptoms later.
+func ensureFreshPane(ctx context.Context, client herdr.Client, paneID, task string) error {
+	agent, ok, err := client.AgentGet(ctx, paneID)
+	if err != nil {
+		return fmt.Errorf("checking pane %s is free to spawn %s: %w", paneID, task, err)
+	}
+	if ok {
+		return fmt.Errorf(
+			"pane %s already has a live agent session (session %s) — refusing to spawn %s there: "+
+				"typing the launch command in would deliver it as a chat message into that unrelated "+
+				"session instead of starting a fresh one (issue #15)",
+			paneID, agent.AgentSession.Value, task,
+		)
+	}
+	return nil
 }
 
 // resolveSpawnLine builds the command line argus types into a worker's pane:

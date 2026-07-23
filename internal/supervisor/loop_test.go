@@ -3,6 +3,7 @@ package supervisor
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,9 @@ func (r *recordingRunner) run(_ context.Context, args ...string) ([]byte, error)
 	r.calls = append(r.calls, args)
 	if len(args) >= 2 && args[0] == "pane" && args[1] == "list" {
 		return []byte(r.paneList), nil
+	}
+	if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
+		return nil, herdr.ErrAgentNotFound
 	}
 	return []byte(`{"result":{}}`), nil
 }
@@ -213,6 +217,9 @@ func TestExecuteWritesSettingsBriefAndSpawnsInRootPane(t *testing.T) {
 		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
 			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
 		}
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
+			return nil, herdr.ErrAgentNotFound
+		}
 		return []byte(`{"result":{}}`), nil
 	}
 	cfg := &Config{
@@ -239,6 +246,49 @@ func TestExecuteWritesSettingsBriefAndSpawnsInRootPane(t *testing.T) {
 	}
 	if _, err := os.Stat(protocol.BriefPath(wt)); err != nil {
 		t.Errorf("brief not written: %v", err)
+	}
+}
+
+// TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent covers argus issue #107: PR
+// #17 (closing issue #15) only gated the symptom — a terminal-phase worker
+// reporting zero measured file changes — after the fact. It never addressed
+// the mechanism #15 actually described: a headless spawn attaching to a
+// stale, unrelated session's state. PaneRun's own doc comment already
+// explains why that can happen — it delivers its command line as a literal
+// chat message if the target pane already has a live agent sitting in it —
+// so execute must check AgentGet and refuse rather than call PaneRun blind.
+func TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent(t *testing.T) {
+	repo := t.TempDir()
+	var paneRunCalled bool
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		}
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
+			// Simulate the exact #15 hazard: the pane execute is about to type
+			// into already has a live, unrelated session running in it.
+			return []byte(`{"result":{"agent":{"pane_id":"w9:p1","agent":"claude","agent_session":{"agent":"claude","value":"stale-session-uuid"}}}}`), nil
+		}
+		if len(args) >= 2 && args[0] == "pane" && args[1] == "run" {
+			paneRunCalled = true
+		}
+		return []byte(`{"result":{}}`), nil
+	}
+	cfg := &Config{
+		Client: herdr.NewWithRunner(runner),
+		Now:    time.Now,
+		Base:   "main",
+		Log:    eventlog.New(io.Discard, "supervise", "r", nil),
+	}
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
+
+	if _, err := execute(context.Background(), cfg, plans); err == nil {
+		t.Fatal("execute should refuse to spawn into a pane with a live agent session, got nil error")
+	} else if !strings.Contains(err.Error(), "stale-session-uuid") {
+		t.Errorf("error should name the live session it refused to attach to, got: %v", err)
+	}
+	if paneRunCalled {
+		t.Error("execute must not call PaneRun once AgentGet reports a live agent already occupies the pane")
 	}
 }
 
@@ -335,6 +385,9 @@ func TestExecuteFailsWhenConfiguredRuntimeAdapterIsMissing(t *testing.T) {
 	runner := func(_ context.Context, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
 			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		}
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
+			return nil, herdr.ErrAgentNotFound
 		}
 		return []byte(`{"result":{}}`), nil
 	}
@@ -648,6 +701,9 @@ func TestExecuteInvalidatesStaleStatusBeforeSpawn(t *testing.T) {
 	runner := func(_ context.Context, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
 			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + wt + `"}}}`), nil
+		}
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
+			return nil, herdr.ErrAgentNotFound
 		}
 		return []byte(`{"result":{}}`), nil
 	}

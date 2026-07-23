@@ -226,6 +226,9 @@ func TestRunFullPathToReport(t *testing.T) {
 		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
 			return []byte(`{"result":{"root_pane":{"pane_id":"w:p1"}}}`), nil
 		}
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
+			return nil, herdr.ErrAgentNotFound
+		}
 		if len(args) >= 2 && args[0] == "pane" && args[1] == "run" {
 			if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
 				Task:      "t",
@@ -272,6 +275,9 @@ func TestExecuteReportsOrphansOnPartialFailure(t *testing.T) {
 	runner := func(_ context.Context, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
 			return []byte(`{"result":{"root_pane":{"pane_id":"w:p1"}}}`), nil
+		}
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
+			return nil, herdr.ErrAgentNotFound
 		}
 		if len(args) >= 2 && args[0] == "pane" && args[1] == "run" {
 			runs++
