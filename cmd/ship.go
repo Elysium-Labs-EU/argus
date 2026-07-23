@@ -189,6 +189,17 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	logger.Action("open_pr", target.branch, "ok", pr.HTMLURL)
 	_, _ = fmt.Fprintf(out, "%s opened PR #%d: %s\n", ui.LabelSuccess.Render("✓"), pr.Number, pr.HTMLURL)
 
+	// Recorded best-effort: a write failure here must not undo an already-opened
+	// PR. Without it, `argus worktree prune` still works (it falls back to
+	// forge.FindPR by branch), just without the exact PR number pre-resolved.
+	if lerr := protocol.WriteLifecycle(a.worktree, &protocol.Lifecycle{
+		State: protocol.LifecycleShipped, Host: target.host, Owner: target.owner, Repo: target.name,
+		Branch: target.branch, PRURL: pr.HTMLURL, PRNumber: pr.Number,
+	}); lerr != nil {
+		logger.Fail("record_lifecycle", target.branch, lerr)
+		_, _ = fmt.Fprintf(out, "%s recording worktree lifecycle: %v\n", ui.LabelWarning.Render("!"), lerr)
+	}
+
 	if a.jiraIssue != "" {
 		postShipJira(ctx, out, logger, a, pr)
 	}

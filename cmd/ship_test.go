@@ -295,6 +295,16 @@ func TestShipChangeCommitsPushesAndOpensPR(t *testing.T) {
 	if err != nil || !strings.Contains(string(branchOut), "feat-x") {
 		t.Errorf("branch not pushed to remote: %q err %v", branchOut, err)
 	}
+
+	// A lifecycle record lets `argus worktree prune` find this PR later
+	// without re-deriving it from the branch name (see issue #101).
+	lc, found, lerr := protocol.LoadLifecycle(wt)
+	if lerr != nil || !found {
+		t.Fatalf("LoadLifecycle: found=%v err=%v", found, lerr)
+	}
+	if lc.State != protocol.LifecycleShipped || lc.PRNumber != 99 || lc.PRURL != "https://fake/pull/99" {
+		t.Errorf("unexpected lifecycle record: %+v", lc)
+	}
 }
 
 func TestShipChangeReturnsErrorWhenNothingToCommit(t *testing.T) {

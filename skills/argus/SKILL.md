@@ -358,6 +358,21 @@ specifically to this merge-conflict case, not general rework (use section 4 for 
 argus rebase --worktree <path> --base main
 ```
 
+## 6. Post-ship cleanup
+
+Once a PR merges, the worktree that produced it is dead weight. Prune checks
+deterministically (no LLM) whether each worktree's PR has merged and whether it's
+otherwise safe to remove (no uncommitted changes, no unpushed commits, no stash) —
+safe worktrees are cleaned automatically (a recoverable relocation, never a raw rm),
+anything else is reported with the reason and left alone:
+
+```bash
+argus worktree prune --branch <name> --dry-run   # confirm first
+argus worktree prune --branch <name>
+
+argus worktree prune --merged                    # sweep every worktree under the repo
+```
+
 ## Inspect / update the binary
 
 ```bash

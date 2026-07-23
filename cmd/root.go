@@ -39,6 +39,7 @@ func init() {
 	rootCmd.AddCommand(reviewCmd)
 	rootCmd.AddCommand(shipCmd)
 	rootCmd.AddCommand(rebaseCmd)
+	rootCmd.AddCommand(worktreeCmd)
 	rootCmd.AddCommand(statsCmd)
 	rootCmd.AddCommand(systemCmd)
 	rootCmd.AddCommand(configCmd)
