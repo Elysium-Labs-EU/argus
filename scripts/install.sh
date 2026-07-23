@@ -17,6 +17,16 @@ set -eu
 
 REPO="Elysium-Labs-EU/argus"
 
+# ECDSA P-256 public key (SubjectPublicKeyInfo, PEM) used to verify the
+# detached signature over each release's sha256sums.txt. Keep in sync with
+# releaseSigningPublicKeyPEM in cmd/update.go — `make check-pubkey-sync`
+# fails CI if they diverge. The matching private key lives only as the
+# RELEASE_SIGNING_KEY secret in GitHub Actions.
+RELEASE_SIGNING_PUBKEY='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEKixhYiZA8bWtyh5sBs0hLdOhVXj3
+zHHnA3f89l/hPJOQljhWQPOWUcVWnxpVkiIfMPfvxuH4CxnRfFL2azqr8A==
+-----END PUBLIC KEY-----'
+
 log() { printf '%s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
@@ -24,6 +34,8 @@ usage() {
   cat <<EOF
 Usage: install.sh [--print-install-dir]
        install.sh --strip-quarantine <path>
+       install.sh --verify-signature <pubkey-file> <sig-file> <data-file>
+       install.sh --verify-signature-flow <pubkey-file> <sig-file> <checksums-file>
 
   --print-install-dir  Print the directory the script would install into
                         (honoring ARGUS_INSTALL_DIR and PATH) and exit,
@@ -33,6 +45,25 @@ Usage: install.sh [--print-install-dir]
                         from <path> and exit. No-op on non-Darwin. Useful
                         after manually downloading a release asset instead
                         of using this script.
+  --verify-signature <pubkey-file> <sig-file> <data-file>
+                        Verify an ECDSA signature with openssl and exit with
+                        its result (0 = valid). Exposes the same check the
+                        installer runs on sha256sums.txt, for testing.
+  --verify-signature-flow <pubkey-file> <sig-file> <checksums-file>
+                        Run the same soft-fail (missing sig-file)/hard-fail
+                        (invalid sig-file)/pass (valid sig-file) decision the
+                        installer runs on a downloaded release, and exit with
+                        its result. <sig-file> may point to a missing or
+                        empty file to exercise the soft-fail path. For
+                        testing.
+  --fetch-signature <url> <dest-file>
+                        Download <url> to <dest-file>, exiting 0 for a 200 or
+                        a 404 (dest-file is left missing on 404) and 1 for
+                        any other outcome (non-2xx status, or the request
+                        failing outright). Exposes the same
+                        signed-vs-unsigned-vs-broken-download classification
+                        the installer runs on sha256sums.txt.sig, for
+                        testing.
 EOF
 }
 
@@ -102,6 +133,80 @@ resign_darwin_binary() {
   fi
 }
 
+# verify_release_signature checks sig_file (an ASN.1 DER ECDSA signature, as
+# produced by `openssl dgst -sha256 -sign`) against data_file using
+# pubkey_file, via openssl. Exit status communicates the verdict; prints
+# nothing so the caller controls all user-facing messaging.
+verify_release_signature() {
+  pubkey_file="$1"
+  sig_file="$2"
+  data_file="$3"
+  openssl dgst -sha256 -verify "$pubkey_file" -signature "$sig_file" "$data_file" >/dev/null 2>&1
+}
+
+# fetch_release_signature downloads url (a sha256sums.txt.sig URL) to dest,
+# distinguishing "no signature published for this release" from "the
+# download failed" the same way cmd/update.go's SignatureAsset()-then-
+# downloadFile split does: a 404 means the release predates signing (soft-
+# fail candidate — dest is left missing, and verify_checksums_signature_flow
+# warns and passes). Anything else — a non-2xx status, or curl unable to
+# complete the request at all (DNS failure, connection refused, timeout) —
+# is a hard failure, since it's indistinguishable from an attacker blocking
+# just this one URL to force the checksum-only fallback. Silently treating
+# every curl failure as "unsigned" (as an earlier version of this script
+# did) would let that attack through.
+fetch_release_signature() {
+  url="$1"
+  dest="$2"
+  status="$(curl -sSL -w '%{http_code}' -o "$dest" "$url" 2>/dev/null)" || status="000"
+  case "$status" in
+    200) return 0 ;;
+    404)
+      rm -f "$dest"
+      return 0
+      ;;
+    *)
+      rm -f "$dest"
+      log "fetching ${url}: HTTP ${status}"
+      return 1
+      ;;
+  esac
+}
+
+# verify_checksums_signature_flow implements the same soft-fail/hard-fail
+# decision the main install flow uses when checking a release's signature:
+# a missing or empty sig_file means the release predates signing (soft-fail:
+# warn, return 0); a present-but-invalid sig_file is a hard failure (return
+# 1); a present-and-valid sig_file is success (return 0). Takes pubkey_file
+# explicitly rather than reading RELEASE_SIGNING_PUBKEY, so it's testable
+# against a throwaway keypair instead of the real embedded one.
+verify_checksums_signature_flow() {
+  pubkey_file="$1"
+  sig_file="$2"
+  checksums_file="$3"
+
+  if [ ! -s "$sig_file" ]; then
+    # Soft-fail: releases published before signing was introduced have no
+    # sha256sums.txt.sig. Keep in sync with requireReleaseSignature in
+    # cmd/update.go — once that flips to true, this should too.
+    log "warning: release has no sha256sums.txt.sig — checksum-only integrity (release predates signing)"
+    return 0
+  fi
+
+  log "Verifying release signature..."
+  if ! command -v openssl >/dev/null 2>&1; then
+    log "sha256sums.txt.sig is present but openssl is not installed — cannot verify it"
+    return 1
+  fi
+
+  if verify_release_signature "$pubkey_file" "$sig_file" "$checksums_file"; then
+    log "Signature verified"
+    return 0
+  fi
+  log "signature does not match sha256sums.txt"
+  return 1
+}
+
 PRINT_INSTALL_DIR_ONLY=false
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -111,6 +216,35 @@ while [ $# -gt 0 ]; do
       [ $# -gt 0 ] || die "--strip-quarantine requires a path argument"
       strip_quarantine "$1"
       exit 0
+      ;;
+    --verify-signature)
+      shift
+      [ $# -ge 3 ] || die "--verify-signature requires <pubkey-file> <sig-file> <data-file>"
+      if verify_release_signature "$1" "$2" "$3"; then
+        log "signature valid"
+        exit 0
+      else
+        log "signature invalid"
+        exit 1
+      fi
+      ;;
+    --verify-signature-flow)
+      shift
+      [ $# -ge 3 ] || die "--verify-signature-flow requires <pubkey-file> <sig-file> <checksums-file>"
+      if verify_checksums_signature_flow "$1" "$2" "$3"; then
+        exit 0
+      else
+        exit 1
+      fi
+      ;;
+    --fetch-signature)
+      shift
+      [ $# -ge 2 ] || die "--fetch-signature requires <url> <dest-file>"
+      if fetch_release_signature "$1" "$2"; then
+        exit 0
+      else
+        exit 1
+      fi
       ;;
     -h | --help)
       usage
@@ -218,6 +352,16 @@ log "Verifying checksum..."
     die "neither sha256sum nor shasum is available to verify the download"
   fi
 ) || die "checksum verification failed for ${ASSET}"
+
+SIG_URL="https://github.com/${REPO}/releases/download/${TAG}/sha256sums.txt.sig"
+SIG_FILE="${TMP_DIR}/sha256sums.txt.sig"
+fetch_release_signature "$SIG_URL" "$SIG_FILE" || die "fetching ${SIG_URL} failed — refusing to install (release may be tampered, or this may be a network problem)"
+
+PUBKEY_FILE="${TMP_DIR}/release-signing-pubkey.pem"
+printf '%s\n' "$RELEASE_SIGNING_PUBKEY" >"$PUBKEY_FILE"
+
+verify_checksums_signature_flow "$PUBKEY_FILE" "$SIG_FILE" "${TMP_DIR}/sha256sums.txt" ||
+  die "signature verification failed for ${TAG} — refusing to install (release may be tampered)"
 
 strip_quarantine "${TMP_DIR}/${ASSET}"
 

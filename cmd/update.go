@@ -2,9 +2,12 @@ package cmd
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +29,70 @@ const argusRepo = "Elysium-Labs-EU/argus"
 
 var httpClient = &http.Client{
 	Timeout: 15 * time.Second,
+}
+
+// releaseSigningPublicKeyPEM is the ECDSA P-256 public key (SubjectPublicKeyInfo,
+// PEM) used to verify the detached signature over each release's
+// sha256sums.txt. The matching private key lives only as the
+// RELEASE_SIGNING_KEY secret in GitHub Actions and is used by
+// .github/workflows/release.yml to sign at release time — it is never
+// checked into this repo. Keep this in sync with the identical PEM block in
+// scripts/install.sh; `make check-pubkey-sync` fails CI if they diverge.
+const releaseSigningPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEKixhYiZA8bWtyh5sBs0hLdOhVXj3
+zHHnA3f89l/hPJOQljhWQPOWUcVWnxpVkiIfMPfvxuH4CxnRfFL2azqr8A==
+-----END PUBLIC KEY-----
+`
+
+// requireReleaseSignature gates whether a release with no sha256sums.txt.sig
+// asset is refused outright rather than merely warned about. Keep this false
+// until the RELEASE_SIGNING_KEY secret is provisioned in GitHub Actions and
+// the first signed release has shipped — flipping it before then would make
+// every existing (unsigned) release refuse to install. Once a signed release
+// exists, flip to true so an unsigned or signature-stripped release can no
+// longer be installed silently.
+const requireReleaseSignature = false
+
+// parseReleaseSigningPublicKey decodes the embedded release signing public
+// key. Pure — no I/O.
+func parseReleaseSigningPublicKey() (*ecdsa.PublicKey, error) {
+	block, _ := pem.Decode([]byte(releaseSigningPublicKeyPEM))
+	if block == nil {
+		return nil, fmt.Errorf("decoding embedded release signing public key: no PEM block found")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing embedded release signing public key: %w", err)
+	}
+	ecdsaPub, ok := pub.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("embedded release signing public key is %T, want ECDSA", pub)
+	}
+	return ecdsaPub, nil
+}
+
+// verifySignature checks sig — an ASN.1 DER ECDSA signature, as produced by
+// `openssl dgst -sha256 -sign` — against the SHA-256 digest of data, using
+// pub. Pure — no I/O.
+func verifySignature(pub *ecdsa.PublicKey, data, sig []byte) error {
+	digest := sha256.Sum256(data)
+	if !ecdsa.VerifyASN1(pub, digest[:], sig) {
+		return fmt.Errorf("signature does not match")
+	}
+	return nil
+}
+
+// verifyChecksumsSignature checks sig against checksumsData using the
+// embedded release signing public key. Pure — no I/O.
+func verifyChecksumsSignature(checksumsData, sig []byte) error {
+	pub, err := parseReleaseSigningPublicKey()
+	if err != nil {
+		return err
+	}
+	if err := verifySignature(pub, checksumsData, sig); err != nil {
+		return fmt.Errorf("signature does not match sha256sums.txt")
+	}
+	return nil
 }
 
 // Asset is one file attached to a GitHub release.
@@ -57,6 +124,16 @@ func (r Release) AssetFor(platform string) (Asset, bool) {
 func (r Release) ChecksumsAsset() (Asset, bool) {
 	for _, a := range r.Assets {
 		if a.Name == "sha256sums.txt" {
+			return a, true
+		}
+	}
+	return Asset{}, false
+}
+
+// SignatureAsset returns the sha256sums.txt.sig asset, if the release has one.
+func (r Release) SignatureAsset() (Asset, bool) {
+	for _, a := range r.Assets {
+		if a.Name == "sha256sums.txt.sig" {
 			return a, true
 		}
 	}
@@ -272,6 +349,41 @@ func verifyChecksum(binaryPath, checksumsContent, assetName string) error {
 	return nil
 }
 
+// verifyReleaseSignature checks rel's sha256sums.txt.sig (downloaded into
+// tmpDir) against checksumsData, writing a status line to out either way.
+//
+// A release with no signature asset is only a hard error once
+// requireReleaseSignature is true (see its doc comment for the rollout
+// plan); until then it's a warning, since sha256 checksum verification
+// (verifyChecksum) already runs independently of this. A signature asset
+// that fails to verify is always a hard error — that's a stronger integrity
+// signal than "no signature was ever published", so it's never soft-failed.
+func verifyReleaseSignature(ctx context.Context, out io.Writer, rel Release, checksumsData []byte, tmpDir string) error {
+	sig, ok := rel.SignatureAsset()
+	if !ok {
+		if requireReleaseSignature {
+			return &ui.UserError{Err: fmt.Errorf("release %s has no sha256sums.txt.sig", rel.TagName)}
+		}
+		_, _ = fmt.Fprintf(out, "%s release %s has no signature (sha256sums.txt.sig) — checksum-only integrity\n", ui.LabelWarning.Render("warning"), rel.TagName)
+		return nil
+	}
+
+	sigTmp := filepath.Join(tmpDir, "sha256sums.txt.sig")
+	if dlErr := downloadFile(ctx, sig.DownloadURL, sigTmp); dlErr != nil {
+		return fmt.Errorf("downloading signature: %w", dlErr)
+	}
+	sigData, err := os.ReadFile(sigTmp) //nolint:gosec // fixed name in an argus-owned temp dir
+	if err != nil {
+		return fmt.Errorf("reading signature: %w", err)
+	}
+
+	if verifyErr := verifyChecksumsSignature(checksumsData, sigData); verifyErr != nil {
+		return &ui.UserError{Err: fmt.Errorf("signature verification failed for %s: %w — refusing to install", rel.TagName, verifyErr)}
+	}
+	_, _ = fmt.Fprintf(out, "%s signature verified\n", ui.LabelSuccess.Render("✓"))
+	return nil
+}
+
 // copyFile copies src to dst, creating or truncating dst, preserving src's
 // file mode.
 func copyFile(src, dst string) error {
@@ -432,6 +544,10 @@ func runUpdate(ctx context.Context, out io.Writer, exePath, currentVersion strin
 		return &ui.UserError{Err: verifyErr}
 	}
 	_, _ = fmt.Fprintf(out, "%s checksum verified\n", ui.LabelSuccess.Render("✓"))
+
+	if sigErr := verifyReleaseSignature(ctx, out, rel, checksumsData, tmpDir); sigErr != nil {
+		return sigErr
+	}
 
 	backupPath := exePath + ".backup"
 	if backupErr := copyFile(exePath, backupPath); backupErr != nil {

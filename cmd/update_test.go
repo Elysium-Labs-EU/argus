@@ -3,6 +3,9 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -215,6 +218,118 @@ func TestReleaseAssetFor(t *testing.T) {
 	sums, ok := rel.ChecksumsAsset()
 	if !ok || sums.Name != "sha256sums.txt" {
 		t.Fatalf("ChecksumsAsset() = %+v, %v", sums, ok)
+	}
+}
+
+func TestReleaseSignatureAsset(t *testing.T) {
+	rel := Release{
+		Assets: []Asset{
+			{Name: "argus-linux-amd64", DownloadURL: "https://github.com/x/amd64"},
+			{Name: "sha256sums.txt", DownloadURL: "https://github.com/x/sums"},
+			{Name: "sha256sums.txt.sig", DownloadURL: "https://github.com/x/sig"},
+		},
+	}
+
+	sig, ok := rel.SignatureAsset()
+	if !ok || sig.Name != "sha256sums.txt.sig" {
+		t.Fatalf("SignatureAsset() = %+v, %v", sig, ok)
+	}
+
+	unsigned := Release{Assets: []Asset{{Name: "sha256sums.txt"}}}
+	if _, ok := unsigned.SignatureAsset(); ok {
+		t.Error("SignatureAsset() should not match a release with no .sig asset")
+	}
+}
+
+func generateTestSigningKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating test signing key: %v", err)
+	}
+	return key
+}
+
+func TestParseReleaseSigningPublicKey(t *testing.T) {
+	pub, err := parseReleaseSigningPublicKey()
+	if err != nil {
+		t.Fatalf("parseReleaseSigningPublicKey: %v", err)
+	}
+	if pub.Curve != elliptic.P256() {
+		t.Errorf("embedded key curve = %v, want P-256", pub.Curve)
+	}
+}
+
+func TestVerifySignature(t *testing.T) {
+	key := generateTestSigningKey(t)
+	data := []byte("argus release checksums fixture")
+
+	digest := sha256.Sum256(data)
+	sig, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatalf("signing fixture: %v", err)
+	}
+
+	if err := verifySignature(&key.PublicKey, data, sig); err != nil {
+		t.Errorf("verifySignature with a valid signature: %v", err)
+	}
+
+	if err := verifySignature(&key.PublicKey, []byte("tampered data"), sig); err == nil {
+		t.Error("expected an error when the signed data doesn't match")
+	}
+
+	otherKey := generateTestSigningKey(t)
+	if err := verifySignature(&otherKey.PublicKey, data, sig); err == nil {
+		t.Error("expected an error when the signature was made by a different key")
+	}
+
+	if err := verifySignature(&key.PublicKey, data, []byte("not a signature")); err == nil {
+		t.Error("expected an error for a malformed signature")
+	}
+}
+
+func TestVerifyChecksumsSignatureRejectsForgedSignature(t *testing.T) {
+	// verifyChecksumsSignature always checks against the embedded production
+	// public key, so a signature not produced by its (deliberately absent)
+	// private key must be rejected regardless of content.
+	if err := verifyChecksumsSignature([]byte("sha256sums.txt contents"), []byte("forged signature bytes")); err == nil {
+		t.Error("expected an error for a signature not made by the production key")
+	}
+}
+
+func TestVerifyReleaseSignatureMissingAssetWarnsAndContinues(t *testing.T) {
+	rel := Release{TagName: "v1.0.0"}
+	buf := &bytes.Buffer{}
+
+	if err := verifyReleaseSignature(context.Background(), buf, rel, []byte("checksums"), t.TempDir()); err != nil {
+		t.Fatalf("verifyReleaseSignature: %v", err)
+	}
+	if !strings.Contains(buf.String(), "has no signature") {
+		t.Errorf("output = %q, want a no-signature warning", buf.String())
+	}
+}
+
+func TestVerifyReleaseSignaturePresentButInvalidFails(t *testing.T) {
+	useHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "sha256sums.txt.sig") {
+			t.Errorf("unexpected request to %s", r.URL.Path)
+			return
+		}
+		_, _ = w.Write([]byte("not a real signature"))
+	})
+
+	rel := Release{
+		TagName: "v1.0.0",
+		Assets:  []Asset{{Name: "sha256sums.txt.sig", DownloadURL: "https://github.com/x/sha256sums.txt.sig"}},
+	}
+	buf := &bytes.Buffer{}
+
+	err := verifyReleaseSignature(context.Background(), buf, rel, []byte("checksums"), t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error for an invalid signature")
+	}
+	if !strings.Contains(err.Error(), "signature verification failed") {
+		t.Errorf("error = %v, want a signature-verification-failed message", err)
 	}
 }
 
@@ -492,6 +607,61 @@ func TestRunUpdateChecksumMismatch(t *testing.T) {
 	}
 	if string(got) != "old argus binary contents" {
 		t.Errorf("exePath was modified despite a checksum mismatch: %q", got)
+	}
+}
+
+func TestRunUpdateInvalidSignatureRefusesInstall(t *testing.T) {
+	platform, perr := hostPlatform()
+	if perr != nil {
+		t.Skipf("hostPlatform: %v", perr)
+	}
+	assetName := "argus-" + platform
+	binContents := []byte("new argus binary contents")
+	sum := sha256.Sum256(binContents)
+	checksums := hex.EncodeToString(sum[:]) + "  " + assetName + "\n"
+
+	useHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"tag_name": "v9.9.9", "assets": [
+				{"name": %q, "browser_download_url": "https://github.com/x/%s"},
+				{"name": "sha256sums.txt", "browser_download_url": "https://github.com/x/sha256sums.txt"},
+				{"name": "sha256sums.txt.sig", "browser_download_url": "https://github.com/x/sha256sums.txt.sig"}
+			]}`, assetName, assetName)
+		case strings.HasSuffix(r.URL.Path, "/"+assetName):
+			_, _ = w.Write(binContents)
+		case strings.HasSuffix(r.URL.Path, "/sha256sums.txt.sig"):
+			_, _ = w.Write([]byte("not a real signature"))
+		case strings.HasSuffix(r.URL.Path, "/sha256sums.txt"):
+			_, _ = w.Write([]byte(checksums))
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "argus")
+	if err := os.WriteFile(exePath, []byte("old argus binary contents"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	buf := &bytes.Buffer{}
+
+	err := runUpdate(context.Background(), buf, exePath, "v0.1.0", false)
+	if err == nil {
+		t.Fatal("expected an error for a release with an invalid signature")
+	}
+	if !strings.Contains(err.Error(), "signature verification failed") {
+		t.Errorf("error = %v, want a signature-verification-failed message", err)
+	}
+
+	got, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "old argus binary contents" {
+		t.Errorf("exePath was modified despite an invalid signature: %q", got)
 	}
 }
 
