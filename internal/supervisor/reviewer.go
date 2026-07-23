@@ -13,13 +13,18 @@ import (
 
 // ReviewRequest is the scoped payload argus hands a reviewer when the
 // deterministic gate escalates. It is deliberately small: the task, why the gate
-// flagged it, and the actual diff — not the worker's whole scrollback.
+// flagged it, and the actual diff — not the worker's whole scrollback. HardReasons
+// is the subset of Reasons argus will never let this review waive (see
+// supervisor.Verdict.HardReasons) — carried through so the reviewer's own summary
+// can name the discrepancy instead of the model discovering only after the fact
+// that its "approve" didn't ship anything.
 type ReviewRequest struct {
-	Task     string
-	Branch   string
-	Worktree string
-	Diff     string
-	Reasons  []string
+	Task        string
+	Branch      string
+	Worktree    string
+	Diff        string
+	Reasons     []string
+	HardReasons []string
 }
 
 // ReviewResult is a reviewer's verdict. Decision is one of "approve",
@@ -154,6 +159,17 @@ func reviewPrompt(req *ReviewRequest) string {
 	b.WriteString("The gate escalated for these reasons:\n")
 	for _, reason := range req.Reasons {
 		fmt.Fprintf(&b, "  - %s\n", reason)
+	}
+	if len(req.HardReasons) > 0 {
+		b.WriteString("\nThe following are HARD gate failures: argus will NOT ship this change no\n")
+		b.WriteString("matter what you decide, because status.json's own claim diverged from what\n")
+		b.WriteString("argus measured from git — that is evidence the self-report for this change\n")
+		b.WriteString("can't be trusted, not something code quality can offset.\n")
+		for _, reason := range req.HardReasons {
+			fmt.Fprintf(&b, "  - %s\n", reason)
+		}
+		b.WriteString("Still give your honest judgment on the code itself — \"approve\" here means\n")
+		b.WriteString("only \"the code looks correct\"; it will be recorded as unresolved regardless.\n")
 	}
 	b.WriteString("\nDiff:\n```diff\n")
 	b.WriteString(req.Diff)

@@ -36,8 +36,14 @@ func DefaultReviewPolicy() ReviewPolicy {
 
 // Verdict is the gate's decision for one worker. When AutoApprove is false,
 // Reasons lists every trigger that forced escalation, in evaluation order.
+// HardReasons is the subset of Reasons that no reviewer verdict can waive: the
+// diff-vs-git checks in gateVerdict below, where status.json's own claim
+// diverged from what argus measured. A non-empty HardReasons means the final
+// approval must stay false even if --review comes back "approve" — see
+// reviewEscalations in loop.go.
 type Verdict struct {
 	Reasons     []string
+	HardReasons []string
 	AutoApprove bool
 }
 
@@ -109,7 +115,9 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 	v := Assess(&eff, policy)
 	if st.diffErr != nil {
 		v.AutoApprove = false
-		v.Reasons = append(v.Reasons, "could not measure diff to verify worker report: "+st.diffErr.Error())
+		reason := "could not measure diff to verify worker report: " + st.diffErr.Error()
+		v.Reasons = append(v.Reasons, reason)
+		v.HardReasons = append(v.HardReasons, reason)
 		return v
 	}
 	if st.measuredOK {
@@ -117,8 +125,9 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 		measured := st.measured.Insertions + st.measured.Deletions
 		if measured-reported > diffMismatchTolerance {
 			v.AutoApprove = false
-			v.Reasons = append(v.Reasons,
-				fmt.Sprintf("worker under-reported diff: claimed %d lines, git measured %d", reported, measured))
+			reason := fmt.Sprintf("worker under-reported diff: claimed %d lines, git measured %d", reported, measured)
+			v.Reasons = append(v.Reasons, reason)
+			v.HardReasons = append(v.HardReasons, reason)
 		}
 		// A worker that reaches a terminal phase claiming completed, verified work
 		// but touched zero files per git is exactly the failure mode that let a
@@ -128,8 +137,9 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 		// an empty diff looks "clean" by every other check above.
 		if len(st.measuredFiles) == 0 && (eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone) {
 			v.AutoApprove = false
-			v.Reasons = append(v.Reasons,
-				fmt.Sprintf("worker reports phase %q but git shows zero files changed against base — status may be stale or unverified", eff.Phase))
+			reason := fmt.Sprintf("worker reports phase %q but git shows zero files changed against base — status may be stale or unverified", eff.Phase)
+			v.Reasons = append(v.Reasons, reason)
+			v.HardReasons = append(v.HardReasons, reason)
 		}
 	}
 

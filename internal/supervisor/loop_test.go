@@ -493,6 +493,55 @@ func TestReviewEscalationsAutoApprovesCleanAndReviewsEscalated(t *testing.T) {
 	}
 }
 
+// TestReviewEscalationsHardReasonSurvivesReviewerApprove is the regression for
+// issue #105: a worker whose real diff dwarfs its self-report is exactly the
+// case a reviewer's "approve" must not be able to talk past, because the
+// discrepancy is evidence status.json can't be trusted for this change, not a
+// stylistic judgment call. Wire a fake reviewer that always approves and assert
+// the persisted verdict is still not-approved.
+func TestReviewEscalationsHardReasonSurvivesReviewerApprove(t *testing.T) {
+	wt := bigGitWorktree(t, "cmd/root.go", 50)
+	liar := &workerState{
+		hasFile:    true,
+		measuredOK: true,
+		plan:       &WorkerPlan{Worker: Worker{Task: "liar", Branch: "b", Worktree: wt}},
+		status: protocol.Status{
+			Phase:    protocol.PhaseAwaitingReview,
+			DiffStat: protocol.DiffStat{Files: 1, Insertions: 1},
+			Tests:    []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
+		},
+	}
+	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	liar.measured = ds
+	liar.measuredFiles = files
+
+	cfg := &Config{
+		Base:     "HEAD",
+		Reviewer: NewReviewerWithRunner(fakeReviewRunner(`{"decision":"approve","summary":"looks fine to me","findings":[]}`)),
+	}
+	reviewEscalations(context.Background(), cfg, []*workerState{liar})
+
+	if liar.review == nil || liar.review.Decision != "approve" {
+		t.Fatalf("expected the fake reviewer to return approve, got %+v", liar.review)
+	}
+	approval, found, err := protocol.LoadApproval(wt)
+	if err != nil {
+		t.Fatalf("LoadApproval: %v", err)
+	}
+	if !found {
+		t.Fatal("expected a persisted verdict")
+	}
+	if approval.Approved {
+		t.Fatalf("a material under-report must stay not-approved even when --review approves, got %+v", approval)
+	}
+	if !strings.Contains(approval.Summary, "unwaivable") {
+		t.Errorf("summary should call out the discrepancy as unwaivable, got %q", approval.Summary)
+	}
+}
+
 func TestReviewEscalationsWithoutReviewerJustGates(t *testing.T) {
 	// No reviewer configured: an escalated worker is surfaced (no verdict, no
 	// error), never sent to an LLM.

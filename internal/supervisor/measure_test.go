@@ -112,6 +112,38 @@ func TestGateEscalatesWhenWorkerUnderReportsDiff(t *testing.T) {
 	if !hasReasonContaining(v.Reasons, "under-reported diff") {
 		t.Errorf("expected an under-report reason, got %v", v.Reasons)
 	}
+	if !hasReasonContaining(v.HardReasons, "under-reported diff") {
+		t.Errorf("under-report must be a hard reason (unwaivable by --review), got HardReasons=%v", v.HardReasons)
+	}
+}
+
+// TestGateOversizedDiffIsNotAHardReason documents the other half of the
+// hard/soft split (issue #105): a diff that merely exceeds the size ceiling is
+// a judgment call --review can still approve past, so it must land only in
+// Reasons, never HardReasons.
+func TestGateOversizedDiffIsNotAHardReason(t *testing.T) {
+	st := &workerState{
+		hasFile:       true,
+		measuredOK:    true,
+		measured:      protocol.DiffStat{Files: 1, Insertions: 500, Deletions: 100},
+		measuredFiles: []string{"cmd/root.go"},
+		plan:          &WorkerPlan{Worker: Worker{Task: "big-but-honest"}},
+		status: protocol.Status{
+			Phase:    protocol.PhaseAwaitingReview,
+			DiffStat: protocol.DiffStat{Files: 1, Insertions: 500, Deletions: 100},
+			Tests:    []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
+		},
+	}
+	v := gateVerdict(st, &ReviewPolicy{MaxDiffLines: 400})
+	if v.AutoApprove {
+		t.Fatal("oversized diff must still escalate")
+	}
+	if !hasReasonContaining(v.Reasons, "exceeds max") {
+		t.Errorf("expected an oversized-diff reason, got %v", v.Reasons)
+	}
+	if len(v.HardReasons) != 0 {
+		t.Errorf("oversized diff (honestly reported) must not be a hard reason, got HardReasons=%v", v.HardReasons)
+	}
 }
 
 func TestGateEscalatesWhenMeasuredDiffIsEmptyDespiteClaimedCompletion(t *testing.T) {
@@ -139,6 +171,9 @@ func TestGateEscalatesWhenMeasuredDiffIsEmptyDespiteClaimedCompletion(t *testing
 	if !hasReasonContaining(v.Reasons, "zero files changed") {
 		t.Errorf("expected a zero-files-changed reason, got %v", v.Reasons)
 	}
+	if !hasReasonContaining(v.HardReasons, "zero files changed") {
+		t.Errorf("zero-files-changed must be a hard reason (unwaivable by --review), got HardReasons=%v", v.HardReasons)
+	}
 }
 
 func TestGateEscalatesWhenDiffUnmeasurable(t *testing.T) {
@@ -154,6 +189,9 @@ func TestGateEscalatesWhenDiffUnmeasurable(t *testing.T) {
 	}
 	if !hasReasonContaining(v.Reasons, "could not measure diff") {
 		t.Errorf("expected an unmeasurable reason, got %v", v.Reasons)
+	}
+	if !hasReasonContaining(v.HardReasons, "could not measure diff") {
+		t.Errorf("unmeasurable diff must be a hard reason (unwaivable by --review), got HardReasons=%v", v.HardReasons)
 	}
 }
 

@@ -509,11 +509,12 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 			continue
 		}
 		res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
-			Task:     st.plan.Task,
-			Branch:   st.plan.Branch,
-			Worktree: st.plan.Worktree,
-			Diff:     diff,
-			Reasons:  verdict.Reasons,
+			Task:        st.plan.Task,
+			Branch:      st.plan.Branch,
+			Worktree:    st.plan.Worktree,
+			Diff:        diff,
+			Reasons:     verdict.Reasons,
+			HardReasons: verdict.HardReasons,
 		})
 		if err != nil {
 			st.reviewErr = err
@@ -523,7 +524,20 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 		}
 		st.review = &res
 		cfg.Log.Action("review", st.plan.Task, res.Decision, res.Summary)
-		recordApproval(cfg, st, res.Decision == "approve", "review", res.Summary, res.Findings)
+
+		// A hard reason (unmeasurable diff, material under-report, zero files
+		// changed despite a claimed terminal phase) is not a factor for the
+		// reviewer to weigh — it is evidence status.json can't be trusted for this
+		// change, so no reviewer verdict, including "approve", can waive it. Record
+		// the reviewer's findings for a human to read, but never auto-ship past it.
+		approved := res.Decision == "approve"
+		summary := res.Summary
+		if len(verdict.HardReasons) > 0 {
+			approved = false
+			summary = fmt.Sprintf("reviewer said %q (%s), but a hard gate check is unwaivable: %s",
+				res.Decision, res.Summary, strings.Join(verdict.HardReasons, "; "))
+		}
+		recordApproval(cfg, st, approved, "review", summary, res.Findings)
 	}
 }
 
