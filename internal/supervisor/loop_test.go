@@ -484,7 +484,7 @@ func TestReviewEscalationsAutoApprovesCleanAndReviewsEscalated(t *testing.T) {
 		Policy:   &policy,
 		Reviewer: NewReviewerWithRunner(fakeReviewRunner(`{"decision":"approve","summary":"ok","findings":[]}`)),
 	}
-	reviewEscalations(context.Background(), cfg, []*workerState{clean, escalated})
+	reviewEscalations(context.Background(), cfg, []*workerState{clean, escalated}, nil)
 
 	if clean.review != nil {
 		t.Error("auto-approved worker must not be reviewed")
@@ -529,7 +529,7 @@ func TestReviewEscalationsHardReasonSurvivesReviewerApprove(t *testing.T) {
 		Base:     "HEAD",
 		Reviewer: NewReviewerWithRunner(fakeReviewRunner(`{"decision":"approve","summary":"looks fine to me","findings":[]}`)),
 	}
-	reviewEscalations(context.Background(), cfg, []*workerState{liar})
+	reviewEscalations(context.Background(), cfg, []*workerState{liar}, nil)
 
 	if liar.review == nil || liar.review.Decision != "approve" {
 		t.Fatalf("expected the fake reviewer to return approve, got %+v", liar.review)
@@ -579,7 +579,7 @@ func TestReviewEscalationsThreadsPriorFindingsFromVerdict(t *testing.T) {
 	}
 	policy := DefaultReviewPolicy()
 	cfg := &Config{Base: "HEAD", Policy: &policy, Reviewer: NewReviewerWithRunner(runner)}
-	reviewEscalations(context.Background(), cfg, []*workerState{escalated})
+	reviewEscalations(context.Background(), cfg, []*workerState{escalated}, nil)
 
 	if !strings.Contains(gotPrompt, "--dry-run mutates lifecycle.json on disk") {
 		t.Errorf("review prompt did not carry the prior verdict's finding:\n%s", gotPrompt)
@@ -598,9 +598,66 @@ func TestReviewEscalationsWithoutReviewerJustGates(t *testing.T) {
 		status:  protocol.Status{Phase: protocol.PhaseBlocked, BlockedReason: "needs a decision"},
 	}
 	cfg := &Config{Base: "HEAD", Policy: nil}
-	reviewEscalations(context.Background(), cfg, []*workerState{escalated})
+	reviewEscalations(context.Background(), cfg, []*workerState{escalated}, nil)
 	if escalated.review != nil || escalated.reviewErr != nil {
 		t.Errorf("no reviewer should mean no verdict and no error: review=%v err=%v", escalated.review, escalated.reviewErr)
+	}
+}
+
+// TestReviewEscalationsGateSurvivesExhaustedReviewSem guards against
+// reviewEscalations acquiring its concurrency semaphore around the whole
+// function instead of just the reviewer call: doing so would queue a
+// worker's free/local gate verdict behind whichever other workers currently
+// held a review slot, so a fleet larger than ReviewConcurrency could go a
+// long time with no gate/verdict event at all even though the worker had
+// already reached a terminal phase. sem is pre-filled here to simulate
+// another worker's still-in-flight `claude -p` review holding the only slot;
+// the gate verdict for this worker must still be logged immediately, with
+// only the reviewer call itself waiting on the slot.
+func TestReviewEscalationsGateSurvivesExhaustedReviewSem(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	st := &workerState{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "second", Branch: "b", Worktree: wt}},
+		status: protocol.Status{
+			Phase: protocol.PhaseAwaitingReview,
+			Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}}, // forces escalation
+		},
+	}
+
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{} // occupied, as if another worker's review is already running
+
+	buf := &syncBuffer{}
+	cfg := &Config{
+		Base:     "HEAD",
+		Log:      eventlog.New(buf, "supervise", "r", nil),
+		Reviewer: NewReviewerWithRunner(fakeReviewRunner(`{"decision":"approve","summary":"ok","findings":[]}`)),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		reviewEscalations(context.Background(), cfg, []*workerState{st}, sem)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("reviewEscalations returned while the review sem was still exhausted — it should be waiting on the reviewer call, not the whole function")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if !strings.Contains(buf.String(), `"action":"gate","target":"second","outcome":"escalate"`) {
+		t.Fatalf("gate verdict must be logged even while the review sem is exhausted by another worker, log so far:\n%s", buf.String())
+	}
+
+	<-sem // free the slot, as if the other worker's review completed
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reviewEscalations did not finish once the review sem slot freed")
+	}
+	if st.review == nil || st.review.Decision != "approve" {
+		t.Errorf("expected the review to complete once the slot freed, got %+v", st.review)
 	}
 }
 
