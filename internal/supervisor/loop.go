@@ -708,6 +708,22 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	if err := WriteBrief(p.Worktree, p.Brief); err != nil {
 		return herdr.Worktree{}, fmt.Errorf("writing brief for %s: %w", p.Task, err)
 	}
+	// Recorded in the repo-root pane registry (not the worktree's own
+	// lifecycle.json) so `argus worktree prune` can later close the pane
+	// herdr opened for this worktree — and its workspace, if left empty —
+	// even after the worktree directory itself is gone, e.g. deleted by hand
+	// rather than through prune. wt.RootPaneID is empty only if herdr's reply
+	// omitted it, in which case there's nothing to record or later close.
+	if wt.RootPaneID != "" {
+		reg, err := protocol.LoadPaneRegistry(p.RepoRoot)
+		if err != nil {
+			return herdr.Worktree{}, fmt.Errorf("loading pane registry for %s: %w", p.Task, err)
+		}
+		reg.Panes[p.Worktree] = wt.RootPaneID
+		if err := protocol.WritePaneRegistry(p.RepoRoot, reg); err != nil {
+			return herdr.Worktree{}, fmt.Errorf("recording spawned pane for %s: %w", p.Task, err)
+		}
+	}
 	return wt, nil
 }
 

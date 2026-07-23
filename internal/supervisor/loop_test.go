@@ -247,6 +247,13 @@ func TestExecuteWritesSettingsBriefAndSpawnsInRootPane(t *testing.T) {
 	if _, err := os.Stat(protocol.BriefPath(wt)); err != nil {
 		t.Errorf("brief not written: %v", err)
 	}
+	reg, rerr := protocol.LoadPaneRegistry(repo)
+	if rerr != nil {
+		t.Fatalf("LoadPaneRegistry: %v", rerr)
+	}
+	if reg.Panes[wt] != "w9:p1" {
+		t.Errorf("pane registry entry for %s: got %q want w9:p1 (herdr's root pane), so prune can later close it", wt, reg.Panes[wt])
+	}
 }
 
 // TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent covers argus issue #107: PR

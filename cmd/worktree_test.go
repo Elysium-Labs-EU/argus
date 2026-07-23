@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 )
@@ -91,7 +92,7 @@ func TestPrunePlanDryRunReportsSafeWithoutDeleting(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
 
-	prunePlan(cmd, context.Background(), nil, f, "o", "r", repoRoot, entries, true)
+	prunePlan(cmd, context.Background(), nil, f, herdr.Client{}, "o", "r", repoRoot, entries, true)
 	if _, err := os.Stat(worktree); err != nil {
 		t.Errorf("dry run must not delete anything: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestPrunePlanDryRunDoesNotMutateLifecycleFile(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
 
-	prunePlan(cmd, context.Background(), nil, f, "o", "r", repoRoot, entries, true)
+	prunePlan(cmd, context.Background(), nil, f, herdr.Client{}, "o", "r", repoRoot, entries, true)
 	if !strings.Contains(buf.String(), "safe to clean") {
 		t.Errorf("want the confirmed merge reflected in the dry-run plan:\n%s", buf.String())
 	}
@@ -155,12 +156,57 @@ func TestPrunePlanCleansSafeWorktree(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
 
-	prunePlan(cmd, context.Background(), nil, f, "o", "r", repoRoot, entries, false)
+	prunePlan(cmd, context.Background(), nil, f, herdr.Client{}, "o", "r", repoRoot, entries, false)
 	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
 		t.Errorf("worktree should be relocated away from its original path, stat err: %v", err)
 	}
 	if !strings.Contains(buf.String(), "relocated to") {
 		t.Errorf("output missing relocation confirmation:\n%s", buf.String())
+	}
+}
+
+// TestPrunePlanClosesRecordedHerdrPane is the end-to-end regression test:
+// prunePlan must close the herdr pane recorded in a cleaned worktree's
+// lifecycle, not just remove the worktree itself.
+func TestPrunePlanClosesRecordedHerdrPane(t *testing.T) {
+	repoRoot, worktree := repoWithWorktree(t, "feat-d")
+	if err := protocol.WritePaneRegistry(repoRoot, protocol.PaneRegistry{Panes: map[string]string{worktree: "w1:p1"}}); err != nil {
+		t.Fatalf("WritePaneRegistry: %v", err)
+	}
+	merged := time.Now()
+	f := &fakeForge{findPRFound: true, findPR: forge.PR{HTMLURL: "https://fake/pr/4", MergedAt: &merged}}
+	entries := []supervisor.WorktreeEntry{{Path: worktree, Branch: "feat-d"}}
+
+	const paneList = `{"result":{"panes":[{"pane_id":"w1:p1","workspace_id":"w1"}]}}`
+	var calls [][]string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		if args[0] == "pane" && args[1] == "list" {
+			return []byte(paneList), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	})
+
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	prunePlan(cmd, context.Background(), nil, f, client, "o", "r", repoRoot, entries, false)
+
+	var closedPane, closedWorkspace bool
+	for _, c := range calls {
+		if c[0] == "pane" && c[1] == "close" {
+			closedPane = true
+		}
+		if c[0] == "workspace" && c[1] == "close" {
+			closedWorkspace = true
+		}
+	}
+	if !closedPane {
+		t.Errorf("want the recorded pane closed, herdr calls: %v", calls)
+	}
+	if !closedWorkspace {
+		t.Errorf("want the now-empty workspace closed too, herdr calls: %v", calls)
 	}
 }
 
@@ -173,7 +219,7 @@ func TestPrunePlanLeavesUnsafeWorktreeInPlace(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
 
-	prunePlan(cmd, context.Background(), nil, f, "o", "r", repoRoot, entries, false)
+	prunePlan(cmd, context.Background(), nil, f, herdr.Client{}, "o", "r", repoRoot, entries, false)
 	if _, err := os.Stat(worktree); err != nil {
 		t.Errorf("an unmerged PR's worktree must never be auto-deleted: %v", err)
 	}
@@ -190,7 +236,7 @@ func TestPrunePlanSkipsBareOrDetachedEntries(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
 
-	prunePlan(cmd, context.Background(), nil, f, "o", "r", "/repo", entries, true)
+	prunePlan(cmd, context.Background(), nil, f, herdr.Client{}, "o", "r", "/repo", entries, true)
 	if strings.Contains(buf.String(), "not safe") || strings.Contains(buf.String(), "safe to clean") {
 		t.Errorf("a branch-less entry should be skipped entirely:\n%s", buf.String())
 	}

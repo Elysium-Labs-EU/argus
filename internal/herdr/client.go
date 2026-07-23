@@ -167,6 +167,18 @@ func (c Client) PaneRun(ctx context.Context, paneID, command string) error {
 	return err
 }
 
+// PaneClose closes pane paneID.
+func (c Client) PaneClose(ctx context.Context, paneID string) error {
+	_, err := c.run(ctx, "pane", "close", paneID)
+	return err
+}
+
+// WorkspaceClose closes workspace workspaceID.
+func (c Client) WorkspaceClose(ctx context.Context, workspaceID string) error {
+	_, err := c.run(ctx, "workspace", "close", workspaceID)
+	return err
+}
+
 // AgentGet reports the agent herdr currently tracks for target (a pane id),
 // and whether one exists at all. ok is false with a nil error when herdr's
 // "agent_not_found" tells us the pane has no live agent — a bare shell

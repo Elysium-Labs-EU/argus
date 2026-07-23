@@ -10,6 +10,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -119,7 +120,7 @@ func runWorktreePrune(cmd *cobra.Command, a *worktreePruneArgs) error {
 	logger, closeLog := openRunLog(cmd, "worktree_prune")
 	defer closeLog()
 
-	prunePlan(cmd, ctx, logger, f, owner, name, repoRoot, entries, a.dryRun)
+	prunePlan(cmd, ctx, logger, f, herdr.New(), owner, name, repoRoot, entries, a.dryRun)
 	return nil
 }
 
@@ -138,14 +139,14 @@ func filterByBranch(entries []supervisor.WorktreeEntry, branch string) []supervi
 // per-candidate failure (forge lookup, clean) is reported and logged, not
 // returned: one worktree argus can't evaluate must never abort a --merged
 // sweep of the rest.
-func prunePlan(cmd *cobra.Command, ctx context.Context, logger *eventlog.Logger, f forge.Forge, owner, name, repoRoot string, entries []supervisor.WorktreeEntry, dryRun bool) {
+func prunePlan(cmd *cobra.Command, ctx context.Context, logger *eventlog.Logger, f forge.Forge, client herdr.Client, owner, name, repoRoot string, entries []supervisor.WorktreeEntry, dryRun bool) {
 	out := cmd.OutOrStdout()
 	var cleaned, unsafe int
 	for _, e := range entries {
 		if e.Branch == "" {
 			continue // bare or detached-HEAD worktree: not a per-worker worktree, not a candidate
 		}
-		c, err := supervisor.EvaluateCandidate(ctx, f, owner, name, e.Path, e.Branch, e.Prunable, dryRun)
+		c, err := supervisor.EvaluateCandidate(ctx, f, owner, name, repoRoot, e.Path, e.Branch, e.Prunable, dryRun)
 		if err != nil {
 			logger.Fail("evaluate", e.Branch, err)
 			_, _ = fmt.Fprintf(out, "%s %s: %v\n", ui.LabelError.Render("✗"), e.Branch, err)
@@ -157,11 +158,15 @@ func prunePlan(cmd *cobra.Command, ctx context.Context, logger *eventlog.Logger,
 			continue
 		}
 		if dryRun {
-			_, _ = fmt.Fprintf(out, "  (dry run) would relocate %s and remove its worktree registration\n", c.Path)
+			if c.PaneID != "" {
+				_, _ = fmt.Fprintf(out, "  (dry run) would relocate %s, remove its worktree registration, and close herdr pane %s\n", c.Path, c.PaneID)
+			} else {
+				_, _ = fmt.Fprintf(out, "  (dry run) would relocate %s and remove its worktree registration\n", c.Path)
+			}
 			cleaned++
 			continue
 		}
-		dest, cerr := supervisor.CleanWorktree(ctx, repoRoot, c)
+		dest, paneWarning, cerr := supervisor.CleanWorktree(ctx, repoRoot, client, c)
 		if cerr != nil {
 			logger.Fail("clean", e.Branch, cerr)
 			_, _ = fmt.Fprintf(out, "%s cleaning %s: %v\n", ui.LabelError.Render("✗"), e.Branch, cerr)
@@ -172,6 +177,10 @@ func prunePlan(cmd *cobra.Command, ctx context.Context, logger *eventlog.Logger,
 			_, _ = fmt.Fprintf(out, "  %s relocated to %s, worktree registration removed\n", ui.LabelSuccess.Render("✓"), dest)
 		} else {
 			_, _ = fmt.Fprintf(out, "  %s worktree registration removed (directory was already gone)\n", ui.LabelSuccess.Render("✓"))
+		}
+		if paneWarning != "" {
+			logger.Fail("close_pane", e.Branch, fmt.Errorf("%s", paneWarning))
+			_, _ = fmt.Fprintf(out, "  %s %s\n", ui.LabelWarning.Render("!"), paneWarning)
 		}
 		cleaned++
 	}

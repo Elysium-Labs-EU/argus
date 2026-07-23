@@ -3,6 +3,7 @@ package supervisor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
@@ -185,10 +187,10 @@ func TestHasUnpushedCommitsNoUpstreamIsUnsafe(t *testing.T) {
 }
 
 func TestEvaluateCandidateSafeWhenMergedAndClean(t *testing.T) {
-	_, worktree := initRepoWithWorktree(t, "feat-safe")
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-safe")
 	f := &fakePruneForge{found: true, pr: forge.PR{HTMLURL: "https://fake/pr/1", State: "closed", MergedAt: mergedNow()}}
 
-	c, err := EvaluateCandidate(context.Background(), f, "o", "r", worktree, "feat-safe", false, false)
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-safe", false, false)
 	if err != nil {
 		t.Fatalf("EvaluateCandidate: %v", err)
 	}
@@ -201,10 +203,10 @@ func TestEvaluateCandidateSafeWhenMergedAndClean(t *testing.T) {
 }
 
 func TestEvaluateCandidateUnsafeWhenNotMerged(t *testing.T) {
-	_, worktree := initRepoWithWorktree(t, "feat-open")
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-open")
 	f := &fakePruneForge{found: true, pr: forge.PR{HTMLURL: "https://fake/pr/2", State: "open"}}
 
-	c, err := EvaluateCandidate(context.Background(), f, "o", "r", worktree, "feat-open", false, false)
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-open", false, false)
 	if err != nil {
 		t.Fatalf("EvaluateCandidate: %v", err)
 	}
@@ -217,13 +219,13 @@ func TestEvaluateCandidateUnsafeWhenNotMerged(t *testing.T) {
 }
 
 func TestEvaluateCandidateUnsafeWhenDirty(t *testing.T) {
-	_, worktree := initRepoWithWorktree(t, "feat-dirty")
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-dirty")
 	if err := os.WriteFile(filepath.Join(worktree, "f.txt"), []byte("changed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	f := &fakePruneForge{found: true, pr: forge.PR{MergedAt: mergedNow()}}
 
-	c, err := EvaluateCandidate(context.Background(), f, "o", "r", worktree, "feat-dirty", false, false)
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-dirty", false, false)
 	if err != nil {
 		t.Fatalf("EvaluateCandidate: %v", err)
 	}
@@ -233,10 +235,10 @@ func TestEvaluateCandidateUnsafeWhenDirty(t *testing.T) {
 }
 
 func TestEvaluateCandidateNoPRFound(t *testing.T) {
-	_, worktree := initRepoWithWorktree(t, "feat-nopr")
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-nopr")
 	f := &fakePruneForge{found: false}
 
-	c, err := EvaluateCandidate(context.Background(), f, "o", "r", worktree, "feat-nopr", false, false)
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-nopr", false, false)
 	if err != nil {
 		t.Fatalf("EvaluateCandidate: %v", err)
 	}
@@ -246,10 +248,10 @@ func TestEvaluateCandidateNoPRFound(t *testing.T) {
 }
 
 func TestEvaluateCandidateForgeErrorPropagates(t *testing.T) {
-	_, worktree := initRepoWithWorktree(t, "feat-err")
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-err")
 	f := &fakePruneForge{err: context.DeadlineExceeded}
 
-	if _, err := EvaluateCandidate(context.Background(), f, "o", "r", worktree, "feat-err", false, false); err == nil {
+	if _, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-err", false, false); err == nil {
 		t.Error("want a forge lookup failure to propagate, not be swallowed into a reason")
 	}
 }
@@ -257,7 +259,7 @@ func TestEvaluateCandidateForgeErrorPropagates(t *testing.T) {
 func TestEvaluateCandidateSkipsDirtyChecksWhenDirGone(t *testing.T) {
 	f := &fakePruneForge{found: true, pr: forge.PR{MergedAt: mergedNow()}}
 
-	c, err := EvaluateCandidate(context.Background(), f, "o", "r", "/does/not/exist", "feat-gone", true, false)
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", t.TempDir(), "/does/not/exist", "feat-gone", true, false)
 	if err != nil {
 		t.Fatalf("EvaluateCandidate: %v", err)
 	}
@@ -267,7 +269,7 @@ func TestEvaluateCandidateSkipsDirtyChecksWhenDirGone(t *testing.T) {
 }
 
 func TestEvaluateCandidateTrustsCachedMergedLifecycleWithoutForgeCall(t *testing.T) {
-	_, worktree := initRepoWithWorktree(t, "feat-cached")
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-cached")
 	if err := protocol.WriteLifecycle(worktree, &protocol.Lifecycle{
 		State: protocol.LifecycleMerged, Host: "fake", Owner: "o", Repo: "r", Branch: "feat-cached",
 		PRURL: "https://fake/pr/9", PRNumber: 9,
@@ -276,7 +278,7 @@ func TestEvaluateCandidateTrustsCachedMergedLifecycleWithoutForgeCall(t *testing
 	}
 	f := &fakePruneForge{} // found defaults to false: any FindPR call would surface as "no PR found"
 
-	c, err := EvaluateCandidate(context.Background(), f, "o", "r", worktree, "feat-cached", false, false)
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-cached", false, false)
 	if err != nil {
 		t.Fatalf("EvaluateCandidate: %v", err)
 	}
@@ -292,7 +294,7 @@ func TestEvaluateCandidateTrustsCachedMergedLifecycleWithoutForgeCall(t *testing
 }
 
 func TestEvaluateCandidateAdvancesShippedLifecycleToMergedUsingItsOwnIdentity(t *testing.T) {
-	_, worktree := initRepoWithWorktree(t, "feat-advance")
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-advance")
 	if err := protocol.WriteLifecycle(worktree, &protocol.Lifecycle{
 		State: protocol.LifecycleShipped, Host: "fake", Owner: "lc-owner", Repo: "lc-repo", Branch: "lc-branch",
 		PRURL: "https://fake/pr/stale", PRNumber: 5,
@@ -301,7 +303,7 @@ func TestEvaluateCandidateAdvancesShippedLifecycleToMergedUsingItsOwnIdentity(t 
 	}
 	f := &fakePruneForge{found: true, pr: forge.PR{HTMLURL: "https://fake/pr/5", Number: 5, MergedAt: mergedNow()}}
 
-	c, err := EvaluateCandidate(context.Background(), f, "caller-owner", "caller-repo", worktree, "feat-advance", false, false)
+	c, err := EvaluateCandidate(context.Background(), f, "caller-owner", "caller-repo", repoRoot, worktree, "feat-advance", false, false)
 	if err != nil {
 		t.Fatalf("EvaluateCandidate: %v", err)
 	}
@@ -337,7 +339,7 @@ func TestEvaluateCandidateAdvancesShippedLifecycleToMergedUsingItsOwnIdentity(t 
 // lifecycle.json on disk must come out byte-identical to what was there
 // before the call.
 func TestEvaluateCandidateDryRunDoesNotMutateLifecycleFile(t *testing.T) {
-	_, worktree := initRepoWithWorktree(t, "feat-dry-run-no-mutate")
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-dry-run-no-mutate")
 	if err := protocol.WriteLifecycle(worktree, &protocol.Lifecycle{
 		State: protocol.LifecycleShipped, Host: "fake", Owner: "lc-owner", Repo: "lc-repo", Branch: "lc-branch",
 		PRURL: "https://fake/pr/stale", PRNumber: 5,
@@ -350,7 +352,7 @@ func TestEvaluateCandidateDryRunDoesNotMutateLifecycleFile(t *testing.T) {
 	}
 	f := &fakePruneForge{found: true, pr: forge.PR{HTMLURL: "https://fake/pr/5", Number: 5, MergedAt: mergedNow()}}
 
-	c, err := EvaluateCandidate(context.Background(), f, "caller-owner", "caller-repo", worktree, "feat-dry-run-no-mutate", false, true)
+	c, err := EvaluateCandidate(context.Background(), f, "caller-owner", "caller-repo", repoRoot, worktree, "feat-dry-run-no-mutate", false, true)
 	if err != nil {
 		t.Fatalf("EvaluateCandidate: %v", err)
 	}
@@ -368,10 +370,10 @@ func TestEvaluateCandidateDryRunDoesNotMutateLifecycleFile(t *testing.T) {
 }
 
 func TestEvaluateCandidateFallsBackToBranchLookupWithNoLifecycle(t *testing.T) {
-	_, worktree := initRepoWithWorktree(t, "feat-nolifecycle")
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-nolifecycle")
 	f := &fakePruneForge{found: true, pr: forge.PR{HTMLURL: "https://fake/pr/11", MergedAt: mergedNow()}}
 
-	c, err := EvaluateCandidate(context.Background(), f, "caller-owner", "caller-repo", worktree, "feat-nolifecycle", false, false)
+	c, err := EvaluateCandidate(context.Background(), f, "caller-owner", "caller-repo", repoRoot, worktree, "feat-nolifecycle", false, false)
 	if err != nil {
 		t.Fatalf("EvaluateCandidate: %v", err)
 	}
@@ -388,6 +390,167 @@ func TestEvaluateCandidateFallsBackToBranchLookupWithNoLifecycle(t *testing.T) {
 	}
 }
 
+func TestEvaluateCandidatePropagatesPaneIDFromRegistry(t *testing.T) {
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-paneid")
+	if err := protocol.WritePaneRegistry(repoRoot, protocol.PaneRegistry{Panes: map[string]string{worktree: "w1:p1"}}); err != nil {
+		t.Fatalf("WritePaneRegistry: %v", err)
+	}
+	f := &fakePruneForge{found: true, pr: forge.PR{HTMLURL: "https://fake/pr/21", Number: 21, MergedAt: mergedNow()}}
+
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-paneid", false, false)
+	if err != nil {
+		t.Fatalf("EvaluateCandidate: %v", err)
+	}
+	if c.PaneID != "w1:p1" {
+		t.Errorf("PaneID: got %q, want w1:p1 (from the repo's pane registry)", c.PaneID)
+	}
+}
+
+// TestEvaluateCandidateResolvesPaneIDFromRegistryWhenDirGone is the
+// regression test for the issue's own primary reported case: a worktree
+// directory manually deleted by hand (e.g. `trash <path>`), so its
+// lifecycle.json — which lived inside that same directory — can no longer be
+// read at all. PaneID must still resolve, because the registry lives at the
+// repo root, not inside the vanished worktree.
+func TestEvaluateCandidateResolvesPaneIDFromRegistryWhenDirGone(t *testing.T) {
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-paneid-dirgone")
+	if err := protocol.WritePaneRegistry(repoRoot, protocol.PaneRegistry{Panes: map[string]string{worktree: "w1:p1"}}); err != nil {
+		t.Fatalf("WritePaneRegistry: %v", err)
+	}
+	// Simulate someone deleting the worktree directory directly instead of
+	// through git/argus — its lifecycle.json (and everything else in it) is
+	// gone with it.
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakePruneForge{found: true, pr: forge.PR{HTMLURL: "https://fake/pr/22", MergedAt: mergedNow()}}
+
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-paneid-dirgone", true, false)
+	if err != nil {
+		t.Fatalf("EvaluateCandidate: %v", err)
+	}
+	if c.PaneID != "w1:p1" {
+		t.Errorf("PaneID: got %q, want w1:p1 resolved from the registry despite the worktree directory being gone", c.PaneID)
+	}
+	if !c.SafeToClean {
+		t.Errorf("want safe to clean, reasons: %v", c.Reasons)
+	}
+}
+
+// TestCleanWorktreeClosesRecordedHerdrPane guards prune's herdr cleanup:
+// prune must close the herdr pane a worktree's own worker was spawned in,
+// and the workspace too since it's the sole surviving pane there.
+func TestCleanWorktreeClosesRecordedHerdrPane(t *testing.T) {
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-close-pane")
+	c := &PruneCandidate{Path: worktree, Branch: "feat-close-pane", SafeToClean: true, PaneID: "w1:p1"}
+
+	const paneList = `{"result":{"panes":[{"pane_id":"w1:p1","workspace_id":"w1"}]}}`
+	var calls [][]string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		if args[0] == "pane" && args[1] == "list" {
+			return []byte(paneList), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	})
+
+	_, paneWarning, err := CleanWorktree(context.Background(), repoRoot, client, c)
+	if err != nil {
+		t.Fatalf("CleanWorktree: %v", err)
+	}
+	if paneWarning != "" {
+		t.Errorf("want no pane warning on a clean close, got %q", paneWarning)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("want pane list, pane close, workspace close, got %d: %v", len(calls), calls)
+	}
+	if calls[1][0] != "pane" || calls[1][1] != "close" {
+		t.Errorf("want the pane closed, got %v", calls[1])
+	}
+	if calls[2][0] != "workspace" || calls[2][1] != "close" {
+		t.Errorf("want the now-empty workspace closed too, got %v", calls[2])
+	}
+
+	reg, rerr := protocol.LoadPaneRegistry(repoRoot)
+	if rerr != nil {
+		t.Fatalf("LoadPaneRegistry: %v", rerr)
+	}
+	if _, ok := reg.Panes[worktree]; ok {
+		t.Errorf("registry entry for %s should be forgotten once cleaned", worktree)
+	}
+}
+
+// TestCleanWorktreeClosesRecordedHerdrPaneEvenWhenDirectoryWasManuallyDeleted
+// is the end-to-end regression test for the issue's own primary reported
+// case: the worktree directory was deleted directly (e.g. `trash <path>`),
+// not through git/argus, so its own lifecycle.json is long gone. The pane
+// registry lives at the repo root instead, so CleanWorktree must still find
+// and close the pane (and its now-empty workspace) despite DirGone=true.
+func TestCleanWorktreeClosesRecordedHerdrPaneEvenWhenDirectoryWasManuallyDeleted(t *testing.T) {
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-manually-trashed")
+	if err := protocol.WritePaneRegistry(repoRoot, protocol.PaneRegistry{Panes: map[string]string{worktree: "w1:p1"}}); err != nil {
+		t.Fatalf("WritePaneRegistry: %v", err)
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatal(err)
+	}
+	c := &PruneCandidate{Path: worktree, Branch: "feat-manually-trashed", SafeToClean: true, DirGone: true, PaneID: "w1:p1"}
+
+	const paneList = `{"result":{"panes":[{"pane_id":"w1:p1","workspace_id":"w1"}]}}`
+	var calls [][]string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		if args[0] == "pane" && args[1] == "list" {
+			return []byte(paneList), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	})
+
+	_, paneWarning, err := CleanWorktree(context.Background(), repoRoot, client, c)
+	if err != nil {
+		t.Fatalf("CleanWorktree: %v", err)
+	}
+	if paneWarning != "" {
+		t.Errorf("want no pane warning, got %q", paneWarning)
+	}
+	var closedPane, closedWorkspace bool
+	for _, call := range calls {
+		if call[0] == "pane" && call[1] == "close" {
+			closedPane = true
+		}
+		if call[0] == "workspace" && call[1] == "close" {
+			closedWorkspace = true
+		}
+	}
+	if !closedPane || !closedWorkspace {
+		t.Fatalf("want pane and workspace closed even though the worktree directory was already gone, calls: %v", calls)
+	}
+}
+
+// TestCleanWorktreeReportsPaneCloseFailureAsWarningNotError guards the
+// best-effort contract: the worktree itself is already fully cleaned by the
+// time herdr is asked to close its pane, so a herdr-side failure must surface
+// as a warning the caller can print, not roll back or fail the clean.
+func TestCleanWorktreeReportsPaneCloseFailureAsWarningNotError(t *testing.T) {
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-pane-close-fails")
+	c := &PruneCandidate{Path: worktree, Branch: "feat-pane-close-fails", SafeToClean: true, PaneID: "w1:p1"}
+
+	client := herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
+		return nil, errors.New("herdr: socket unavailable")
+	})
+
+	dest, paneWarning, err := CleanWorktree(context.Background(), repoRoot, client, c)
+	if err != nil {
+		t.Fatalf("a herdr failure must not fail CleanWorktree once the worktree is gone, got %v", err)
+	}
+	if dest == "" {
+		t.Error("want the worktree still relocated despite the herdr failure")
+	}
+	if paneWarning == "" {
+		t.Error("want a non-empty paneWarning describing the herdr failure")
+	}
+}
+
 func TestCleanWorktreeMarksLifecyclePrunedInRelocatedCopy(t *testing.T) {
 	repoRoot, worktree := initRepoWithWorktree(t, "feat-prune-mark")
 	if err := protocol.WriteLifecycle(worktree, &protocol.Lifecycle{
@@ -398,7 +561,7 @@ func TestCleanWorktreeMarksLifecyclePrunedInRelocatedCopy(t *testing.T) {
 	}
 	c := &PruneCandidate{Path: worktree, Branch: "feat-prune-mark", SafeToClean: true}
 
-	dest, err := CleanWorktree(context.Background(), repoRoot, c)
+	dest, _, err := CleanWorktree(context.Background(), repoRoot, herdr.Client{}, c)
 	if err != nil {
 		t.Fatalf("CleanWorktree: %v", err)
 	}
@@ -417,7 +580,7 @@ func TestCleanWorktreeRelocatesAndRemovesRegistration(t *testing.T) {
 	ctx := context.Background()
 	c := &PruneCandidate{Path: worktree, Branch: "feat-clean", SafeToClean: true}
 
-	dest, err := CleanWorktree(ctx, repoRoot, c)
+	dest, _, err := CleanWorktree(ctx, repoRoot, herdr.Client{}, c)
 	if err != nil {
 		t.Fatalf("CleanWorktree: %v", err)
 	}
@@ -451,7 +614,7 @@ func TestCleanWorktreeDirAlreadyGoneOnlyRemovesRegistration(t *testing.T) {
 	}
 	c := &PruneCandidate{Path: worktree, Branch: "feat-gone", SafeToClean: true, DirGone: true}
 
-	dest, err := CleanWorktree(ctx, repoRoot, c)
+	dest, _, err := CleanWorktree(ctx, repoRoot, herdr.Client{}, c)
 	if err != nil {
 		t.Fatalf("CleanWorktree: %v", err)
 	}
