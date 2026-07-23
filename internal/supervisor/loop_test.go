@@ -620,7 +620,7 @@ func TestPollStatusReturnsOnDeadlineWhenWorkerNeverTerminates(t *testing.T) {
 	start := time.Now()
 	go func() {
 		// No parent cancel; only the 40ms deadline should stop it.
-		pollStatus(context.Background(), 5*time.Millisecond, 40*time.Millisecond, nil, st)
+		pollStatus(context.Background(), herdr.Client{}, 5*time.Millisecond, 40*time.Millisecond, nil, st)
 		close(done)
 	}()
 	select {
@@ -649,7 +649,7 @@ func TestPollStatusLogsUnreadableStatus(t *testing.T) {
 	logger := eventlog.New(&buf, "supervise", "run1", nil)
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "broken", Worktree: wt}}}
 
-	pollStatus(context.Background(), 5*time.Millisecond, 30*time.Millisecond, logger, st)
+	pollStatus(context.Background(), herdr.Client{}, 5*time.Millisecond, 30*time.Millisecond, logger, st)
 
 	if !strings.Contains(buf.String(), "status_unreadable") {
 		t.Errorf("expected a status_unreadable event, got:\n%s", buf.String())
@@ -674,7 +674,7 @@ func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	pollStatus(ctx, 10*time.Millisecond, 0, nil, st)
+	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st)
 
 	if !st.hasFile {
 		t.Fatal("pollStatus should have read the status file")
@@ -718,7 +718,7 @@ func TestPollStatusIgnoresStatusFromBeforeDispatch(t *testing.T) {
 	// No fresh write ever arrives, so a correct pollStatus can only reach its
 	// deadline — reporting hasFile/PhaseDone here would mean the stale file
 	// was mistaken for this worker's own outcome.
-	pollStatus(context.Background(), 5*time.Millisecond, 40*time.Millisecond, nil, st)
+	pollStatus(context.Background(), herdr.Client{}, 5*time.Millisecond, 40*time.Millisecond, nil, st)
 
 	if st.hasFile {
 		t.Error("pollStatus treated a pre-dispatch stale status as this worker's report")
@@ -753,7 +753,7 @@ func TestPollStatusAcceptsStatusWithLyingUpdatedAt(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	pollStatus(ctx, 10*time.Millisecond, 0, nil, st)
+	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st)
 
 	if !st.hasFile || st.status.Phase != protocol.PhaseAwaitingReview {
 		t.Fatalf("pollStatus discarded a real post-dispatch status because of a lying UpdatedAt: hasFile=%v phase=%q", st.hasFile, st.status.Phase)
@@ -778,7 +778,7 @@ func TestPollStatusAcceptsStatusWrittenAfterDispatch(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	pollStatus(ctx, 10*time.Millisecond, 0, nil, st)
+	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st)
 
 	if !st.hasFile || st.status.Phase != protocol.PhaseDone {
 		t.Fatalf("pollStatus should accept a status written after dispatch, got hasFile=%v phase=%q", st.hasFile, st.status.Phase)
@@ -833,5 +833,112 @@ func TestExecuteInvalidatesStaleStatusBeforeSpawn(t *testing.T) {
 	}
 	if _, err := os.Stat(protocol.VerdictPath(wt)); !os.IsNotExist(err) {
 		t.Errorf("stale verdict.json should have been removed before spawn, stat err = %v", err)
+	}
+}
+
+// fakePaneListRunner answers `pane list` with a single pane whose agent_status
+// is whatever agentStatus() currently returns, so a test can flip herdr's
+// reported state between calls without a real herdr process.
+func fakePaneListRunner(paneID string, agentStatus func() string) herdr.Runner {
+	return func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "pane" && args[1] == "list" {
+			return []byte(`{"result":{"panes":[{"pane_id":"` + paneID + `","agent_status":"` + agentStatus() + `"}]}}`), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	}
+}
+
+// TestCheckHerdrStuckEscalatesAfterThreshold: a worker externally blocked (an
+// unanswered prompt) or done (its agent process exited) can never write that
+// into status.json itself, so pollStatus must learn it from herdr's own
+// agent_status instead of waiting on a self-report that will never arrive.
+// tick is fed in threshold-sized steps rather than waiting on
+// herdrStuckThreshold (2 minutes) in real time.
+func TestCheckHerdrStuckEscalatesAfterThreshold(t *testing.T) {
+	client := herdr.NewWithRunner(fakePaneListRunner("w1:p1", func() string { return "blocked" }))
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+
+	if checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+		t.Fatal("must not escalate before herdrStuckThreshold is crossed")
+	}
+	if st.herdrEscalation != "" {
+		t.Error("no escalation should be recorded before the threshold")
+	}
+
+	if !checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+		t.Fatal("must escalate once accumulated stuck time crosses herdrStuckThreshold")
+	}
+	if st.herdrEscalation == "" {
+		t.Fatal("expected herdrEscalation to be set")
+	}
+	if !strings.Contains(st.herdrEscalation, "blocked") {
+		t.Errorf("escalation reason should name herdr's reported agent_status, got %q", st.herdrEscalation)
+	}
+}
+
+// TestCheckHerdrStuckResetsWhenPaneRecovers guards against a stale escalation:
+// a pane that was blocked (e.g. on a permission prompt) and then recovered
+// (the prompt got answered) must not accumulate stuck time across the gap, so
+// a brief blip never counts toward the same threshold as a genuinely wedged
+// pane.
+func TestCheckHerdrStuckResetsWhenPaneRecovers(t *testing.T) {
+	status := "blocked"
+	client := herdr.NewWithRunner(fakePaneListRunner("w1:p1", func() string { return status }))
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+
+	checkHerdrStuck(context.Background(), client, nil, st, time.Minute)
+	if st.herdrStuckElapsed == 0 {
+		t.Fatal("expected stuck time to accumulate while herdr reports blocked")
+	}
+
+	status = "idle"
+	checkHerdrStuck(context.Background(), client, nil, st, time.Minute)
+	if st.herdrStuckElapsed != 0 {
+		t.Errorf("expected stuck time to reset once the pane recovers, got %v", st.herdrStuckElapsed)
+	}
+	if st.herdrEscalation != "" {
+		t.Error("a recovered pane must never be escalated")
+	}
+}
+
+// TestCheckHerdrStuckSkipsWorkerWithNoPane confirms the check is a no-op for
+// a worker with no resolvable pane (e.g. an Attach without a supplied pane
+// id) — there is nothing to ask herdr about, so it must not be treated as
+// stuck.
+func TestCheckHerdrStuckSkipsWorkerWithNoPane(t *testing.T) {
+	called := false
+	client := herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
+		called = true
+		return []byte(`{"result":{"panes":[]}}`), nil
+	})
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}}
+
+	if checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+		t.Fatal("a worker with no pane id must never escalate")
+	}
+	if called {
+		t.Error("checkHerdrStuck should not call herdr at all when st.paneID is empty")
+	}
+}
+
+// TestGateVerdictEscalatesOnHerdrStuckWorkerWithNoStatusFile: before this fix,
+// reviewEscalations/logRunSummary (and gateVerdict's callers) skipped any
+// worker with hasFile == false outright, so a worker herdr reported blocked
+// or done — which can never write status.json — was invisible to the gate,
+// indistinguishable from one that simply hadn't reported yet. A non-empty
+// herdrEscalation must force escalation with an unwaivable hard reason even
+// with no status file at all.
+func TestGateVerdictEscalatesOnHerdrStuckWorkerWithNoStatusFile(t *testing.T) {
+	st := &workerState{
+		hasFile:         false,
+		herdrEscalation: `herdr reports pane w1:p1 agent_status="blocked" for over 2m0s, but status.json is still at phase ""`,
+		plan:            &WorkerPlan{Worker: Worker{Task: "t"}},
+	}
+	v := gateVerdict(st, nil)
+	if v.AutoApprove {
+		t.Fatal("a herdr-stuck worker must never auto-approve, even with no status.json at all")
+	}
+	if len(v.HardReasons) == 0 {
+		t.Fatal("the herdr-stuck reason must be an unwaivable hard reason")
 	}
 }

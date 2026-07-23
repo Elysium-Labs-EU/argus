@@ -105,14 +105,22 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 // newline, generated file) without letting a materially larger change auto-approve.
 const diffMismatchTolerance = 10
 
-// gateVerdict is Assess applied to a worker's *measured* state plus two checks the
-// pure gate can't make: it escalates when argus could not measure the diff (so the
-// self-report is unverifiable) and when the real diff materially exceeds what the
-// worker claimed (a buggy or dishonest status.json). This is where "trust typed
-// self-report" becomes "trust it only where it matches git."
+// gateVerdict is Assess applied to a worker's *measured* state plus checks the
+// pure gate can't make: it escalates when argus could not measure the diff (so
+// the self-report is unverifiable), when the real diff materially exceeds what
+// the worker claimed (a buggy or dishonest status.json), and when herdr's own
+// agent_status — not status.json — is the only evidence of the worker's real
+// state (checkHerdrStuck in loop.go), which forces escalation even if status.json
+// was never written at all. This is where "trust typed self-report" becomes
+// "trust it only where it matches ground truth."
 func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 	eff := st.effective()
 	v := Assess(&eff, policy)
+	if st.herdrEscalation != "" {
+		v.AutoApprove = false
+		v.Reasons = append(v.Reasons, st.herdrEscalation)
+		v.HardReasons = append(v.HardReasons, st.herdrEscalation)
+	}
 	if st.diffErr != nil {
 		v.AutoApprove = false
 		reason := "could not measure diff to verify worker report: " + st.diffErr.Error()

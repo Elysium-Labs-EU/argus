@@ -411,7 +411,7 @@ func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 		wg.Add(1)
 		go func(st *workerState) {
 			defer wg.Done()
-			pollStatus(ctx, cfg.Interval, cfg.Timeout, cfg.Log, st)
+			pollStatus(ctx, cfg.Client, cfg.Interval, cfg.Timeout, cfg.Log, st)
 
 			one := []*workerState{st}
 			reconcile(ctx, cfg, one)
@@ -449,7 +449,7 @@ func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
 // recorded (and later surfaced) rather than silently trusting status.json.
 func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 	for _, st := range states {
-		if !st.hasFile {
+		if !st.hasFile && st.herdrEscalation == "" {
 			continue
 		}
 		ds, files, err := MeasureDiff(ctx, st.plan.Worktree, cfg.Base)
@@ -464,7 +464,7 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 	}
 
 	for _, st := range states {
-		if !st.hasFile {
+		if !st.hasFile && st.herdrEscalation == "" {
 			continue
 		}
 		ok, err := HasPlanEvidence(cfg.Home, st.plan.Worktree)
@@ -484,7 +484,7 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 // worker count.
 func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) {
 	for _, st := range states {
-		if !st.hasFile {
+		if !st.hasFile && st.herdrEscalation == "" {
 			continue
 		}
 		verdict := gateVerdict(st, cfg.Policy)
@@ -596,21 +596,34 @@ func worktreePaths(plans []WorkerPlan) []string {
 // and hasPlanEvidence holds its result; planEvidenceErr set means the check itself
 // could not run.
 type workerState struct {
+	measuredFiles   []string
 	started         time.Time
 	dispatchedAt    time.Time
 	reviewErr       error
 	diffErr         error
 	planEvidenceErr error
-	plan            *WorkerPlan
-	review          *ReviewResult
 	paneID          string
-	measuredFiles   []string
-	status          protocol.Status
-	measured        protocol.DiffStat
-	hasFile         bool
-	measuredOK      bool
-	planEvidenceOK  bool
-	hasPlanEvidence bool
+	// herdrEscalation is set once herdrStuckElapsed (below) crosses
+	// herdrStuckThreshold: the reason the gate must escalate this worker even
+	// though status.json (hasFile) may never have been written at all. Empty
+	// means herdr hasn't observed this pane stuck long enough to distrust the
+	// worker's silence.
+	herdrEscalation string
+	// herdrErr dedupes a repeated herdr pane-list failure the same way
+	// pollStatus's lastErr dedupes a repeated status-file read failure.
+	herdrErr string
+	plan     *WorkerPlan
+	review   *ReviewResult
+	status   protocol.Status
+	measured protocol.DiffStat
+	// herdrStuckElapsed accumulates poll ticks (in interval-sized steps, not
+	// wall-clock reads) while herdr's own agent_status for this pane reports
+	// blocked or done; it resets to zero the moment that stops being true.
+	herdrStuckElapsed time.Duration
+	hasFile           bool
+	measuredOK        bool
+	planEvidenceOK    bool
+	hasPlanEvidence   bool
 }
 
 // effective returns the status the gate should judge: the worker's reported phase,
@@ -831,11 +844,88 @@ func resolveSpawnLine(ctx context.Context, cfg *Config, p *WorkerPlan, workerEnv
 	return line, nil
 }
 
+// herdrStuckThreshold bounds how long a worker's pane may sit at a herdr
+// agent_status of "blocked" or "done" — detected externally by herdr from
+// the pane's actual terminal state — before pollStatus stops trusting the
+// worker's silence and reports it stuck instead. Neither state can ever
+// resolve into a status.json write: a pane sitting on an unanswered
+// interactive prompt ("blocked") or whose agent turn already ended ("done")
+// has no path left to reach argus's own self-reported phases at all.
+const herdrStuckThreshold = 2 * time.Minute
+
+// herdrStuck reports whether herdr's own agent_status value for a pane means
+// its agent is not going to advance status.json on its own. This is
+// deliberately distinct from protocol.PhaseBlocked, which the worker itself
+// writes into status.json when it wants a human decision — a worker that is
+// externally blocked (stuck on a permission prompt) or done (its process
+// exited) can never reach that self-reported state, since it requires the
+// worker to still be running and able to write the file.
+func herdrStuck(agentStatus string) bool {
+	return agentStatus == "blocked" || agentStatus == "done"
+}
+
+// findPane returns the pane in panes matching paneID, if any.
+func findPane(panes []herdr.Pane, paneID string) (herdr.Pane, bool) {
+	for i := range panes {
+		if panes[i].PaneID == paneID {
+			return panes[i], true
+		}
+	}
+	return herdr.Pane{}, false
+}
+
+// checkHerdrStuck cross-references herdr's live agent_status for st's pane
+// against status.json, and reports whether pollStatus should stop waiting on
+// a self-report that will never come. st.paneID == "" (an attach with no
+// resolvable pane) skips the check entirely, since there is nothing to ask
+// herdr about. A herdr pane-list failure is logged once (like pollStatus's
+// own status_unreadable dedupe) and otherwise ignored — a transport error
+// says nothing about the worker's real state, so it must not itself count as
+// evidence of being stuck.
+func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Logger, st *workerState, tick time.Duration) bool {
+	if st.paneID == "" {
+		return false
+	}
+	panes, err := client.PaneList(ctx)
+	if err != nil {
+		if err.Error() != st.herdrErr {
+			st.herdrErr = err.Error()
+			if log != nil {
+				log.Fail("herdr_status_unreadable", st.plan.Task, err)
+			}
+		}
+		return false
+	}
+	st.herdrErr = ""
+
+	pane, found := findPane(panes, st.paneID)
+	if !found || !herdrStuck(pane.AgentStatus) {
+		st.herdrStuckElapsed = 0
+		return false
+	}
+
+	st.herdrStuckElapsed += tick
+	if st.herdrStuckElapsed < herdrStuckThreshold {
+		return false
+	}
+	st.herdrEscalation = fmt.Sprintf(
+		"herdr reports pane %s agent_status=%q for over %s, but status.json is still at phase %q — "+
+			"the worker may be stuck on an unanswered prompt or ended without ever writing a terminal status",
+		st.paneID, pane.AgentStatus, herdrStuckThreshold, st.status.Phase)
+	if log != nil {
+		log.Action("herdr_stuck", st.plan.Task, pane.AgentStatus, st.herdrEscalation)
+	}
+	return true
+}
+
 // pollStatus polls one worker's status file until it reaches a terminal phase,
 // its deadline passes, or ctx is canceled. A timer (not time.After) drives the
 // poll so we don't leak a timer per tick. The deadline is what stops a hung or
-// dead worker from blocking its caller forever.
-func pollStatus(ctx context.Context, interval, timeout time.Duration, log *eventlog.Logger, st *workerState) {
+// dead worker from blocking its caller forever. client cross-checks herdr's own
+// agent_status for st.paneID on every tick alongside status.json (see
+// checkHerdrStuck), since a pane herdr reports blocked or done can never write
+// status.json to reflect that itself.
+func pollStatus(ctx context.Context, client herdr.Client, interval, timeout time.Duration, log *eventlog.Logger, st *workerState) {
 	path := protocol.StatusPath(st.plan.Worktree)
 
 	// A per-worker wall-clock deadline: without it a worker that dies in a
@@ -893,6 +983,9 @@ func pollStatus(ctx context.Context, interval, timeout time.Duration, log *event
 				// one that never started. Log it once per distinct error.
 				lastErr = err.Error()
 				log.Fail("status_unreadable", st.plan.Task, err)
+			}
+			if checkHerdrStuck(ctx, client, log, st, interval) {
+				return
 			}
 			timer.Reset(interval)
 		}
