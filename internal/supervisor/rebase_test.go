@@ -2,11 +2,13 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
@@ -45,12 +47,116 @@ func TestInvalidateStatusMissingFilesOK(t *testing.T) {
 	}
 }
 
+// retryOnError calls fn until it succeeds or attempts is exhausted, pausing
+// wait between calls, and returns the last error seen.
+func retryOnError(attempts int, wait time.Duration, fn func() error) error {
+	var err error
+	for range attempts {
+		if err = fn(); err == nil {
+			return nil
+		}
+		time.Sleep(wait)
+	}
+	return err
+}
+
+// removeAllTolerant retries os.RemoveAll on a transient ENOTEMPTY: a
+// concurrent writer still touching a subdirectory (e.g. a git background
+// process finishing a write into .git/objects/pack) can create a new entry
+// in the narrow gap between RemoveAll's last empty directory listing and its
+// final rmdir, which surfaces as an ENOTEMPTY that RemoveAll itself does not
+// retry.
+func removeAllTolerant(path string, attempts int, wait time.Duration) error {
+	return retryOnError(attempts, wait, func() error { return os.RemoveAll(path) })
+}
+
+// gitTempDir is t.TempDir() for a directory a real git subprocess will write
+// into. It layers a retrying removal ahead of Go's own TempDir cleanup so a
+// still-finishing background git writer doesn't turn into a cleanup failure
+// that fails the test despite its assertions having already passed.
+func gitTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Cleanup(func() {
+		_ = removeAllTolerant(dir, 10, 50*time.Millisecond)
+	})
+	return dir
+}
+
+// TestRemoveAllTolerantSurvivesTransientWriter reproduces the shape of the
+// original flake: a concurrent writer keeps recreating a file in the target
+// directory for a bounded window, so a single os.RemoveAll pass fails with
+// ENOTEMPTY, and asserts the retry loop succeeds once the writer stops
+// within its retry budget.
+func TestRemoveAllTolerantSurvivesTransientWriter(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "objects", "pack")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		deadline := time.Now().Add(80 * time.Millisecond)
+		for i := 0; time.Now().Before(deadline); i++ {
+			_ = os.WriteFile(filepath.Join(sub, fmt.Sprintf("tmp-%d.pack", i)), []byte("x"), 0o644)
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	<-writerDone
+
+	if err := removeAllTolerant(dir, 10, 20*time.Millisecond); err != nil {
+		t.Fatalf("removeAllTolerant did not survive the transient writer: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("dir should be removed, stat err: %v", err)
+	}
+}
+
+// TestRetryOnErrorSucceedsAfterTransientFailures confirms the retry loop
+// keeps calling fn past early failures and returns nil once fn recovers,
+// within its attempt budget.
+func TestRetryOnErrorSucceedsAfterTransientFailures(t *testing.T) {
+	calls := 0
+	err := retryOnError(5, time.Millisecond, func() error {
+		calls++
+		if calls < 3 {
+			return fmt.Errorf("transient failure %d", calls)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retryOnError: %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3", calls)
+	}
+}
+
+// TestRetryOnErrorReturnsLastErrorWhenExhausted confirms the retry loop
+// gives up and reports the last error, rather than blocking forever, once fn
+// never recovers within the attempt budget.
+func TestRetryOnErrorReturnsLastErrorWhenExhausted(t *testing.T) {
+	calls := 0
+	err := retryOnError(3, time.Millisecond, func() error {
+		calls++
+		return fmt.Errorf("failure %d", calls)
+	})
+	if err == nil {
+		t.Fatal("expected an error once retries are exhausted")
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3", calls)
+	}
+}
+
 // initGitRepo builds a tiny real git repo with an origin/<base> remote so the
 // merge-tree conflict check runs against actual git plumbing.
 func initGitRepo(t *testing.T) (worktree, base string) {
 	t.Helper()
 	base = "main"
-	origin := t.TempDir()
+	origin := gitTempDir(t)
 	run := func(dir string, args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -64,7 +170,7 @@ func initGitRepo(t *testing.T) (worktree, base string) {
 
 	// Bare origin with a main branch holding one file.
 	run(origin, "init", "-q", "--bare", "-b", base, ".")
-	seed := t.TempDir()
+	seed := gitTempDir(t)
 	run(seed, "init", "-q", "-b", base, ".")
 	if err := os.WriteFile(filepath.Join(seed, "f.txt"), []byte("line1\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -75,7 +181,7 @@ func initGitRepo(t *testing.T) (worktree, base string) {
 	run(seed, "push", "-q", "origin", base)
 
 	// Worktree clone; its branch will diverge from origin/main.
-	worktree = t.TempDir()
+	worktree = gitTempDir(t)
 	run(filepath.Dir(worktree), "clone", "-q", origin, filepath.Base(worktree))
 	return worktree, base
 }
@@ -116,7 +222,7 @@ func TestConflictsWithDetectsCleanAndConflicting(t *testing.T) {
 	wt2, base2 := initGitRepo(t)
 	origin := mustRemote(t, wt2)
 	// Advance origin/main to change f.txt line1.
-	other := t.TempDir()
+	other := gitTempDir(t)
 	gitDo(t, filepath.Dir(other), "clone", "-q", origin, filepath.Base(other))
 	if werr := os.WriteFile(filepath.Join(other, "f.txt"), []byte("origin-change\n"), 0o644); werr != nil {
 		t.Fatal(werr)
