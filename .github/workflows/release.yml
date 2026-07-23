@@ -171,6 +171,16 @@ jobs:
             echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
 
+      # Renders Formula/argus.rb for elysium-labs/homebrew-tap from this
+      # release's checksums. GITHUB_TOKEN is scoped to this repo only, not
+      # the tap repo, so pushing there would need a separate PAT/GH App
+      # token that isn't provisioned yet; attach as a release asset instead
+      # for a maintainer to copy over by hand.
+      - name: Generate Homebrew formula
+        run: |
+          scripts/gen-homebrew-formula.sh "${{ steps.version.outputs.version }}" release/sha256sums.txt > release/argus.rb
+          cat release/argus.rb
+
       - name: Determine if prerelease
         id: prerelease
         run: |
@@ -191,6 +201,7 @@ jobs:
             release/argus-darwin-amd64
             release/argus-darwin-arm64
             release/sha256sums.txt*
+            release/argus.rb
           draft: false
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
           generate_release_notes: true

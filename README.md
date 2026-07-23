@@ -53,6 +53,17 @@ Every env var name above (a forge token, an agent key like `ANTHROPIC_API_KEY`) 
 
 ## Install
 
+**Homebrew (macOS/Linux)**
+```bash
+brew install elysium-labs/tap/argus
+```
+Installs via a Homebrew *formula*, not a cask, so there's no Gatekeeper
+quarantine to strip — `brew`'s own install step un-quarantines the binary.
+`brew upgrade argus` picks up new releases once the tap's formula is bumped;
+that bump is manual for now given release cadence (a maintainer copies the
+`argus.rb` release asset into
+[`elysium-labs/homebrew-tap`](https://github.com/Elysium-Labs-EU/homebrew-tap)).
+
 **From a release**
 ```bash
 curl -sSfL https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/scripts/install.sh | sh
