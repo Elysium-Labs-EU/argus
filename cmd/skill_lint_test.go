@@ -37,6 +37,7 @@ var skillDocCommands = map[string]*cobra.Command{
 	"ship":           shipCmd,
 	"review":         reviewCmd,
 	"rebase":         rebaseCmd,
+	"rework":         reworkCmd,
 	"system update":  systemUpdateCmd,
 	"worktree prune": worktreePruneCmd,
 	"config check":   configCheckCmd,
@@ -55,7 +56,7 @@ func flagSet(cmd *cobra.Command) map[string]*pflag.Flag {
 var (
 	flagTokenRe  = regexp.MustCompile(`--[a-zA-Z][a-zA-Z0-9-]*`)
 	flagValueRe  = regexp.MustCompile(`^(--[a-zA-Z][a-zA-Z0-9-]*)\s+(\S+)$`)
-	argusCmdRe   = regexp.MustCompile(`\bargus (supervise|ship|review|rebase|system update|worktree prune|config check)\b`)
+	argusCmdRe   = regexp.MustCompile(`\bargus (supervise|ship|review|rebase|rework|system update|worktree prune|config check)\b`)
 	inlineCodeRe = regexp.MustCompile("`([^`\n]+)`")
 )
 

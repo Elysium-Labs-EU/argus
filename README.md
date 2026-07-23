@@ -108,6 +108,11 @@ argus supervise --repo /path/to/project --tasks-file briefs.txt --branches feat-
 # Review one worktree's diff on demand
 argus review --worktree /path/to/project-feat-retry --base origin/main
 
+# A review came back request-changes: re-dispatch the same worker with the
+# findings, loop gate/review until it clears (or --max-rounds is exhausted),
+# and persist the resulting verdict so ship can see it
+argus rework --worktree /path/to/project-feat-retry --base origin/main
+
 # Ship an approved worktree to a pull request
 argus ship --worktree /path/to/project-feat-retry --issue 42
 ```
@@ -125,6 +130,7 @@ argus ship --worktree /path/to/project-feat-retry --issue 42
 | `argus review --worktree <path>` | Run a one-shot `claude -p` review of a worktree's diff against a base ref |
 | `argus ship --worktree <path>` | Commit, push, and open a pull request (forge auto-detected), refused without an approving verdict unless `--force` |
 | `argus rebase --worktree <path>` | Dispatch the worktree's own worker to resolve a post-merge conflict and force-push |
+| `argus rework --worktree <path>` | Re-dispatch the worktree's own worker with a request-changes verdict's findings, loop the gate/review until it clears or `--max-rounds` is exhausted, and persist the resulting verdict so `ship` sees it |
 | `argus stats` | Aggregate the run logs under `~/.argus/runs` into escalation rate, review parse-fail rate, and tokens per task |
 | `argus config set credential.<name> <ENV_VAR>` | Persist which env var carries a credential (a forge host or agent-key name) to `~/.argus/config.toml`, so `--credential-env` doesn't need repeating every invocation |
 

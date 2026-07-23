@@ -32,7 +32,8 @@ covers it is how a stale verdict or an unenforced instruction reaches a PR.
 | Spawn from forge issues | `argus supervise --repo <path> --issues 141,142 --review` |
 | Spawn from Jira issues | `argus supervise --repo <path> --jira-issues PROJ-123,PROJ-124 --review` |
 | One-off look at a worktree (does **not** feed `ship`) | `argus review --worktree <path> --base origin/main --task "..." --reasons "..."` |
-| Get a verdict that `ship` will actually see, after rework | `argus supervise --repo <path> --attach --worktrees <path> --base origin/main --review` |
+| Address a request-changes verdict and get a fresh, persisted one `ship` will see | `argus rework --worktree <path> --base origin/main` |
+| Get a verdict that `ship` will actually see, without addressing feedback first | `argus supervise --repo <path> --attach --worktrees <path> --base origin/main --review` |
 | Check whether `ship` will succeed right now | `argus ship --worktree <path> --issue <N> --dry-run` |
 | Ship for real | `argus ship --worktree <path> --issue <N>` |
 | Hand off a worktree after a sibling PR merged first | `argus rebase --worktree <path> --base main` |
@@ -97,24 +98,26 @@ These are enforced in code, not conventions the worker is merely asked to follow
   stale request-changes verdict — confirmed directly. The tool tells you this
   itself: its own output says the verdict isn't saved and that ship won't see it.
   Use it only to eyeball a worktree; never as your last step before shipping.
-- **There is no first-class "address review feedback and re-verdict" command
-  (tracked as argus issue #104).** The rework loop today is entirely manual:
-  1. Message the worker's existing herdr pane directly with the review's specific
-     findings as a new instruction (`herdr pane run <pane-id> '<findings as fix
-     instructions>'`).
-  2. Wait — there is no argus-native block-wait for this; observed real turnaround
-     has ranged from a couple of minutes to the better part of an hour, depending
-     on how much the worker has to redo.
-  3. Get a fresh, *persisted* verdict via `--attach` (see section 4) — never via a
-     standalone `argus review`.
-  4. Even after that, the *review* re-check itself doesn't automatically re-verify
-     that a specific prior finding was actually fixed — it's a fresh holistic
-     pass each time, not a checklist against prior findings. Re-read the diff
-     yourself at the specific location a prior verdict flagged, don't assume a
-     new approve means that exact finding is resolved.
+- **`argus rework` closes the request-changes loop, but it is still a fresh
+  holistic re-review each round, not a checklist against prior findings.** It
+  re-dispatches the worktree's own worker (in place, same branch — reusing its
+  live pane the same way `argus rebase` does) with the last verdict's findings
+  as its next brief, waits for it, then re-runs the gate and reviewer and
+  *persists* the resulting verdict so `ship` sees it — no manual
+  `herdr pane run`, no manual `supervise --attach --review` follow-up. It loops on a
+  further request-changes up to `--max-rounds` (default 3), then stops and
+  prints an escalation instead of retrying forever; it also stops immediately
+  (no further rounds) if the worker reports `blocked` or the reviewer comes
+  back `needs-human`. What it does **not** do: verify that a specific prior
+  finding was actually fixed — each round's review is a fresh pass over the
+  whole diff, the same "holistic, not a checklist" caveat as any other review.
+  If a prior verdict named a precise defect, spot-check that exact location
+  yourself once `rework` reports approved, same as you would after a manual
+  re-review.
 
   `argus rebase` is not a substitute here — it is scoped specifically to
-  sibling-PR-merge-conflict handoff, not general rework.
+  sibling-PR-merge-conflict handoff, not review feedback (`argus rework` is
+  the general-rework analog, and shares its live-pane-reuse dispatch logic).
 - **`argus worktree prune` does not exist yet.** A cleanup command for detecting
   merged PRs and safely removing stale worktrees is in progress but not shipped —
   it has already been through one request-changes round (dead lifecycle-wiring
@@ -290,8 +293,8 @@ eyeballing, not a shippable verdict (see the gap above: it does not persist):
 argus review --worktree <path> --base origin/main --task "issue 142" --reasons "touches sink dispatch"
 ```
 
-If you need a verdict that `ship` will actually recognize after messaging a worker to
-fix review feedback, use `--attach` instead (see section 4).
+If the verdict was request-changes, address it and get a fresh, persisted verdict with
+`argus rework` (see section 4) instead of messaging the worker's pane by hand.
 
 ## 3. Ship
 
@@ -329,39 +332,45 @@ settings, not on argus — check before assuming either way:
 gh pr view <N> --json state,mergedAt
 ```
 
-## 4. Getting a verdict `ship` will actually see, after manual rework
+## 4. Getting a verdict `ship` will actually see, after rework
 
-After a request-changes verdict, there is no first-class rework command yet (tracked
-as argus issue #104). The manual loop:
+After a request-changes verdict, `argus rework` is the first-class continuation:
 
-1. Message the worker's existing herdr pane with the review's specific findings as a
-   new instruction:
+```bash
+argus rework --worktree <path> --base origin/main
+```
 
-   ```bash
-   herdr pane run <pane-id> '<findings as fix instructions>'
-   ```
+This one command does everything the old manual loop required by hand:
 
-2. Wait — no argus-native block-wait exists for this; real turnaround has ranged
-   from a couple of minutes to the better part of an hour.
-3. Get a fresh, **persisted** verdict by attaching argus to the worktree the worker is
-   already running in (no spawn), with `--base` given explicitly since argus can't
-   infer what an already-existing worktree branched from:
+1. Reads the worktree's last recorded verdict (`.claude/argus/verdict.json`) for its
+   findings — no need to re-paste them. If you only have findings from a standalone
+   `argus review` call (which never persists — see the gap above), pass them
+   explicitly instead: `--findings "finding one" --findings "finding two"`.
+2. Re-dispatches the worktree's own worker in place (reusing its live herdr pane the
+   same way `argus rebase` does — no `herdr pane run` by hand) with those findings as
+   its next brief.
+3. Blocks and polls for the worker's next report itself — no manual wait/reminder.
+4. Re-runs the gate and, on escalation, the reviewer — then **persists** the resulting
+   verdict, exactly the same as `supervise --attach --review` does, so `ship` sees it.
+5. On a further request-changes, loops back into another round automatically, up to
+   `--max-rounds` (default 3). It stops immediately — no more rounds — if the worker
+   reports `blocked`, or the reviewer comes back `needs-human`; either means a human
+   decision is needed, not another automatic retry. After the round cap is exhausted
+   it also stops and prints an escalation rather than looping forever.
 
-   ```bash
-   argus supervise --repo <path> --attach --worktrees <path> --base origin/main --review
-   ```
+Sanity-check the result with `argus ship --worktree <path> --issue <N> --dry-run`
+before shipping for real. And don't assume an approve means every prior finding was
+fixed — each round's review is a fresh holistic pass, not a checklist against what was
+previously flagged (see the gap above). If a prior verdict named a specific defect,
+spot-check that exact location in the diff yourself before shipping.
 
-   This is the one that `ship` will actually recognize — a standalone `argus review`
-   will not (see section 2). argus itself warns that `--attach` does not manage
-   isolation: an attached worker keeps whatever credential proxy and runtime adapter
-   (if any) it was already started with.
-4. Sanity-check the new verdict actually persisted with
-   `argus ship --worktree <path> --issue <N> --dry-run` before shipping for real — if
-   it still cites the old request-changes reason, the re-review didn't take.
-5. Don't assume an approve at this point means every prior finding was fixed — the
-   review re-checks holistically, not against a checklist of what was previously
-   flagged. If a prior verdict named a specific defect, spot-check that exact
-   location in the diff yourself before shipping.
+`supervise --attach --review` (the previous workaround) still works and is useful when you want
+a fresh persisted verdict *without* first re-dispatching the worker — e.g. the worker
+already pushed a fix on its own and you just need argus to record a verdict for it:
+
+```bash
+argus supervise --repo <path> --attach --worktrees <path> --base origin/main --review
+```
 
 ## 5. Post-merge conflict handoff
 
