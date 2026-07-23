@@ -34,7 +34,9 @@ func git(ctx context.Context, worktree string, args ...string) (string, error) {
 }
 
 // controlPlanePaths are the argus-written files that must never land in a PR: the
-// worker's brief/status/verdict and the generated permission file.
+// worker's brief/status/verdict and the generated permission file. MeasureDiff
+// excludes the same paths (via isControlPlanePath, prune.go) so the gate never
+// escalates on lines that ship was always going to drop.
 var controlPlanePaths = []string{".claude/argus", ".claude/settings.local.json"}
 
 // CommitAll stages every change in the worktree and commits it. It returns
