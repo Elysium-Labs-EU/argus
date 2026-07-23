@@ -37,6 +37,7 @@ covers it is how a stale verdict or an unenforced instruction reaches a PR.
 | Ship for real | `argus ship --worktree <path> --issue <N>` |
 | Hand off a worktree after a sibling PR merged first | `argus rebase --worktree <path> --base main` |
 | See escalation rate / token cost | `argus stats` |
+| Check/fix the Bash allowlist argus itself needs | `argus config check --write` |
 
 If `argus` isn't on PATH, fall back to [[supervise-agents]] and say so.
 
@@ -160,7 +161,23 @@ gh auth status                   # or: [ -n "$GITHUB_TOKEN" ] (don't echo the to
   `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN`.
 
 **Bash-permission allowlist (do this once per repo, or every `argus` call prompts for
-manual approval and defeats the point of using it):** add to `.claude/settings.json`:
+manual approval and defeats the point of using it):**
+
+```bash
+argus config check --write   # adds Bash(argus *) to .claude/settings.json unless something already covers it
+argus config check           # read-only: reports what's missing without touching the file
+```
+
+`check` only ever reads/writes `permissions.allow` — every other key in the file
+(hooks, model, unrelated permissions) is round-tripped untouched. It also
+recognizes a narrower entry as already sufficient, so prefer one when you want
+tighter scoping instead of the broad wildcard:
+
+```bash
+argus config check --write --entry "Bash(argus ship *)"
+```
+
+Equivalent by hand, if you'd rather not run the command:
 
 ```json
 {
@@ -172,8 +189,7 @@ manual approval and defeats the point of using it):** add to `.claude/settings.j
 
 This is *not* a blanket bypass of judgment calls — `ship --force` and anything this
 skill tells you to hold for the user still needs their explicit say-so regardless of
-what's allowlisted. There is no `argus config`/setup-check subcommand that does this
-for you yet — it's a one-time manual edit per adopting repo.
+what's allowlisted.
 
 If `argus` is missing, fall back to the [[supervise-agents]] skill and say so.
 

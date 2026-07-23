@@ -26,6 +26,7 @@ environment variable argus should read it from instead of its own built-in
 default.`,
 	}
 	cmd.AddCommand(newConfigSetCmd())
+	cmd.AddCommand(configCheckCmd)
 	return cmd
 }
 
