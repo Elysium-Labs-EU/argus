@@ -509,12 +509,13 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 			continue
 		}
 		res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
-			Task:        st.plan.Task,
-			Branch:      st.plan.Branch,
-			Worktree:    st.plan.Worktree,
-			Diff:        diff,
-			Reasons:     verdict.Reasons,
-			HardReasons: verdict.HardReasons,
+			Task:          st.plan.Task,
+			Branch:        st.plan.Branch,
+			Worktree:      st.plan.Worktree,
+			Diff:          diff,
+			Reasons:       verdict.Reasons,
+			HardReasons:   verdict.HardReasons,
+			PriorFindings: priorFindings(st.plan.Worktree),
 		})
 		if err != nil {
 			st.reviewErr = err
@@ -539,6 +540,18 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 		}
 		recordApproval(cfg, st, approved, "review", summary, res.Findings)
 	}
+}
+
+// priorFindings returns the Reasons from a previously recorded, non-approved
+// verdict for worktree, or nil if none exists (first review, or the prior
+// round already approved). recordApproval overwrites verdict.json with each
+// review's outcome, so this must be read before the new verdict is recorded.
+func priorFindings(worktree string) []string {
+	prior, found, err := protocol.LoadApproval(worktree)
+	if err != nil || !found || prior.Approved {
+		return nil
+	}
+	return prior.Reasons
 }
 
 // recordApproval writes the worker's disposition to its worktree so ship can

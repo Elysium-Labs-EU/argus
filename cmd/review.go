@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -85,10 +86,11 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 	err = ui.WithSpinner("claude reviewing...", func() error {
 		var rerr error
 		res, rerr = reviewer.Review(ctx, &supervisor.ReviewRequest{
-			Task:     task,
-			Worktree: worktree,
-			Reasons:  reasons,
-			Diff:     diff,
+			Task:          task,
+			Worktree:      worktree,
+			Reasons:       reasons,
+			Diff:          diff,
+			PriorFindings: priorFindings(worktree),
 		})
 		return rerr
 	})
@@ -100,6 +102,17 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 
 	renderReviewResult(out, res)
 	return nil
+}
+
+// priorFindings returns the Reasons from a previously recorded, non-approved
+// verdict for worktree, or nil if none exists (first review, or the prior
+// round already approved).
+func priorFindings(worktree string) []string {
+	prior, found, err := protocol.LoadApproval(worktree)
+	if err != nil || !found || prior.Approved {
+		return nil
+	}
+	return prior.Reasons
 }
 
 // renderReviewResult prints a reviewer's verdict with a decision-colored mark.
