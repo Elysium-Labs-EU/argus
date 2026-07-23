@@ -203,7 +203,7 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 		return werr
 	}
 
-	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts); err != nil {
+	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget()); err != nil {
 		return err
 	}
 
@@ -218,30 +218,55 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	return nil
 }
 
-// dispatchIntoPane gets a worker acting on the freshly written rebase brief inside
-// paneID. rebase targets a worktree an earlier task already ran a worker in (see
-// RebaseBrief: "it already has full context"), so paneID very often still holds
-// that worker's live, idle Claude Code session — not a bare shell. Typing a shell
-// command line into that pane (PaneRun) would land as a chat message in the
-// agent's own input box, not a command a shell executes, which is why the
-// dispatch used to silently no-op (argus issue #88): the pane's scrollback never
-// showed the brief being read at all. So this checks with herdr first: a live
-// agent gets re-tasked in place via AgentPrompt, using the same one-line pointer
-// at the brief a fresh spawn would pass as its initial prompt; only a genuinely
-// bare pane (no agent herdr recognizes) falls back to spawning a new one, exactly
-// as supervisor.execute does for a freshly created worktree.
-func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr.Client, paneID, branch string, opts *rebaseOpts) error {
+// dispatchTarget carries the knobs dispatchIntoPane needs to get a worker
+// running in an existing worktree's pane. It is shared by rebase and rework —
+// the two commands that re-dispatch into a worktree a worker already ran in,
+// rather than spawning a brand new one via the full supervise pipeline — so
+// the pane-reuse-vs-spawn logic below is written once.
+type dispatchTarget struct {
+	credentialEnv    map[string]string
+	worktree         string
+	launcher         string
+	workerRuntime    string
+	noCredProxy      bool
+	livenessTimeout  time.Duration
+	livenessInterval time.Duration
+}
+
+// dispatchTarget builds the dispatchIntoPane input from a rebaseOpts.
+func (o *rebaseOpts) dispatchTarget() *dispatchTarget {
+	return &dispatchTarget{
+		worktree: o.worktree, launcher: o.launcher, workerRuntime: o.workerRuntime,
+		noCredProxy: o.noCredProxy, credentialEnv: o.credentialEnv,
+		livenessTimeout: o.livenessTimeout, livenessInterval: o.livenessInterval,
+	}
+}
+
+// dispatchIntoPane gets a worker acting on the freshly written brief inside
+// paneID. rebase and rework both target a worktree an earlier task already ran
+// a worker in (see RebaseBrief: "it already has full context"), so paneID very
+// often still holds that worker's live, idle Claude Code session — not a bare
+// shell. Typing a shell command line into that pane (PaneRun) would land as a
+// chat message in the agent's own input box, not a command a shell executes,
+// which is why the dispatch used to silently no-op (argus issue #88): the
+// pane's scrollback never showed the brief being read at all. So this checks
+// with herdr first: a live agent gets re-tasked in place via AgentPrompt, using
+// the same one-line pointer at the brief a fresh spawn would pass as its
+// initial prompt; only a genuinely bare pane (no agent herdr recognizes) falls
+// back to spawning a new one, exactly as supervisor.execute does for a freshly
+// created worktree.
+func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr.Client, paneID, branch string, target *dispatchTarget) error {
 	_, live, err := client.AgentGet(ctx, paneID)
 	if err != nil {
 		return fmt.Errorf("checking whether %s already has a live agent: %w", paneID, err)
 	}
 	if live {
-		logger.Action("rebase_dispatch", branch, "reuse-live-agent", paneID)
+		logger.Action("dispatch", branch, "reuse-live-agent", paneID)
 		return client.AgentPrompt(ctx, paneID, supervisor.InitialPrompt)
 	}
 
-	logger.Action("rebase_dispatch", branch, "spawn-new-agent", paneID)
-	spawnLine, cleanup, err := buildRebaseSpawnLine(ctx, logger, opts.worktree, branch, opts.launcher, opts.workerRuntime, opts.noCredProxy, opts.credentialEnv)
+	logger.Action("dispatch", branch, "spawn-new-agent", paneID)
+	spawnLine, cleanup, err := buildRebaseSpawnLine(ctx, logger, target.worktree, branch, target.launcher, target.workerRuntime, target.noCredProxy, target.credentialEnv)
 	defer cleanup()
 	if err != nil {
 		return err
@@ -258,7 +283,7 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	// Confirming liveness here, bounded, catches that before it becomes an
 	// open-ended hang in WaitForStatus below, which is legitimately unbounded
 	// once an agent is known to be live.
-	return waitForAgentLive(ctx, client, paneID, opts.livenessTimeout, opts.livenessInterval)
+	return waitForAgentLive(ctx, client, paneID, target.livenessTimeout, target.livenessInterval)
 }
 
 // waitForAgentLive polls client.AgentGet(paneID) until herdr reports a live

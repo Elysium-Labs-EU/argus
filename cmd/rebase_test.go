@@ -487,7 +487,7 @@ func TestDispatchIntoPaneAgentGetError(t *testing.T) {
 		return nil, nil
 	})
 
-	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &rebaseOpts{worktree: t.TempDir(), launcher: "claude"})
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &dispatchTarget{worktree: t.TempDir(), launcher: "claude"})
 	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
 		t.Fatalf("want the AgentGet error propagated, got %v", err)
 	}
@@ -709,7 +709,7 @@ func TestDispatchIntoPaneSpawnNeverComesLive(t *testing.T) {
 		}
 	})
 
-	opts := &rebaseOpts{
+	opts := &dispatchTarget{
 		worktree: t.TempDir(), launcher: "claude", noCredProxy: true,
 		livenessTimeout: 40 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
 	}
@@ -754,7 +754,7 @@ func TestDispatchIntoPaneSpawnLivenessRecovers(t *testing.T) {
 		}
 	})
 
-	opts := &rebaseOpts{
+	opts := &dispatchTarget{
 		worktree: t.TempDir(), launcher: "claude", noCredProxy: true,
 		livenessTimeout: 500 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
 	}
@@ -796,7 +796,7 @@ func TestDispatchIntoPaneSpawnLivenessAgentGetError(t *testing.T) {
 		}
 	})
 
-	opts := &rebaseOpts{
+	opts := &dispatchTarget{
 		worktree: t.TempDir(), launcher: "claude", noCredProxy: true,
 		livenessTimeout: 500 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
 	}
@@ -834,7 +834,7 @@ func TestDispatchIntoPaneSpawnLivenessContextCanceled(t *testing.T) {
 		cancel()
 	}()
 
-	opts := &rebaseOpts{
+	opts := &dispatchTarget{
 		worktree: t.TempDir(), launcher: "claude", noCredProxy: true,
 		livenessTimeout: 5 * time.Second, livenessInterval: 5 * time.Millisecond,
 	}
