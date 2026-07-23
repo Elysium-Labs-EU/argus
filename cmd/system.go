@@ -25,7 +25,7 @@ func newSystemCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newVersionCmd())
-	cmd.AddCommand(newUpdateCmd())
+	cmd.AddCommand(systemUpdateCmd)
 	cmd.AddCommand(newUninstallCmd())
 
 	return cmd
