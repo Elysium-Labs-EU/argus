@@ -5,6 +5,15 @@
 package scripts_test
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/pem"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,6 +123,301 @@ func TestStripQuarantine(t *testing.T) {
 		if out, err := exec.Command("xattr", "-p", "com.apple.quarantine", target).CombinedOutput(); err == nil {
 			t.Fatalf("quarantine attribute still present after strip: %s", out)
 		}
+	}
+}
+
+// runInstallSh runs install.sh with args and returns its combined output and
+// error, so signature-verification tests can assert on both exit status and
+// the log lines the script prints.
+func runInstallSh(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+
+	scriptPath, err := filepath.Abs("install.sh")
+	if err != nil {
+		t.Fatalf("resolving install.sh path: %v", err)
+	}
+
+	cmd := exec.Command("sh", append([]string{scriptPath}, args...)...)
+	out, runErr := cmd.CombinedOutput()
+	return string(out), runErr
+}
+
+// writeTestSigningKeyFixture generates a throwaway ECDSA P-256 keypair,
+// writes its PEM-encoded public key to <dir>/pubkey.pem, and returns the
+// private key so callers can sign fixture data with it. install.sh's
+// signature functions are keyed off an explicit pubkey_file argument (not
+// the real embedded RELEASE_SIGNING_PUBKEY), so tests never need the actual
+// production private key, which is never checked into this repo.
+func writeTestSigningKeyFixture(t *testing.T, dir string) (pubkeyPath string, priv *ecdsa.PrivateKey) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating test signing key: %v", err)
+	}
+	derBytes, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshaling test public key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: derBytes})
+
+	pubkeyPath = filepath.Join(dir, "pubkey.pem")
+	if err := os.WriteFile(pubkeyPath, pemBytes, 0o600); err != nil {
+		t.Fatalf("writing pubkey fixture: %v", err)
+	}
+	return pubkeyPath, key
+}
+
+// signFileFixture signs dataPath's contents with priv (as
+// `openssl dgst -sha256 -sign` would) and writes the ASN.1 DER signature to
+// <dir>/sig.bin, returning its path.
+func signFileFixture(t *testing.T, dir string, priv *ecdsa.PrivateKey, dataPath string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(dataPath)
+	if err != nil {
+		t.Fatalf("reading data fixture: %v", err)
+	}
+	digest := sha256.Sum256(data)
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	if err != nil {
+		t.Fatalf("signing data fixture: %v", err)
+	}
+
+	sigPath := filepath.Join(dir, "sig.bin")
+	if err := os.WriteFile(sigPath, sig, 0o600); err != nil {
+		t.Fatalf("writing sig fixture: %v", err)
+	}
+	return sigPath
+}
+
+func requireOpenSSL(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("openssl"); err != nil {
+		t.Skip("openssl not available")
+	}
+}
+
+func TestVerifySignatureFlagAcceptsValidSignature(t *testing.T) {
+	requireOpenSSL(t)
+	dir := t.TempDir()
+
+	dataPath := filepath.Join(dir, "data.txt")
+	if err := os.WriteFile(dataPath, []byte("argus release checksums fixture\n"), 0o600); err != nil {
+		t.Fatalf("writing data fixture: %v", err)
+	}
+
+	pubkeyPath, priv := writeTestSigningKeyFixture(t, dir)
+	sigPath := signFileFixture(t, dir, priv, dataPath)
+
+	out, err := runInstallSh(t, "--verify-signature", pubkeyPath, sigPath, dataPath)
+	if err != nil {
+		t.Fatalf("--verify-signature with a valid signature failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "signature valid") {
+		t.Errorf("output = %q, want a signature-valid message", out)
+	}
+}
+
+func TestVerifySignatureFlagRejectsTamperedData(t *testing.T) {
+	requireOpenSSL(t)
+	dir := t.TempDir()
+
+	dataPath := filepath.Join(dir, "data.txt")
+	if err := os.WriteFile(dataPath, []byte("argus release checksums fixture\n"), 0o600); err != nil {
+		t.Fatalf("writing data fixture: %v", err)
+	}
+
+	pubkeyPath, priv := writeTestSigningKeyFixture(t, dir)
+	sigPath := signFileFixture(t, dir, priv, dataPath)
+
+	// Tamper with the data after signing — the signature no longer matches.
+	if err := os.WriteFile(dataPath, []byte("tampered contents\n"), 0o600); err != nil {
+		t.Fatalf("tampering data fixture: %v", err)
+	}
+
+	out, err := runInstallSh(t, "--verify-signature", pubkeyPath, sigPath, dataPath)
+	if err == nil {
+		t.Fatalf("expected --verify-signature to fail for tampered data, got:\n%s", out)
+	}
+	if !strings.Contains(out, "signature invalid") {
+		t.Errorf("output = %q, want a signature-invalid message", out)
+	}
+}
+
+func TestVerifySignatureFlowMissingSigSoftFailsAndPasses(t *testing.T) {
+	requireOpenSSL(t)
+	dir := t.TempDir()
+
+	dataPath := filepath.Join(dir, "checksums.txt")
+	if err := os.WriteFile(dataPath, []byte("fake checksums\n"), 0o600); err != nil {
+		t.Fatalf("writing checksums fixture: %v", err)
+	}
+	pubkeyPath, _ := writeTestSigningKeyFixture(t, dir)
+	missingSigPath := filepath.Join(dir, "does-not-exist.sig")
+
+	out, err := runInstallSh(t, "--verify-signature-flow", pubkeyPath, missingSigPath, dataPath)
+	if err != nil {
+		t.Fatalf("--verify-signature-flow with a missing sig should soft-fail (pass), got err: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "has no sha256sums.txt.sig") && !strings.Contains(out, "checksum-only integrity") {
+		t.Errorf("output = %q, want a checksum-only-integrity warning", out)
+	}
+}
+
+func TestVerifySignatureFlowEmptySigSoftFailsAndPasses(t *testing.T) {
+	requireOpenSSL(t)
+	dir := t.TempDir()
+
+	dataPath := filepath.Join(dir, "checksums.txt")
+	if err := os.WriteFile(dataPath, []byte("fake checksums\n"), 0o600); err != nil {
+		t.Fatalf("writing checksums fixture: %v", err)
+	}
+	pubkeyPath, _ := writeTestSigningKeyFixture(t, dir)
+	emptySigPath := filepath.Join(dir, "empty.sig")
+	if err := os.WriteFile(emptySigPath, nil, 0o600); err != nil {
+		t.Fatalf("writing empty sig fixture: %v", err)
+	}
+
+	out, err := runInstallSh(t, "--verify-signature-flow", pubkeyPath, emptySigPath, dataPath)
+	if err != nil {
+		t.Fatalf("--verify-signature-flow with an empty sig should soft-fail (pass), got err: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "checksum-only integrity") {
+		t.Errorf("output = %q, want a checksum-only-integrity warning", out)
+	}
+}
+
+func TestVerifySignatureFlowInvalidSigHardFails(t *testing.T) {
+	requireOpenSSL(t)
+	dir := t.TempDir()
+
+	dataPath := filepath.Join(dir, "checksums.txt")
+	if err := os.WriteFile(dataPath, []byte("fake checksums\n"), 0o600); err != nil {
+		t.Fatalf("writing checksums fixture: %v", err)
+	}
+	pubkeyPath, _ := writeTestSigningKeyFixture(t, dir)
+	badSigPath := filepath.Join(dir, "bad.sig")
+	if err := os.WriteFile(badSigPath, []byte("not a real signature"), 0o600); err != nil {
+		t.Fatalf("writing bad sig fixture: %v", err)
+	}
+
+	out, err := runInstallSh(t, "--verify-signature-flow", pubkeyPath, badSigPath, dataPath)
+	if err == nil {
+		t.Fatalf("--verify-signature-flow with an invalid signature should hard-fail, got:\n%s", out)
+	}
+	if !strings.Contains(out, "signature does not match") {
+		t.Errorf("output = %q, want a signature-mismatch message", out)
+	}
+}
+
+func TestVerifySignatureFlowValidSigPasses(t *testing.T) {
+	requireOpenSSL(t)
+	dir := t.TempDir()
+
+	dataPath := filepath.Join(dir, "checksums.txt")
+	if err := os.WriteFile(dataPath, []byte("fake checksums\n"), 0o600); err != nil {
+		t.Fatalf("writing checksums fixture: %v", err)
+	}
+	pubkeyPath, priv := writeTestSigningKeyFixture(t, dir)
+	sigPath := signFileFixture(t, dir, priv, dataPath)
+
+	out, err := runInstallSh(t, "--verify-signature-flow", pubkeyPath, sigPath, dataPath)
+	if err != nil {
+		t.Fatalf("--verify-signature-flow with a valid signature should pass, got err: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Signature verified") {
+		t.Errorf("output = %q, want a signature-verified message", out)
+	}
+}
+
+// unreachableURL returns a URL to a local address nothing is listening on,
+// by opening a TCP listener and immediately closing it — connections to the
+// freed port are refused immediately, unlike a routable-but-silent address,
+// which would hang for the OS/curl connect timeout.
+func unreachableURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("opening throwaway listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("closing throwaway listener: %v", err)
+	}
+	return "http://" + addr + "/sha256sums.txt.sig"
+}
+
+func TestFetchReleaseSignaturePassesOn200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("fake signature bytes"))
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "sha256sums.txt.sig")
+	out, err := runInstallSh(t, "--fetch-signature", srv.URL, dest)
+	if err != nil {
+		t.Fatalf("--fetch-signature on a 200 should pass, got err: %v\n%s", err, out)
+	}
+	got, rerr := os.ReadFile(dest)
+	if rerr != nil {
+		t.Fatalf("dest file should exist after a 200: %v", rerr)
+	}
+	if string(got) != "fake signature bytes" {
+		t.Errorf("dest contents = %q, want the response body", got)
+	}
+}
+
+func TestFetchReleaseSignatureSoftFailsOn404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "sha256sums.txt.sig")
+	out, err := runInstallSh(t, "--fetch-signature", srv.URL, dest)
+	if err != nil {
+		t.Fatalf("--fetch-signature on a 404 should soft-fail (pass), got err: %v\n%s", err, out)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Errorf("dest file should not exist after a 404, stat err = %v", statErr)
+	}
+}
+
+func TestFetchReleaseSignatureHardFailsOnServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "sha256sums.txt.sig")
+	out, err := runInstallSh(t, "--fetch-signature", srv.URL, dest)
+	if err == nil {
+		t.Fatalf("--fetch-signature on a 500 should hard-fail, got:\n%s", out)
+	}
+	if !strings.Contains(out, "HTTP 500") {
+		t.Errorf("output = %q, want it to mention HTTP 500", out)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Errorf("dest file should not exist after a hard failure, stat err = %v", statErr)
+	}
+}
+
+func TestFetchReleaseSignatureHardFailsOnConnectionRefused(t *testing.T) {
+	// The security gap this covers: a network error or an attacker blocking
+	// just the .sig URL must never be silently treated the same as a 404
+	// ("release predates signing") — that would let an attacker force the
+	// checksum-only fallback by MITMing or dropping only this one request.
+	dest := filepath.Join(t.TempDir(), "sha256sums.txt.sig")
+	out, err := runInstallSh(t, "--fetch-signature", unreachableURL(t), dest)
+	if err == nil {
+		t.Fatalf("--fetch-signature against an unreachable host should hard-fail, got:\n%s", out)
+	}
+	if !strings.Contains(out, "HTTP 000") {
+		t.Errorf("output = %q, want it to mention HTTP 000 (no response received)", out)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Errorf("dest file should not exist after a hard failure, stat err = %v", statErr)
 	}
 }
 
