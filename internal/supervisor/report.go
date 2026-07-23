@@ -74,7 +74,7 @@ func renderReport(ctx context.Context, cfg *Config, states []*workerState) {
 		mark := ui.LabelWarning.Render("○")
 		if success {
 			mark = ui.LabelSuccess.Render("✓")
-		} else if phase == protocol.PhaseBlocked {
+		} else if phase == protocol.PhaseBlocked || st.herdrEscalation != "" {
 			mark = ui.LabelError.Render("✗")
 		}
 
@@ -99,7 +99,7 @@ func renderReport(ctx context.Context, cfg *Config, states []*workerState) {
 
 		_, _ = fmt.Fprintf(out, "    tokens: %s\n", reportTokens(cfg, st, sessionByPane[st.paneID]))
 
-		if st.hasFile {
+		if st.hasFile || st.herdrEscalation != "" {
 			renderVerdict(out, gateVerdict(st, cfg.Policy))
 			renderReview(out, st)
 		}
@@ -142,7 +142,7 @@ func logRunSummary(cfg *Config, states []*workerState) {
 	workers, reported, escalated, approved := 0, 0, 0, 0
 	for _, st := range states {
 		workers++
-		if !st.hasFile {
+		if !st.hasFile && st.herdrEscalation == "" {
 			continue
 		}
 		reported++
