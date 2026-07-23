@@ -61,6 +61,6 @@ func JudgeOne(ctx context.Context, cfg *Config, plan *WorkerPlan, status *protoc
 	st := &workerState{plan: plan, paneID: paneID, started: dispatchedAt, status: *status, hasFile: true}
 	states := []*workerState{st}
 	reconcile(ctx, cfg, states)
-	reviewEscalations(ctx, cfg, states)
+	reviewEscalations(ctx, cfg, states, nil)
 	return JudgeResult{Gate: gateVerdict(st, cfg.Policy), Review: st.review, ReviewErr: st.reviewErr}
 }

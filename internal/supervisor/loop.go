@@ -395,10 +395,14 @@ const defaultReviewConcurrency = 4
 // existing tests already exercise; running one per goroutine gets the same
 // per-worker checks without waiting on siblings.
 //
-// The LLM `--review` call inside reviewEscalations is the expensive, slow
-// step, so it alone is bounded by sem: a spike of simultaneous escalations
-// gates every worker immediately (free/local) but queues for a `claude -p`
-// slot rather than forking one subprocess per escalated worker at once.
+// sem is threaded into reviewEscalations rather than acquired here around the
+// whole call: only the LLM `--review` call inside it is expensive and slow,
+// so only that call may wait on a slot. Acquiring sem before reviewEscalations
+// would make every worker's gate check — meant to be free/local — queue
+// behind whichever other workers currently hold a review slot: a fleet larger
+// than ReviewConcurrency (default 4) could then go a long time with no
+// gate/verdict event at all, even though several workers had already reached
+// a terminal phase.
 func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 	n := cfg.ReviewConcurrency
 	if n <= 0 {
@@ -415,10 +419,7 @@ func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 
 			one := []*workerState{st}
 			reconcile(ctx, cfg, one)
-
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			reviewEscalations(ctx, cfg, one)
+			reviewEscalations(ctx, cfg, one, sem)
 		}(st)
 	}
 	wg.Wait()
@@ -481,8 +482,12 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 // reviewEscalations runs the LLM reviewer on exactly the workers the deterministic
 // gate could not clear — the risky minority. No reviewer configured (or a clean
 // gate verdict) means no call, so the LLM cost tracks the escalation rate, not the
-// worker count.
-func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) {
+// worker count. sem bounds only the actual reviewer call (see reviewOne); every
+// other branch here — auto-approve, no-reviewer-configured — is free/local and
+// runs unconditionally so a worker's gate verdict never waits on sem. sem may be
+// nil (tests exercising this function directly, outside judgeEach's concurrency
+// bound, pass no limiter).
+func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState, sem chan struct{}) {
 	for _, st := range states {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
@@ -501,44 +506,7 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState) 
 			recordApproval(cfg, st, false, "gate", "escalated, awaiting human decision", verdict.Reasons)
 			continue
 		}
-		diff, err := DiffFor(ctx, st.plan.Worktree, cfg.Base)
-		if err != nil {
-			st.reviewErr = err
-			cfg.Log.Fail("review", st.plan.Task, err)
-			recordApproval(cfg, st, false, "gate", "review could not run: "+err.Error(), verdict.Reasons)
-			continue
-		}
-		res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
-			Task:          st.plan.Task,
-			Branch:        st.plan.Branch,
-			Worktree:      st.plan.Worktree,
-			Diff:          diff,
-			Reasons:       verdict.Reasons,
-			HardReasons:   verdict.HardReasons,
-			PriorFindings: priorFindings(st.plan.Worktree),
-		})
-		if err != nil {
-			st.reviewErr = err
-			cfg.Log.Fail("review", st.plan.Task, err)
-			recordApproval(cfg, st, false, "gate", "review errored: "+err.Error(), verdict.Reasons)
-			continue
-		}
-		st.review = &res
-		cfg.Log.Action("review", st.plan.Task, res.Decision, res.Summary)
-
-		// A hard reason (unmeasurable diff, material under-report, zero files
-		// changed despite a claimed terminal phase) is not a factor for the
-		// reviewer to weigh — it is evidence status.json can't be trusted for this
-		// change, so no reviewer verdict, including "approve", can waive it. Record
-		// the reviewer's findings for a human to read, but never auto-ship past it.
-		approved := res.Decision == "approve"
-		summary := res.Summary
-		if len(verdict.HardReasons) > 0 {
-			approved = false
-			summary = fmt.Sprintf("reviewer said %q (%s), but a hard gate check is unwaivable: %s",
-				res.Decision, res.Summary, strings.Join(verdict.HardReasons, "; "))
-		}
-		recordApproval(cfg, st, approved, "review", summary, res.Findings)
+		reviewOne(ctx, cfg, st, verdict, sem)
 	}
 }
 
@@ -552,6 +520,55 @@ func priorFindings(worktree string) []string {
 		return nil
 	}
 	return prior.Reasons
+}
+
+// reviewOne runs the LLM review for one escalated worker, acquiring sem only
+// around this call — the expensive, slow step — so a sibling worker's gate
+// check never waits on it. sem == nil means unbounded (no limiter configured).
+func reviewOne(ctx context.Context, cfg *Config, st *workerState, verdict Verdict, sem chan struct{}) {
+	if sem != nil {
+		sem <- struct{}{}
+		defer func() { <-sem }()
+	}
+
+	diff, err := DiffFor(ctx, st.plan.Worktree, cfg.Base)
+	if err != nil {
+		st.reviewErr = err
+		cfg.Log.Fail("review", st.plan.Task, err)
+		recordApproval(cfg, st, false, "gate", "review could not run: "+err.Error(), verdict.Reasons)
+		return
+	}
+	res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
+		Task:          st.plan.Task,
+		Branch:        st.plan.Branch,
+		Worktree:      st.plan.Worktree,
+		Diff:          diff,
+		Reasons:       verdict.Reasons,
+		HardReasons:   verdict.HardReasons,
+		PriorFindings: priorFindings(st.plan.Worktree),
+	})
+	if err != nil {
+		st.reviewErr = err
+		cfg.Log.Fail("review", st.plan.Task, err)
+		recordApproval(cfg, st, false, "gate", "review errored: "+err.Error(), verdict.Reasons)
+		return
+	}
+	st.review = &res
+	cfg.Log.Action("review", st.plan.Task, res.Decision, res.Summary)
+
+	// A hard reason (unmeasurable diff, material under-report, zero files
+	// changed despite a claimed terminal phase) is not a factor for the
+	// reviewer to weigh — it is evidence status.json can't be trusted for this
+	// change, so no reviewer verdict, including "approve", can waive it. Record
+	// the reviewer's findings for a human to read, but never auto-ship past it.
+	approved := res.Decision == "approve"
+	summary := res.Summary
+	if len(verdict.HardReasons) > 0 {
+		approved = false
+		summary = fmt.Sprintf("reviewer said %q (%s), but a hard gate check is unwaivable: %s",
+			res.Decision, res.Summary, strings.Join(verdict.HardReasons, "; "))
+	}
+	recordApproval(cfg, st, approved, "review", summary, res.Findings)
 }
 
 // recordApproval writes the worker's disposition to its worktree so ship can
