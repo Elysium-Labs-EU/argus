@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -286,7 +288,7 @@ func TestCopyFileAndReplaceBinary(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if err := replaceBinary(src, dst); err != nil {
+	if err := replaceBinary(context.Background(), src, dst); err != nil {
 		t.Fatalf("replaceBinary: %v", err)
 	}
 
@@ -308,6 +310,54 @@ func TestCopyFileAndReplaceBinary(t *testing.T) {
 
 	if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf("expected the .tmp file to be gone after rename, got err=%v", err)
+	}
+}
+
+func TestResignBinaryNoOpNonDarwin(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "argus")
+	if err := os.WriteFile(dst, []byte("binary contents"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := resignBinary(context.Background(), "linux", dst); err != nil {
+		t.Errorf("resignBinary(goos=linux) = %v, want nil no-op", err)
+	}
+}
+
+// TestResignBinaryDarwin exercises the actual signing path issue #124 needs
+// (replaceBinary was skipping this entirely) by re-signing a copy of the
+// running test binary and confirming codesign reports an ad-hoc signature
+// where before there was none.
+func TestResignBinaryDarwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("codesign re-signing only applies on darwin")
+	}
+	if _, err := exec.LookPath("codesign"); err != nil {
+		t.Skip("codesign not on PATH")
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "argus")
+	if err = copyFile(self, dst); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	if err = os.Chmod(dst, 0o755); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	if err = resignBinary(context.Background(), runtime.GOOS, dst); err != nil {
+		t.Fatalf("resignBinary: %v", err)
+	}
+
+	out, err := exec.CommandContext(context.Background(), "codesign", "-dv", dst).CombinedOutput()
+	if err != nil {
+		t.Fatalf("codesign -dv %s: %v (%s)", dst, err, out)
+	}
+	if !strings.Contains(string(out), "adhoc") {
+		t.Errorf("codesign -dv output = %q, want an adhoc signature", out)
 	}
 }
 
