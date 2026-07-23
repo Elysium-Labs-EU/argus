@@ -468,3 +468,8 @@ func newUpdateCmd() *cobra.Command {
 	cmd.Flags().Bool("pre", false, "include pre-releases in update check")
 	return cmd
 }
+
+// systemUpdateCmd is a package-level var (like shipCmd, rebaseCmd, worktreePruneCmd,
+// ...) so skill_lint_test.go can cross-check its flags against SKILL.md directly,
+// the same way it already does for every other documented subcommand.
+var systemUpdateCmd = newUpdateCmd()

@@ -33,10 +33,11 @@ const (
 
 // skillDocCommands are the argus subcommands SKILL.md documents by name.
 var skillDocCommands = map[string]*cobra.Command{
-	"supervise": superviseCmd,
-	"ship":      shipCmd,
-	"review":    reviewCmd,
-	"rebase":    rebaseCmd,
+	"supervise":     superviseCmd,
+	"ship":          shipCmd,
+	"review":        reviewCmd,
+	"rebase":        rebaseCmd,
+	"system update": systemUpdateCmd,
 }
 
 // flagSet returns cmd's full flag set exactly as `--help` renders it: its own
@@ -52,7 +53,7 @@ func flagSet(cmd *cobra.Command) map[string]*pflag.Flag {
 var (
 	flagTokenRe  = regexp.MustCompile(`--[a-zA-Z][a-zA-Z0-9-]*`)
 	flagValueRe  = regexp.MustCompile(`^(--[a-zA-Z][a-zA-Z0-9-]*)\s+(\S+)$`)
-	argusCmdRe   = regexp.MustCompile(`\bargus (supervise|ship|review|rebase)\b`)
+	argusCmdRe   = regexp.MustCompile(`\bargus (supervise|ship|review|rebase|system update)\b`)
 	inlineCodeRe = regexp.MustCompile("`([^`\n]+)`")
 )
 
@@ -172,6 +173,13 @@ func TestSkillMDMatchesCLI(t *testing.T) {
 			currentCmd = m[1]
 		}
 		if segment.fenced {
+			// A fenced example that never mentions "argus" at all (e.g. a `gh`/`git`
+			// snippet shown alongside argus commands elsewhere in the doc) isn't an
+			// argus usage example — checking its flags against currentCmd, left over
+			// from an earlier unrelated fence, produces false positives.
+			if !strings.Contains(segment.text, "argus") {
+				continue
+			}
 			for _, tok := range flagTokenRe.FindAllString(segment.text, -1) {
 				checkToken(tok, "code example")
 			}
