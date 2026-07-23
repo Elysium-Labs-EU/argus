@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -57,6 +58,55 @@ func TestFetchIssue(t *testing.T) {
 	iss, err := f.FetchIssue(context.Background(), "o", "r", 42)
 	if err != nil || iss.Title != "Bug" || iss.Body != "it breaks" {
 		t.Fatalf("FetchIssue: %+v err=%v", iss, err)
+	}
+}
+
+func TestPRMerged(t *testing.T) {
+	merged := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if (PR{MergedAt: &merged}).Merged() != true {
+		t.Error("PR with a MergedAt should report Merged() true")
+	}
+	if (PR{}).Merged() != false {
+		t.Error("PR with no MergedAt should report Merged() false")
+	}
+}
+
+func TestGiteaFindPRFiltersClientSideByHeadRef(t *testing.T) {
+	hc := fakeHTTP(t, "https://codeberg.org/api/v1/repos/o/r/pulls?state=all", "token secret",
+		`[{"number":5,"html_url":"https://codeberg.org/o/r/pulls/5","state":"closed","head":{"ref":"other"}},
+		  {"number":7,"html_url":"https://codeberg.org/o/r/pulls/7","state":"closed","merged_at":"2026-01-01T00:00:00Z","head":{"ref":"feat-x"}}]`, 200)
+	f := New("codeberg.org", "secret", hc)
+	pr, found, err := f.FindPR(context.Background(), "o", "r", "feat-x")
+	if err != nil {
+		t.Fatalf("FindPR: %v", err)
+	}
+	if !found || pr.Number != 7 || !pr.Merged() {
+		t.Errorf("unexpected pr: %+v found=%v", pr, found)
+	}
+}
+
+func TestGiteaFindPRNotFound(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `[]`, 200)
+	f := New("codeberg.org", "secret", hc)
+	_, found, err := f.FindPR(context.Background(), "o", "r", "feat-x")
+	if err != nil {
+		t.Fatalf("FindPR: %v", err)
+	}
+	if found {
+		t.Error("want found=false for a branch with no PR")
+	}
+}
+
+func TestGitHubFindPRUsesHeadFilterAndTakesFirstResult(t *testing.T) {
+	hc := fakeHTTP(t, "head=o:feat-x", "Bearer ght",
+		`[{"number":3,"html_url":"https://github.com/o/r/pull/3","state":"open"}]`, 200)
+	f := New("github.com", "ght", hc)
+	pr, found, err := f.FindPR(context.Background(), "o", "r", "feat-x")
+	if err != nil || !found || pr.Number != 3 {
+		t.Fatalf("FindPR: %+v found=%v err=%v", pr, found, err)
+	}
+	if pr.Merged() {
+		t.Error("open PR should not report Merged()")
 	}
 }
 

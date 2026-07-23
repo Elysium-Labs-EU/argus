@@ -33,11 +33,12 @@ const (
 
 // skillDocCommands are the argus subcommands SKILL.md documents by name.
 var skillDocCommands = map[string]*cobra.Command{
-	"supervise":     superviseCmd,
-	"ship":          shipCmd,
-	"review":        reviewCmd,
-	"rebase":        rebaseCmd,
-	"system update": systemUpdateCmd,
+	"supervise":      superviseCmd,
+	"ship":           shipCmd,
+	"review":         reviewCmd,
+	"rebase":         rebaseCmd,
+	"system update":  systemUpdateCmd,
+	"worktree prune": worktreePruneCmd,
 }
 
 // flagSet returns cmd's full flag set exactly as `--help` renders it: its own
@@ -53,7 +54,7 @@ func flagSet(cmd *cobra.Command) map[string]*pflag.Flag {
 var (
 	flagTokenRe  = regexp.MustCompile(`--[a-zA-Z][a-zA-Z0-9-]*`)
 	flagValueRe  = regexp.MustCompile(`^(--[a-zA-Z][a-zA-Z0-9-]*)\s+(\S+)$`)
-	argusCmdRe   = regexp.MustCompile(`\bargus (supervise|ship|review|rebase|system update)\b`)
+	argusCmdRe   = regexp.MustCompile(`\bargus (supervise|ship|review|rebase|system update|worktree prune)\b`)
 	inlineCodeRe = regexp.MustCompile("`([^`\n]+)`")
 )
 

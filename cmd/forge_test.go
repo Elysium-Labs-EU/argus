@@ -15,8 +15,11 @@ import (
 // fakeForge is a Forge stub for tests: it returns canned issues and records the
 // PR it was asked to open.
 type fakeForge struct {
-	issues map[int]forge.Issue
-	opened *forge.PRRequest
+	findPRErr   error
+	issues      map[int]forge.Issue
+	opened      *forge.PRRequest
+	findPR      forge.PR
+	findPRFound bool
 }
 
 func (f *fakeForge) Host() string { return "fake" }
@@ -26,6 +29,9 @@ func (f *fakeForge) FetchIssue(_ context.Context, _, _ string, n int) (forge.Iss
 func (f *fakeForge) OpenPR(_ context.Context, req *forge.PRRequest) (forge.PR, error) {
 	f.opened = req
 	return forge.PR{Number: 99, HTMLURL: "https://fake/pull/99", State: "open"}, nil
+}
+func (f *fakeForge) FindPR(_ context.Context, _, _, _ string) (forge.PR, bool, error) {
+	return f.findPR, f.findPRFound, f.findPRErr
 }
 
 func TestIssuesToTasks(t *testing.T) {

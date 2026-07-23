@@ -82,6 +82,78 @@ func TestCommitAllExcludesControlPlane(t *testing.T) {
 	}
 }
 
+// TestRepoRootPlainRepoReturnsItsOwnAbsolutePath is the regression test for a
+// real bug argus worktree prune's --repo (pointed straight at a main repo,
+// unlike ship/rebase which only ever pass an already-linked worker worktree)
+// exposed: `git rev-parse --git-common-dir` answers with a bare ".git" for a
+// plain, non-linked repo — relative to worktree, not to argus's own cwd — and
+// filepath.Dir(".git") alone resolves that relative to argus's own process
+// cwd instead, silently pointing RepoRoot at a wrong, unrelated location.
+func TestRepoRootPlainRepoReturnsItsOwnAbsolutePath(t *testing.T) {
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "-C", wt, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	got, err := RepoRoot(context.Background(), wt)
+	if err != nil {
+		t.Fatalf("RepoRoot: %v", err)
+	}
+	wantAbs, err := filepath.Abs(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// t.TempDir() can return a path through a symlink (e.g. macOS /var ->
+	// /private/var); resolve both sides before comparing.
+	wantReal, err := filepath.EvalSymlinks(wantAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotReal, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("RepoRoot returned an unresolvable path %q: %v", got, err)
+	}
+	if gotReal != wantReal {
+		t.Errorf("RepoRoot(%s) = %s, want %s", wt, got, wt)
+	}
+}
+
+// TestRepoRootLinkedWorktreeReturnsMainRepo confirms the already-covered
+// production path (ship/rebase calling RepoRoot on a linked worker worktree)
+// still resolves to the main repo, not the linked worktree itself.
+func TestRepoRootLinkedWorktreeReturnsMainRepo(t *testing.T) {
+	main := t.TempDir()
+	run := func(args ...string) {
+		if out, err := exec.Command("git", append([]string{"-C", main}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	run("commit", "-q", "--allow-empty", "-m", "seed")
+	run("branch", "feat-x")
+
+	linked := filepath.Join(t.TempDir(), "feat-x")
+	run("worktree", "add", "-q", linked, "feat-x")
+
+	got, err := RepoRoot(context.Background(), linked)
+	if err != nil {
+		t.Fatalf("RepoRoot: %v", err)
+	}
+	wantReal, err := filepath.EvalSymlinks(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotReal, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("RepoRoot returned an unresolvable path %q: %v", got, err)
+	}
+	if gotReal != wantReal {
+		t.Errorf("RepoRoot(%s) = %s, want the main repo %s", linked, got, main)
+	}
+}
+
 func TestCommitAllControlPlaneOnlyIsNothingToCommit(t *testing.T) {
 	wt := t.TempDir()
 	run := func(args ...string) {

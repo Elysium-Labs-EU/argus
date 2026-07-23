@@ -85,10 +85,20 @@ func CurrentBranch(ctx context.Context, worktree string) (string, error) {
 // e.g. by `argus rebase`) requires --cwd to name the repo the linked
 // worktree belongs to, not the linked worktree's own path — passing the
 // worktree path itself is rejected (herdr error "linked_worktree_source").
+//
+// `git rev-parse --git-common-dir` returns an absolute path for a linked
+// worktree, but a bare ".git" (relative to worktree, not to argus's own cwd)
+// for a plain, non-linked repo — every caller before `argus worktree prune`
+// only ever passed an already-linked worker worktree, so that relative case
+// went unexercised until prune's --repo pointed straight at a main repo and
+// filepath.Dir(".git") silently resolved to argus's own process cwd instead.
 func RepoRoot(ctx context.Context, worktree string) (string, error) {
 	commonDir, err := git(ctx, worktree, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return "", err
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktree, commonDir)
 	}
 	return filepath.Dir(commonDir), nil
 }

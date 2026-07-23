@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // gitlab implements Forge for GitLab.com's REST v4 API. GitLab differs from the
@@ -45,6 +46,31 @@ func (g *gitlab) OpenPR(ctx context.Context, req *PRRequest) (PR, error) {
 		return PR{}, fmt.Errorf("decoding merge request response: %w", err)
 	}
 	return PR{HTMLURL: mr.WebURL, State: mr.State, Number: mr.IID}, nil
+}
+
+// FindPR looks up the most recent merge request for branch via GitLab's
+// source_branch filter, which (unlike Gitea's list endpoint) is supported
+// server-side.
+func (g *gitlab) FindPR(ctx context.Context, owner, repo, branch string) (PR, bool, error) {
+	reqURL := fmt.Sprintf("%s/projects/%s/merge_requests?state=all&source_branch=%s", g.base, projectID(owner, repo), url.QueryEscape(branch))
+	body, err := g.do(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return PR{}, false, err
+	}
+	var mrs []struct {
+		MergedAt *time.Time `json:"merged_at"`
+		WebURL   string     `json:"web_url"`
+		State    string     `json:"state"`
+		IID      int        `json:"iid"`
+	}
+	if err := json.Unmarshal(body, &mrs); err != nil {
+		return PR{}, false, fmt.Errorf("decoding merge request list: %w", err)
+	}
+	if len(mrs) == 0 {
+		return PR{}, false, nil
+	}
+	mr := mrs[0]
+	return PR{HTMLURL: mr.WebURL, State: mr.State, Number: mr.IID, MergedAt: mr.MergedAt}, true, nil
 }
 
 func (g *gitlab) FetchIssue(ctx context.Context, owner, repo string, number int) (Issue, error) {

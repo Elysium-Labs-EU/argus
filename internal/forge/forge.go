@@ -28,11 +28,22 @@ type PRRequest struct {
 	Base  string
 }
 
-// PR is the subset of a created pull request argus reports back.
+// PR is the subset of a pull/merge request argus reports back or reads to
+// check merge state. MergedAt is nil for an open or closed-without-merging
+// PR; GitHub, Gitea, and GitLab all expose this field under the same name, so
+// a caller never has to special-case which forge answered.
 type PR struct {
-	HTMLURL string `json:"html_url"`
-	State   string `json:"state"`
-	Number  int    `json:"number"`
+	MergedAt *time.Time `json:"merged_at"`
+	HTMLURL  string     `json:"html_url"`
+	State    string     `json:"state"`
+	Number   int        `json:"number"`
+}
+
+// Merged reports whether the PR has been merged. It is the single place that
+// knows MergedAt is the ground truth (not State, which is "closed" for both a
+// merge and an abandoned close).
+func (p PR) Merged() bool {
+	return p.MergedAt != nil
 }
 
 // Issue is the subset of an issue argus reads to build a worker brief.
@@ -46,6 +57,12 @@ type Issue struct {
 type Forge interface {
 	OpenPR(ctx context.Context, req *PRRequest) (PR, error)
 	FetchIssue(ctx context.Context, owner, repo string, number int) (Issue, error)
+	// FindPR looks up the most recent PR (any state) whose head is branch, for
+	// callers that know a worktree's branch but not its PR number — notably
+	// `argus worktree prune` clearing a worktree ship opened before it, or one
+	// from before this lookup existed. found is false (with no error) when no
+	// PR was ever opened for branch.
+	FindPR(ctx context.Context, owner, repo, branch string) (pr PR, found bool, err error)
 	Host() string
 }
 
@@ -108,6 +125,36 @@ func (r *rest) OpenPR(ctx context.Context, req *PRRequest) (PR, error) {
 		return PR{}, fmt.Errorf("decoding pull request response: %w", err)
 	}
 	return pr, nil
+}
+
+// FindPR lists PRs against branch's head and returns the most recent one.
+// GitHub's list endpoint supports filtering server-side via head=owner:branch;
+// Gitea's does not, so for that host the (typically short) list is filtered
+// client-side instead.
+func (r *rest) FindPR(ctx context.Context, owner, repo, branch string) (PR, bool, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls?state=all", r.base, owner, repo)
+	if r.host == "github.com" {
+		url += "&head=" + owner + ":" + branch
+	}
+	body, err := r.do(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return PR{}, false, err
+	}
+	var prs []struct {
+		Head struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+		PR
+	}
+	if err := json.Unmarshal(body, &prs); err != nil {
+		return PR{}, false, fmt.Errorf("decoding pull request list: %w", err)
+	}
+	for _, p := range prs {
+		if r.host == "github.com" || p.Head.Ref == branch {
+			return p.PR, true, nil
+		}
+	}
+	return PR{}, false, nil
 }
 
 func (r *rest) FetchIssue(ctx context.Context, owner, repo string, number int) (Issue, error) {
