@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,24 +52,107 @@ func TestReconcileMeasuresAndRecordsError(t *testing.T) {
 	}
 }
 
-func TestWatchReturnsWhenWorkerReachesTerminal(t *testing.T) {
+func TestJudgeEachReturnsWhenWorkerReachesTerminal(t *testing.T) {
 	wt := t.TempDir()
 	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Task: "a", Phase: protocol.PhaseAwaitingReview}); err != nil {
 		t.Fatalf("seeding status: %v", err)
 	}
-	cfg := &Config{Interval: 5 * time.Millisecond}
+	cfg := &Config{Interval: 5 * time.Millisecond, Base: "HEAD"}
 	states := []*workerState{{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}}}
 
 	done := make(chan struct{})
-	go func() { watch(context.Background(), cfg, states); close(done) }()
+	go func() { judgeEach(context.Background(), cfg, states); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("watch did not return after the worker reached a terminal phase")
+		t.Fatal("judgeEach did not return after the worker reached a terminal phase")
 	}
 	if !states[0].hasFile || states[0].status.Phase != protocol.PhaseAwaitingReview {
-		t.Errorf("watch did not record the terminal status: %+v", states[0].status)
+		t.Errorf("judgeEach did not record the terminal status: %+v", states[0].status)
 	}
+}
+
+// TestJudgeEachDoesNotBarrierOnSlowestWorker is the regression test for issue
+// #116: a fast worker's gate verdict must land as soon as IT reaches a
+// terminal phase, without waiting for a slower sibling still in progress.
+func TestJudgeEachDoesNotBarrierOnSlowestWorker(t *testing.T) {
+	fastWT := gitWorktreeWithDiff(t)
+	slowWT := t.TempDir()
+
+	if err := protocol.Write(protocol.StatusPath(fastWT), &protocol.Status{
+		Task: "fast", Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seeding fast status: %v", err)
+	}
+	// The slow worker's status file only appears after a delay well past when
+	// the fast worker's own gate verdict should already have landed — under
+	// the old full-batch barrier, the fast worker's verdict could not appear
+	// before this.
+	slowDone := make(chan struct{})
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_ = protocol.Write(protocol.StatusPath(slowWT), &protocol.Status{
+			Task: "slow", Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now(),
+		})
+		close(slowDone)
+	}()
+
+	buf := &syncBuffer{}
+	policy := DefaultReviewPolicy()
+	cfg := &Config{
+		Base:     "HEAD",
+		Interval: 5 * time.Millisecond,
+		Policy:   &policy,
+		Log:      eventlog.New(buf, "supervise", "r", nil),
+	}
+	states := []*workerState{
+		{plan: &WorkerPlan{Worker: Worker{Task: "fast", Worktree: fastWT}}},
+		{plan: &WorkerPlan{Worker: Worker{Task: "slow", Worktree: slowWT}}},
+	}
+
+	done := make(chan struct{})
+	go func() { judgeEach(context.Background(), cfg, states); close(done) }()
+
+	// Well before the slow worker's file appears, the fast worker should
+	// already have a verdict logged.
+	time.Sleep(60 * time.Millisecond)
+	if !strings.Contains(buf.String(), `"target":"fast"`) {
+		t.Fatalf("fast worker should have been gated before its slow sibling finished, log so far:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), `"target":"slow"`) {
+		t.Fatalf("slow worker should not have reported anything yet, log so far:\n%s", buf.String())
+	}
+
+	<-slowDone
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("judgeEach did not return once both workers reached a terminal phase")
+	}
+	if !strings.Contains(buf.String(), `"target":"slow"`) {
+		t.Errorf("slow worker should eventually be gated too, log so far:\n%s", buf.String())
+	}
+}
+
+// syncBuffer is a mutex-guarded bytes.Buffer: the eventlog.Logger writing from
+// several judgeEach goroutines is safe on its own (see eventlog.Logger's own
+// mutex), but a plain bytes.Buffer read concurrently with those writes is a
+// data race in the *test* observing it, not in the code under test.
+type syncBuffer struct {
+	buf bytes.Buffer
+	mu  sync.Mutex
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestWaitForStatusReadsTerminal(t *testing.T) {

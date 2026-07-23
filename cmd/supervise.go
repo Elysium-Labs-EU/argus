@@ -20,31 +20,32 @@ import (
 
 func newSuperviseCmd() *cobra.Command {
 	var (
-		panes         []string
-		branches      []string
-		tasks         []string
-		tasksFile     string
-		repo          string
-		base          string
-		launcher      string
-		sharedGlobs   []string
-		osGlobs       []string
-		reviewGlobs   []string
-		reviewModel   string
-		review        bool
-		maxDiffLines  int
-		interval      time.Duration
-		timeout       time.Duration
-		issues        []int
-		jiraIssues    []string
-		dryRun        bool
-		noCredProxy   bool
-		attach        bool
-		workspace     string
-		worktrees     []string
-		workerRuntime string
-		allow         []string
-		credentialEnv map[string]string
+		panes             []string
+		branches          []string
+		tasks             []string
+		tasksFile         string
+		repo              string
+		base              string
+		launcher          string
+		sharedGlobs       []string
+		osGlobs           []string
+		reviewGlobs       []string
+		reviewModel       string
+		review            bool
+		maxDiffLines      int
+		interval          time.Duration
+		timeout           time.Duration
+		reviewConcurrency int
+		issues            []int
+		jiraIssues        []string
+		dryRun            bool
+		noCredProxy       bool
+		attach            bool
+		workspace         string
+		worktrees         []string
+		workerRuntime     string
+		allow             []string
+		credentialEnv     map[string]string
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -102,7 +103,7 @@ each pane's directory in --panes mode).`,
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
 				base: base, launcher: launcher, workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
-				review: review, reviewModel: reviewModel,
+				review: review, reviewModel: reviewModel, reviewConcurrency: reviewConcurrency,
 				maxDiffLines: maxDiffLines, sharedGlobs: sharedGlobs, osGlobs: osGlobs, reviewGlobs: reviewGlobs,
 				allow: allow, credentialEnv: overrides,
 			})
@@ -126,6 +127,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&reviewGlobs, "always-review-glob", policyDefaults.AlwaysReviewGlobs, "review gate: behavior-critical path words that always escalate, even for a small clean diff")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
+	cmd.Flags().IntVar(&reviewConcurrency, "review-concurrency", 0, "max concurrent claude -p --review calls when the gate escalates several workers at once (0 = supervisor.defaultReviewConcurrency)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan and exit without creating worktrees or spawning workers")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front worker API traffic with the credential proxy; workers inherit the host's real ANTHROPIC_API_KEY")
 	cmd.Flags().BoolVar(&attach, "attach", false, "watch workers already running in their worktrees (no spawn); pair with --workspace or --worktrees")
@@ -142,22 +144,23 @@ each pane's directory in --panes mode).`,
 // RunE can pass them through without runSupervision growing a 15-argument
 // signature.
 type superviseOpts struct {
-	credentialEnv map[string]string
-	reviewModel   string
-	base          string
-	launcher      string
-	workerRuntime string
-	osGlobs       []string
-	sharedGlobs   []string
-	allow         []string
-	reviewGlobs   []string
-	interval      time.Duration
-	timeout       time.Duration
-	maxDiffLines  int
-	attach        bool
-	dryRun        bool
-	noCredProxy   bool
-	review        bool
+	credentialEnv     map[string]string
+	reviewModel       string
+	base              string
+	launcher          string
+	workerRuntime     string
+	osGlobs           []string
+	sharedGlobs       []string
+	allow             []string
+	reviewGlobs       []string
+	interval          time.Duration
+	timeout           time.Duration
+	maxDiffLines      int
+	reviewConcurrency int
+	attach            bool
+	dryRun            bool
+	noCredProxy       bool
+	review            bool
 }
 
 // runSupervision builds the *supervisor.Config for an already-resolved worker
@@ -176,18 +179,19 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 	defer closeLog()
 
 	cfg := &supervisor.Config{
-		Out:           cmd.OutOrStdout(),
-		Now:           time.Now,
-		Client:        client,
-		Log:           logger,
-		Base:          o.base,
-		Home:          home,
-		Launcher:      o.launcher,
-		ScrubEnv:      append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
-		Interval:      o.interval,
-		Timeout:       o.timeout,
-		WorkerRuntime: o.workerRuntime,
-		ExtraAllow:    o.allow,
+		Out:               cmd.OutOrStdout(),
+		Now:               time.Now,
+		Client:            client,
+		Log:               logger,
+		Base:              o.base,
+		Home:              home,
+		Launcher:          o.launcher,
+		ScrubEnv:          append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
+		Interval:          o.interval,
+		Timeout:           o.timeout,
+		ReviewConcurrency: o.reviewConcurrency,
+		WorkerRuntime:     o.workerRuntime,
+		ExtraAllow:        o.allow,
 		Policy: &supervisor.ReviewPolicy{
 			MaxDiffLines:      o.maxDiffLines,
 			SharedGlobs:       o.sharedGlobs,

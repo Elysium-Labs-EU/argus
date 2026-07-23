@@ -74,6 +74,12 @@ type Config struct {
 	ExtraAllow []string
 	Interval   time.Duration
 	Timeout    time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
+	// ReviewConcurrency bounds how many LLM --review calls run at once. 0 uses
+	// defaultReviewConcurrency. Gate checks (the deterministic, free/local half
+	// of judgment) are never bound by this — only the `claude -p` calls are,
+	// since those are the expensive, slow step a batch of escalations could
+	// otherwise pile up unbounded.
+	ReviewConcurrency int
 }
 
 // WorkerPlan is the fully-resolved intent for one worker: the concrete worktree
@@ -344,8 +350,8 @@ func envMap(env []string) map[string]string {
 
 // Run is the whole deterministic supervise loop. In dry-run it prints the plan
 // and makes no changes. Otherwise it enforces distinct worktrees, spawns each
-// worker, watches their status files until every one reaches a terminal phase or
-// ctx is canceled, then prints a metrics report.
+// worker, watches and judges each one's status independently until it reaches a
+// terminal phase or ctx is canceled, then prints a metrics report.
 func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error {
 	plans := BuildPlan(workers, cfg.ExtraAllow)
 
@@ -366,15 +372,56 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 }
 
 // superviseStates runs the observe→judge→report tail shared by a fresh spawn
-// (Run) and an attach to already-running workers (Attach): watch each worker's
-// typed status until a terminal phase, measure its real diff from git, gate or
-// escalate, and print the report. No terminal scrollback is read in any step.
+// (Run) and an attach to already-running workers (Attach): each worker is
+// watched, measured, and gated/reviewed independently the moment IT reaches a
+// terminal phase — not after the whole batch does (issue #116) — so a worker
+// that finishes early is judged early instead of waiting on its slowest
+// sibling. Only the final report is a full-batch barrier.
 func superviseStates(ctx context.Context, cfg *Config, states []*workerState) error {
-	watch(ctx, cfg, states)
-	reconcile(ctx, cfg, states)
-	reviewEscalations(ctx, cfg, states)
+	judgeEach(ctx, cfg, states)
 	renderReport(ctx, cfg, states)
 	return nil
+}
+
+// defaultReviewConcurrency bounds concurrent LLM --review calls when
+// cfg.ReviewConcurrency is unset (0).
+const defaultReviewConcurrency = 4
+
+// judgeEach drives one goroutine per worker through watch→reconcile→gate/review,
+// so N workers' judgments proceed independently instead of every worker
+// waiting for the batch's slowest one to reach a terminal phase before any of
+// them is gated (issue #116). reconcile and reviewEscalations are called with
+// a single-element slice per worker — their own batch-shaped loops are what
+// existing tests already exercise; running one per goroutine gets the same
+// per-worker checks without waiting on siblings.
+//
+// The LLM `--review` call inside reviewEscalations is the expensive, slow
+// step, so it alone is bounded by sem: a spike of simultaneous escalations
+// gates every worker immediately (free/local) but queues for a `claude -p`
+// slot rather than forking one subprocess per escalated worker at once.
+func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
+	n := cfg.ReviewConcurrency
+	if n <= 0 {
+		n = defaultReviewConcurrency
+	}
+	sem := make(chan struct{}, n)
+
+	var wg sync.WaitGroup
+	for _, st := range states {
+		wg.Add(1)
+		go func(st *workerState) {
+			defer wg.Done()
+			pollStatus(ctx, cfg.Interval, cfg.Timeout, cfg.Log, st)
+
+			one := []*workerState{st}
+			reconcile(ctx, cfg, one)
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			reviewEscalations(ctx, cfg, one)
+		}(st)
+	}
+	wg.Wait()
 }
 
 // Attach supervises workers that are already running in their worktrees: it
@@ -741,22 +788,10 @@ func resolveSpawnLine(ctx context.Context, cfg *Config, p *WorkerPlan, workerEnv
 	return line, nil
 }
 
-// watch polls every worker's status file until it reaches a terminal phase, its
-// deadline passes, or ctx is canceled. One goroutine per worker; a timer (not
-// time.After) drives the poll so we don't leak a timer per tick. The deadline is
-// what stops a hung or dead worker from blocking the whole run forever.
-func watch(ctx context.Context, cfg *Config, states []*workerState) {
-	var wg sync.WaitGroup
-	for _, st := range states {
-		wg.Add(1)
-		go func(st *workerState) {
-			defer wg.Done()
-			pollStatus(ctx, cfg.Interval, cfg.Timeout, cfg.Log, st)
-		}(st)
-	}
-	wg.Wait()
-}
-
+// pollStatus polls one worker's status file until it reaches a terminal phase,
+// its deadline passes, or ctx is canceled. A timer (not time.After) drives the
+// poll so we don't leak a timer per tick. The deadline is what stops a hung or
+// dead worker from blocking its caller forever.
 func pollStatus(ctx context.Context, interval, timeout time.Duration, log *eventlog.Logger, st *workerState) {
 	path := protocol.StatusPath(st.plan.Worktree)
 
