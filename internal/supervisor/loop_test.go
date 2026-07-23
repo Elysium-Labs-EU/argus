@@ -549,6 +549,46 @@ func TestReviewEscalationsHardReasonSurvivesReviewerApprove(t *testing.T) {
 	}
 }
 
+func TestReviewEscalationsThreadsPriorFindingsFromVerdict(t *testing.T) {
+	// argus issue #108: a prior request-changes verdict on this worktree must
+	// reach the next review's prompt, so the reviewer re-checks the specific
+	// defect instead of a fresh holistic pass that can miss it again.
+	wt := gitWorktreeWithDiff(t)
+	if err := protocol.WriteApproval(wt, &protocol.Approval{
+		Approved: false,
+		Source:   "review",
+		Summary:  "found a defect",
+		Reasons:  []string{"--dry-run mutates lifecycle.json on disk"},
+	}); err != nil {
+		t.Fatalf("seeding prior verdict: %v", err)
+	}
+
+	var gotPrompt string
+	runner := func(_ context.Context, _, stdin string, _ ...string) ([]byte, error) {
+		gotPrompt = stdin
+		return []byte(`{"decision":"approve","summary":"ok","findings":[]}`), nil
+	}
+
+	escalated := &workerState{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "bad", Branch: "b", Worktree: wt}},
+		status: protocol.Status{
+			Phase: protocol.PhaseAwaitingReview,
+			Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
+		},
+	}
+	policy := DefaultReviewPolicy()
+	cfg := &Config{Base: "HEAD", Policy: &policy, Reviewer: NewReviewerWithRunner(runner)}
+	reviewEscalations(context.Background(), cfg, []*workerState{escalated})
+
+	if !strings.Contains(gotPrompt, "--dry-run mutates lifecycle.json on disk") {
+		t.Errorf("review prompt did not carry the prior verdict's finding:\n%s", gotPrompt)
+	}
+	if !strings.Contains(strings.ToLower(gotPrompt), "prior review") {
+		t.Errorf("review prompt did not instruct re-checking the prior finding:\n%s", gotPrompt)
+	}
+}
+
 func TestReviewEscalationsWithoutReviewerJustGates(t *testing.T) {
 	// No reviewer configured: an escalated worker is surfaced (no verdict, no
 	// error), never sent to an LLM.

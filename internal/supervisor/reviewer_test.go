@@ -126,6 +126,27 @@ func TestReviewPromptVerifiesInCheckoutWhenWorktreeSet(t *testing.T) {
 	}
 }
 
+func TestReviewPromptCarriesPriorFindings(t *testing.T) {
+	with := reviewPrompt(&ReviewRequest{
+		Task:          "t",
+		Diff:          "d",
+		PriorFindings: []string{"--dry-run mutates lifecycle.json on disk"},
+	})
+	for _, want := range []string{
+		"prior review",
+		"--dry-run mutates lifecycle.json on disk",
+		"confirmed every",
+	} {
+		if !strings.Contains(strings.ToLower(with), strings.ToLower(want)) {
+			t.Errorf("prompt missing %q:\n%s", want, with)
+		}
+	}
+	without := reviewPrompt(&ReviewRequest{Task: "t", Diff: "d"})
+	if strings.Contains(strings.ToLower(without), "prior review") {
+		t.Errorf("no-PriorFindings prompt should not mention a prior review")
+	}
+}
+
 func TestNewCLIReviewerAndWithLog(t *testing.T) {
 	r := NewCLIReviewer("sonnet")
 	if r.model != "sonnet" || r.run == nil {

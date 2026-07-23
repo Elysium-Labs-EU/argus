@@ -25,6 +25,12 @@ type ReviewRequest struct {
 	Diff        string
 	Reasons     []string
 	HardReasons []string
+	// PriorFindings carries a previous request-changes verdict's Reasons for this
+	// same worktree, when one exists (see protocol.LoadApproval). A fresh review
+	// otherwise has no memory of what an earlier round already flagged, so a
+	// still-present defect can slip through a review that only judges the diff
+	// holistically (argus issue #108).
+	PriorFindings []string
 }
 
 // ReviewResult is a reviewer's verdict. Decision is one of "approve",
@@ -170,6 +176,15 @@ func reviewPrompt(req *ReviewRequest) string {
 		}
 		b.WriteString("Still give your honest judgment on the code itself — \"approve\" here means\n")
 		b.WriteString("only \"the code looks correct\"; it will be recorded as unresolved regardless.\n")
+	}
+	if len(req.PriorFindings) > 0 {
+		b.WriteString("\nA prior review of this SAME worktree already flagged these defects and\n")
+		b.WriteString("requested changes. Before judging anything else, verify each one directly\n")
+		b.WriteString("against the current files — do not approve until you have confirmed every\n")
+		b.WriteString("item below is actually resolved in the code, not just addressed elsewhere:\n")
+		for _, f := range req.PriorFindings {
+			fmt.Fprintf(&b, "  - %s\n", f)
+		}
 	}
 	b.WriteString("\nDiff:\n```diff\n")
 	b.WriteString(req.Diff)
