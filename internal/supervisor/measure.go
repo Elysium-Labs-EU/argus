@@ -31,7 +31,7 @@ func MeasureDiff(ctx context.Context, worktree, base string) (protocol.DiffStat,
 	if err := cmd.Run(); err != nil {
 		return protocol.DiffStat{}, nil, fmt.Errorf("measuring diff against %s: %w", base, err)
 	}
-	stat, files, err := parseNumstat(out.String())
+	stat, files, err := parseNumstat(dropControlPlaneNumstat(out.String()))
 	if err != nil {
 		return protocol.DiffStat{}, nil, err
 	}
@@ -62,12 +62,30 @@ func untrackedFiles(ctx context.Context, worktree string) ([]string, error) {
 	var files []string
 	for line := range strings.SplitSeq(out.String(), "\n") {
 		f := strings.TrimSpace(line)
-		if f == "" || strings.HasPrefix(f, ".claude/argus/") || f == ".claude/settings.local.json" {
+		if f == "" || isControlPlanePath(f) {
 			continue
 		}
 		files = append(files, f)
 	}
 	return files, nil
+}
+
+// dropControlPlaneNumstat removes numstat lines for control-plane paths (the
+// same ones ship unstages before opening a PR, isControlPlanePath in
+// prune.go) from raw `git diff --numstat` output, before it reaches
+// parseNumstat. A pre-existing or in-session edit to .claude/argus/status.json
+// is a normal tracked change like any other, so git diff --numstat reports it
+// unless filtered here — unlike untracked files, which git already omits.
+func dropControlPlaneNumstat(out string) string {
+	var kept []string
+	for line := range strings.SplitSeq(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && isControlPlanePath(fields[2]) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // countLines returns the number of lines in a file, best-effort (0 if unreadable

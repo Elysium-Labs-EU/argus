@@ -82,6 +82,52 @@ func TestMeasureDiffCountsUntrackedFiles(t *testing.T) {
 	}
 }
 
+// status.json changes on every normal work session, and a repo that never
+// gitignored .claude can carry a tracked copy of it forward from an earlier
+// branch — either way it must not inflate the measured diff, since ship
+// always drops it before opening the PR.
+func TestMeasureDiffExcludesControlPlaneFiles(t *testing.T) {
+	wt := gitWorktreeWithDiff(t) // has a tracked edit to f.go (+2) vs HEAD
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	// Committing this add on its own, rather than folding it into f.go's
+	// uncommitted edit above, puts status.json in the baseline itself — proving
+	// the exclude holds for a tracked diff against HEAD, not only for an
+	// untracked file git diff would already miss.
+	statusPath := filepath.Join(wt, ".claude", "argus", "status.json")
+	if err := os.MkdirAll(filepath.Dir(statusPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statusPath, []byte(`{"phase":"working"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".claude/argus/status.json")
+	run("commit", "-q", "-m", "pre-existing control-plane baggage")
+	if err := os.WriteFile(statusPath, []byte(strings.Repeat(`{"phase":"awaiting_review"}`+"\n", 20)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	for _, f := range files {
+		if strings.HasPrefix(f, ".claude/argus/") {
+			t.Errorf("measured files must not include control-plane path, got %v", files)
+		}
+	}
+	if ds.Insertions >= 20 {
+		t.Errorf("control-plane edit inflated measured insertions: %+v", ds)
+	}
+	if ds.Files != 1 {
+		t.Errorf("expected only the real f.go edit to be measured, got %+v files=%v", ds, files)
+	}
+}
+
 func TestGateEscalatesWhenWorkerUnderReportsDiff(t *testing.T) {
 	wt := bigGitWorktree(t, "cmd/root.go", 50)
 	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
