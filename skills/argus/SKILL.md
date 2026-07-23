@@ -44,13 +44,19 @@ If `argus` isn't on PATH, fall back to [[supervise-agents]] and say so.
 
 These are enforced in code, not conventions the worker is merely asked to follow:
 
-- **Diff is measured, not trusted — three checks a worker cannot talk past.**
-  The gate always computes the real `git diff` itself and cross-checks it against
-  `status.json`, regardless of what the worker claims:
+- **Diff is measured, not trusted — three checks a worker cannot talk past, and
+  none of the three is waivable by `--review`.** The gate always computes the
+  real `git diff` itself and cross-checks it against `status.json`, regardless
+  of what the worker claims. All three land in `Verdict.HardReasons`
+  (`internal/supervisor/review.go`): even a `--review` verdict of "approve" on
+  one of these is recorded as *not approved* (`reviewEscalations` in
+  `internal/supervisor/loop.go` overrides it) — a fix for issue #105, where a
+  real under-report ("claimed 215 lines, git measured 461") once got waved
+  through anyway because the escalation was only a factor in the reviewer's
+  holistic judgment, not a hard stop.
   1. An unmeasurable diff escalates.
   2. A material under-report (worker's claimed size vs. git's measured size)
-     escalates. *(Caveat below on where this still leaks once `--review` is in
-     the loop.)*
+     escalates.
   3. **Zero measured files changed despite a claimed terminal phase
      (`awaiting_review`/`done`) escalates** — `internal/supervisor/review.go:129-133`,
      added by PR #17 closing issue #15: a headless (non-herdr) `supervise` spawn let
@@ -101,21 +107,13 @@ These are enforced in code, not conventions the worker is merely asked to follow
   3. Get a fresh, *persisted* verdict via `--attach` (see section 4) — never via a
      standalone `argus review`.
   4. Even after that, the *review* re-check itself doesn't automatically re-verify
-     that a specific prior finding was actually fixed — see the under-report
-     caveat below for the same "review is a fresh holistic pass, not a checklist"
-     pattern. Re-read the diff yourself at the specific location a prior verdict
-     flagged, don't assume a new approve means that exact finding is resolved.
+     that a specific prior finding was actually fixed — it's a fresh holistic
+     pass each time, not a checklist against prior findings. Re-read the diff
+     yourself at the specific location a prior verdict flagged, don't assume a
+     new approve means that exact finding is resolved.
 
   `argus rebase` is not a substitute here — it is scoped specifically to
   sibling-PR-merge-conflict handoff, not general rework.
-- **Diff under-report can still slip through once `--review` is in the loop
-  (tracked as argus issue #105, not yet fixed).** Observed directly: the gate
-  escalated for two reasons at once ("diff 461 lines exceeds max 400" *and*
-  "worker under-reported diff: claimed 215 lines, git measured 461"), and
-  `--review` still came back with an approve. The escalation itself is reliable;
-  the LLM reviewer's judgment on an escalated under-report is not. Read the diff
-  yourself on any under-report escalation — don't let `--review`'s verdict be the
-  last word.
 - **`argus worktree prune` does not exist yet.** A cleanup command for detecting
   merged PRs and safely removing stale worktrees is in progress but not shipped —
   it has already been through one request-changes round (dead lifecycle-wiring
@@ -252,12 +250,12 @@ content-based triggers.
 
 Argus always measures the diff from git rather than trusting `status.json` — an
 unmeasurable diff, a material under-report, or zero files changed despite a claimed
-terminal phase always escalates. **What is not guaranteed:** once `--review` picks up
-that escalation, its verdict can still be an approve even on a confirmed under-report
-(argus issue #105, open), and a re-review after rework doesn't automatically re-check
-whether a *specific* prior finding was actually addressed (it's a fresh holistic pass
-each time). Escalation is reliable; the automated judgment on it is not always the
-last word — read the diff yourself in either case:
+terminal phase always escalates, and `--review` cannot approve past any of the
+three (issue #105): a "approve" verdict on a hard reason is still recorded as
+not-approved. **What is not guaranteed:** a re-review after rework doesn't
+automatically re-check whether a *specific* prior finding was actually addressed
+(it's a fresh holistic pass each time). Read the diff yourself regardless — it's
+still the reviewer's job to judge the code itself, not just clear the hard checks:
 
 ```bash
 git -C <worktree> diff origin/main
@@ -399,9 +397,10 @@ binary (checksum-only, no signature verification yet).
   symptom, but the spawn-side root cause isn't fixed — verify with `git diff`
   yourself if you ever must run headless.
 - Don't approve a ship off a worker's summary — argus gates on the measured diff; you
-  read it too. This still applies even when `--review` approved an under-report case
-  (issue #105), and even after a rework re-review (it doesn't re-check prior findings
-  specifically).
+  read it too. A hard reason (unmeasurable diff, material under-report, zero files
+  changed) can no longer be waived by `--review` (issue #105), but that doesn't
+  make the reviewer's judgment on the code itself infallible, and a rework
+  re-review still doesn't re-check prior findings specifically.
 - Don't treat a standalone `argus review` verdict as something `ship` will see — it
   isn't persisted. Use `supervise --attach --review` instead, then confirm with
   `ship --dry-run`.

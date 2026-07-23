@@ -10,7 +10,7 @@ The point is not just to coordinate. argus is a verifier. The gate checks the re
 
 * **Coordinator out of the LLM.** Discovering panes, enforcing one worktree per worker, spawning workers, and polling their state are plain code. Tokens are spent on judgment, not bookkeeping.
 * **Typed status, not scrollback.** Each worker writes a single `status.json` after every phase; argus decodes that struct instead of parsing terminal output that a real agent would reflow or overwrite.
-* **The gate verifies against git.** A worker's self-report only auto-approves where it matches the measured diff. An unmeasurable or under-reported diff escalates instead of sliding through.
+* **The gate verifies against git.** A worker's self-report only auto-approves where it matches the measured diff. An unmeasurable or under-reported diff escalates instead of sliding through — and no `--review` verdict can waive that escalation back to approved.
 * **Verdict-gated shipping.** `ship` opens a PR only when a prior gate or review recorded an approving verdict, so a request-changes actually blocks the PR rather than being advisory.
 * **Clean PRs.** argus unstages its own control-plane files before committing, so `.claude/argus` and scoped permission files never reach the pull request.
 * **A run log you can query.** Every action lands in a typed event log under `~/.argus/runs`; `argus stats` aggregates it into escalation rate, review parse-fail rate, and tokens per task.
@@ -139,6 +139,8 @@ Three of those checks the worker cannot talk its way past, because argus verifie
 * If argus cannot measure the diff, the self-report is unverifiable and the change escalates.
 * If the measured diff materially exceeds what the worker claimed, argus treats it as an under-report and escalates.
 * If the worker's session transcript has no real `TodoWrite`/`TaskCreate` tool call, a `planning` report's `plan` field is an unverified claim and the change escalates. The same evidence also gates the `planning` -> `working` move itself: that transition is rejected outright if the planning report on file never carried a non-empty `plan` array.
+
+The unmeasurable-diff and under-report checks (plus a zero-measured-files check for a claimed terminal phase) are not just escalations — they are hard reasons a `--review` verdict cannot waive. Even if the LLM reviewer comes back "approve", argus still records the change as not approved when one of these fired, because the discrepancy is evidence `status.json` can't be trusted for that change, not a call for the reviewer's holistic judgment.
 
 Tune the gate with `--max-diff-lines`, `--shared-glob`, and `--os-glob` on `supervise`.
 
