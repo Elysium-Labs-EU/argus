@@ -635,7 +635,7 @@ func TestReworkRoundNotBlockedByStaleCumulativeUnderReport(t *testing.T) {
 		status: protocol.Status{
 			Phase:    protocol.PhaseAwaitingReview,
 			DiffStat: protocol.DiffStat{Files: 1, Insertions: 500},
-			Tests:    []protocol.TestRun{{Cmd: "make ci", Result: protocol.ResultPass}},
+			Tests:    []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}}, // genuinely re-run by VerifyTests (see reconcile)
 		},
 	}
 	reconcile(context.Background(), cfg, []*workerState{round1})
@@ -658,7 +658,7 @@ func TestReworkRoundNotBlockedByStaleCumulativeUnderReport(t *testing.T) {
 		status: protocol.Status{
 			Phase:    protocol.PhaseAwaitingReview,
 			DiffStat: protocol.DiffStat{Files: 1, Insertions: 16},
-			Tests:    []protocol.TestRun{{Cmd: "make ci", Result: protocol.ResultPass}},
+			Tests:    []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}}, // genuinely re-run by VerifyTests (see reconcile)
 		},
 	}
 	reconcile(context.Background(), cfg, []*workerState{round2})
