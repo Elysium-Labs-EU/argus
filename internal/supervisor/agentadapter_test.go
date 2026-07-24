@@ -52,6 +52,21 @@ func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 	}
 }
 
+func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
+	wt := "/repo/.claude/worktrees/feat-x"
+	settings := settingsFor(wt, nil, nil)
+
+	want := []string{
+		"Edit(" + wt + "/.claude/argus/**)",
+		"Write(" + wt + "/.claude/argus/**)",
+	}
+	for _, entry := range want {
+		if !slices.Contains(settings.Permissions.Deny, entry) {
+			t.Errorf("deny list missing %q; got %v", entry, settings.Permissions.Deny)
+		}
+	}
+}
+
 func TestClaudeCodeAdapterPlanEvidenceDelegates(t *testing.T) {
 	home := t.TempDir()
 	wt := t.TempDir()
