@@ -124,6 +124,14 @@ func settingsFor(worktree string, repoAllow, extraAllow []string) permissionSett
 		"Bash(git reset --hard*)",
 		"Bash(trash *)",
 		"Bash(sudo *)",
+		// .claude/argus/ holds status.json/verdict.json/lifecycle.json —
+		// argus's own control plane, mutated only by its in-process writers
+		// and by `argus worker report` (a Bash subprocess this deny does not
+		// touch). Without this, a worker's Edit/Write tool can hand-edit
+		// status.json straight to awaiting_review or write an approving
+		// verdict.json, skipping IsLegalTransition entirely.
+		"Edit(" + worktree + "/.claude/argus/**)",
+		"Write(" + worktree + "/.claude/argus/**)",
 	}
 	for _, p := range ownSettings {
 		deny = append(deny, "Edit("+p+")", "Write("+p+")")
