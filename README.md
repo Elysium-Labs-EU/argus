@@ -64,6 +64,16 @@ Cleanup itself (`CleanWorktree`) is a recoverable relocation, never a raw `rm`: 
 
 Run it with `argus worktree prune --branch <name>` for one worktree, or `--merged` to sweep every worktree under the repo; `--dry-run` prints the plan (which worktrees, which check failed or passed) without moving or deleting anything.
 
+## Repo config: .argus/config.yml
+
+A repo can commit its own `.argus/config.yml` (see `internal/repoconfig`) instead of repeating `--base`/`--allow`/brief boilerplate on every `supervise` invocation. All three keys are optional:
+
+* `base_branch` — the branch `supervise`/`rebase`/`ship` diff and PR against, when `--base` isn't passed explicitly.
+* `allow` — extra Bash permission entries appended to every worker's scoped allowlist (on top of argus's own toolchain-neutral defaults).
+* `brief_note` — free text appended verbatim to the end of every generated worker brief, e.g. a pointer to the repo's own AGENTS.md.
+
+Run `argus init` to generate a first draft: it peeks for `Taskfile.yml`, `Makefile`, `package.json`, or `go.mod` (first match wins) to suggest values, then prompts to confirm or edit each before writing the file. argus itself assigns no other meaning to this file and has no built-in opinion on any repo's toolchain — a wrong guess is just a YAML edit, not a bug.
+
 ## Requirements
 
 * Go 1.26 or newer, to build from source.
@@ -155,6 +165,7 @@ argus ship --worktree /path/to/project-feat-retry --issue 42
 
 | Command | Description |
 |---------|-------------|
+| `argus init` | Write `.argus/config.yml` for this repo, prefilled from a toolchain guess (see [Repo config](#repo-config-argusconfigyml)) |
 | `argus supervise` | Discover or open panes, spawn workers in worktrees, gate their diffs, and watch each through to review |
 | `argus supervise --review` | On a gate escalation, run a headless `claude -p` review instead of only surfacing the decision |
 | `argus supervise --dry-run` | Print the plan and exit without creating worktrees or spawning workers |
@@ -168,6 +179,7 @@ argus ship --worktree /path/to/project-feat-retry --issue 42
 | `argus worktree prune --branch <name>` \| `--merged` | Clean up a worktree whose PR has merged (or sweep every worktree under the repo), gated on merge status plus no uncommitted changes, stash entries, or unpushed commits; `--dry-run` prints the plan without changing anything |
 | `argus stats` | Aggregate the run logs under `~/.argus/runs` into escalation rate, review parse-fail rate, and tokens per task |
 | `argus config set credential.<name> <ENV_VAR>` | Persist which env var carries a credential (a forge host or agent-key name) to `~/.argus/config.toml`, so `--credential-env` doesn't need repeating every invocation |
+| `argus config check` | Check (and with `--write`, add) the Bash allowlist entry the calling agent needs so `argus` itself doesn't prompt for approval on every invocation |
 
 Pass `--debug` on any command to tee the typed event log to stderr as it is written; the log is always persisted under `~/.argus/runs` regardless.
 
