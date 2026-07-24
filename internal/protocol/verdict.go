@@ -19,13 +19,19 @@ type Approval struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Source    string    `json:"source"`
 	Summary   string    `json:"summary"`
-	Reasons   []string  `json:"reasons,omitempty"`
-	Approved  bool      `json:"approved"`
+	// ContentHash binds this verdict to the exact worktree content that was
+	// measured at approval time — a hash over every touched file's bytes,
+	// not just their line counts. ship recomputes it just before committing
+	// and refuses to ship if the worktree no longer matches, so an edit that
+	// lands after approval can't ride an old verdict that never saw it.
+	ContentHash string   `json:"content_hash"`
+	Reasons     []string `json:"reasons,omitempty"`
 	// MeasuredDiff is argus's own ground-truth diff size at the moment this
 	// verdict was recorded. A later round subtracts it from a fresh
 	// measurement so the under-report check judges only what changed since
 	// this verdict, not a change size that already cleared review once.
 	MeasuredDiff DiffStat `json:"measured_diff"`
+	Approved     bool     `json:"approved"`
 }
 
 // VerdictPath is where a worker's Approval lives inside its worktree. It sits

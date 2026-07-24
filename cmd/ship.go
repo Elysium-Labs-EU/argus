@@ -136,7 +136,7 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	if err != nil {
 		return err
 	}
-	if verr := checkApproved(a.worktree, a.force); verr != nil {
+	if verr := checkApproved(ctx, a.worktree, "origin/"+a.base, a.force); verr != nil {
 		return verr
 	}
 	host, owner, name, err := resolveRepo(ctx, a.repo, a.worktree)
@@ -273,8 +273,12 @@ func warnJiraPostShip(out io.Writer, logger *eventlog.Logger, key string, err er
 // checkApproved refuses to ship a worktree that argus never cleared. supervise
 // records a verdict.json per worker; ship enforces it so a gate escalation or a
 // reviewer's request-changes actually blocks the PR instead of being advisory.
-// --force overrides for the human who has decided to ship anyway.
-func checkApproved(worktree string, force bool) error {
+// It also refuses a stale verdict: nothing stops a worker's session (or plain
+// continued activity) from touching the worktree again after approval, so an
+// approved verdict only counts if the content it was measured against is
+// still what's on disk right now. --force overrides both checks for the
+// human who has decided to ship anyway.
+func checkApproved(ctx context.Context, worktree, base string, force bool) error {
 	if force {
 		return nil
 	}
@@ -292,6 +296,20 @@ func checkApproved(worktree string, force bool) error {
 		return &ui.UserError{
 			Err:  fmt.Errorf("argus did not approve this change (%s): %s", approval.Source, approval.Summary),
 			Hint: "address the findings and re-review, or pass --force to override",
+		}
+	}
+	_, files, err := supervisor.MeasureDiff(ctx, worktree, base)
+	if err != nil {
+		return fmt.Errorf("re-measuring worktree before ship: %w", err)
+	}
+	hash, err := supervisor.ContentHash(worktree, files)
+	if err != nil {
+		return fmt.Errorf("hashing worktree content before ship: %w", err)
+	}
+	if hash != approval.ContentHash {
+		return &ui.UserError{
+			Err:  fmt.Errorf("worktree content has changed since argus approved this change"),
+			Hint: "re-run `argus supervise --review` (or `argus review`) to re-verify the current diff, or pass --force to ship anyway",
 		}
 	}
 	return nil

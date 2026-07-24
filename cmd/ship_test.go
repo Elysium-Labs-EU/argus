@@ -15,6 +15,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
+	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 )
 
 func TestPrTitleForAndClosesLine(t *testing.T) {
@@ -60,7 +61,7 @@ func TestResolveRepoDetectsHostAndOverride(t *testing.T) {
 
 func TestCheckApprovedRefusesWithoutVerdict(t *testing.T) {
 	// No verdict.json at all: ship must refuse unless forced.
-	if err := checkApproved(t.TempDir(), false); err == nil {
+	if err := checkApproved(context.Background(), t.TempDir(), "HEAD", false); err == nil {
 		t.Fatal("want error shipping a worktree argus never cleared")
 	}
 }
@@ -70,24 +71,51 @@ func TestCheckApprovedRefusesNotApproved(t *testing.T) {
 	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: false, Source: "review", Summary: "missing UPDATE path"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkApproved(wt, false); err == nil {
+	if err := checkApproved(context.Background(), wt, "HEAD", false); err == nil {
 		t.Fatal("want error shipping a change argus did not approve")
 	}
 }
 
 func TestCheckApprovedAllowsApproved(t *testing.T) {
-	wt := t.TempDir()
-	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: true, Source: "gate"}); err != nil {
+	wt := gitRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkApproved(wt, false); err != nil {
+	_, files, err := supervisor.MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	hash, err := supervisor.ContentHash(wt, files)
+	if err != nil {
+		t.Fatalf("ContentHash: %v", err)
+	}
+	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: true, Source: "gate", ContentHash: hash}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproved(context.Background(), wt, "HEAD", false); err != nil {
 		t.Fatalf("approved change should ship: %v", err)
+	}
+}
+
+func TestCheckApprovedRefusesWhenWorktreeChangedSinceApproval(t *testing.T) {
+	wt := gitRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: true, Source: "gate", ContentHash: "stale-hash-from-a-smaller-diff"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproved(context.Background(), wt, "HEAD", false); err == nil {
+		t.Fatal("want error shipping a worktree that changed since the verdict was recorded")
+	}
+	if err := checkApproved(context.Background(), wt, "HEAD", true); err != nil {
+		t.Fatalf("--force should bypass the content-hash check: %v", err)
 	}
 }
 
 func TestCheckApprovedForceBypassesEverything(t *testing.T) {
 	// No verdict, but --force overrides.
-	if err := checkApproved(t.TempDir(), true); err != nil {
+	if err := checkApproved(context.Background(), t.TempDir(), "HEAD", true); err != nil {
 		t.Fatalf("--force should bypass the verdict check: %v", err)
 	}
 }

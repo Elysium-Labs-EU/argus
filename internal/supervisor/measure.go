@@ -4,10 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -47,6 +52,28 @@ func MeasureDiff(ctx context.Context, worktree, base string) (protocol.DiffStat,
 		files = append(files, rel)
 	}
 	return stat, files, nil
+}
+
+// ContentHash returns a deterministic digest of files' current on-disk bytes
+// under worktree, keyed by path. Callers pass MeasureDiff's own file list so
+// the hash is bound to the same set the gate already measured, rather than
+// re-deriving "what changed" a second, potentially divergent way. A verdict
+// recorded against this hash catches an edit landing after approval even
+// when it happens to leave the diff's line counts unchanged (e.g. content
+// swapped for other content of the same size).
+func ContentHash(worktree string, files []string) (string, error) {
+	sorted := append([]string(nil), files...)
+	sort.Strings(sorted)
+	h := sha256.New()
+	for _, rel := range sorted {
+		data, err := os.ReadFile(filepath.Join(worktree, rel)) //nolint:gosec // rel comes from git's own file list, worktree is argus-derived
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("hashing %s: %w", rel, err)
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", rel, len(data)) //nolint:errcheck // hash.Hash.Write never returns an error
+		h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // untrackedFiles lists the worktree's untracked, non-ignored files — the ones
