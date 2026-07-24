@@ -21,6 +21,11 @@ type Approval struct {
 	Summary   string    `json:"summary"`
 	Reasons   []string  `json:"reasons,omitempty"`
 	Approved  bool      `json:"approved"`
+	// MeasuredDiff is argus's own ground-truth diff size at the moment this
+	// verdict was recorded. A later round subtracts it from a fresh
+	// measurement so the under-report check judges only what changed since
+	// this verdict, not a change size that already cleared review once.
+	MeasuredDiff DiffStat `json:"measured_diff"`
 }
 
 // VerdictPath is where a worker's Approval lives inside its worktree. It sits
