@@ -32,6 +32,7 @@ func renderPlan(out io.Writer, base, launcher, workerRuntime string, scrubEnv []
 		}
 		_, _ = fmt.Fprintf(out, "%s %s\n", ui.TextBold.Render("•"), ui.TextBold.Render(p.Task))
 		_, _ = fmt.Fprintf(out, "  branch:   %s\n", p.Branch)
+		_, _ = fmt.Fprintf(out, "  label:    %s\n", p.Label)
 		_, _ = fmt.Fprintf(out, "  worktree: %s\n", p.Worktree)
 		_, _ = fmt.Fprintf(out, "  pane:     %s\n", pane)
 		spawn := SpawnCommand(p.Worktree, launcher, scrubEnv, nil)

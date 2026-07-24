@@ -26,10 +26,14 @@ import (
 
 // Worker is one supervised task. PaneID, when set, names an existing pane to run
 // the worker in; when empty, argus splits a new pane. Worktree, when empty, is
-// derived from RepoRoot and Branch.
+// derived from RepoRoot and Branch. Label, when empty, is derived by BuildPlan
+// from Task (falling back to Branch) — it is the only string herdr shows for
+// this worker's workspace in its own UI, and a caller may want it distinct from
+// the (often slugged, sometimes truncated) Branch.
 type Worker struct {
 	Task     string
 	Branch   string
+	Label    string
 	RepoRoot string
 	Worktree string
 	PaneID   string
@@ -103,6 +107,20 @@ func BuildPlan(workers []Worker, extraAllow []string) []WorkerPlan {
 		w := workers[i]
 		if w.Worktree == "" {
 			w.Worktree = filepath.Join(w.RepoRoot, ".claude", "worktrees", w.Branch)
+		}
+		if w.Label == "" {
+			// Fold in the task text so the herdr-visible label carries actual
+			// information about what the worker is doing, not just its (often
+			// slugged) branch name — taskLabel is the same short identifier
+			// already used for run-log/eventlog entries, so a worker's label
+			// matches what an operator sees for it elsewhere. Task is only
+			// ever "" for a hand-built Worker (e.g. in tests); real callers
+			// (buildWorkers/attachWorkers) always set it, so this fallback is
+			// the true no-context case.
+			w.Label = taskLabel(w.Task)
+			if w.Label == "" {
+				w.Label = w.Branch
+			}
 		}
 		plans[i] = WorkerPlan{
 			Worker:   w,
@@ -730,7 +748,7 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 		Branch: p.Branch,
 		Base:   cfg.Base,
 		Path:   p.Worktree,
-		Label:  p.Branch,
+		Label:  p.Label,
 	})
 	if err != nil {
 		return herdr.Worktree{}, fmt.Errorf("creating worktree for %s: %w", p.Task, err)

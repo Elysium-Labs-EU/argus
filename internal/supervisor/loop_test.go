@@ -104,6 +104,38 @@ func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 	}
 }
 
+func TestBuildPlanLabelExplicitWins(t *testing.T) {
+	plans := BuildPlan([]Worker{
+		{Task: "eos#42", Branch: "feat-x", Label: "my-custom-label", RepoRoot: "/repo-a"},
+	}, nil)
+	if got := plans[0].Label; got != "my-custom-label" {
+		t.Errorf("an explicit Label should win over any derived default; got %q", got)
+	}
+}
+
+func TestBuildPlanLabelDefaultsFromTask(t *testing.T) {
+	// A worker whose branch is slugged/truncated should still get a
+	// human-readable label — folding in the task text is the whole point of
+	// issue #140 (argus-worker-N carried zero information).
+	plans := BuildPlan([]Worker{
+		{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: "/repo-a"},
+	}, nil)
+	if got := plans[0].Label; got != "fix bug in parser" {
+		t.Errorf("label should derive from task text; got %q", got)
+	}
+}
+
+func TestBuildPlanLabelFallsBackToBranchWithNoTask(t *testing.T) {
+	// The true no-context case (no task, no label given) still needs some
+	// label; the branch itself is the only thing left to show.
+	plans := BuildPlan([]Worker{
+		{Branch: "argus-worker-1", RepoRoot: "/repo-a"},
+	}, nil)
+	if got := plans[0].Label; got != "argus-worker-1" {
+		t.Errorf("label should fall back to branch when there's no task; got %q", got)
+	}
+}
+
 func TestRunDryRunHasNoSideEffects(t *testing.T) {
 	rr := &recordingRunner{paneList: twoPaneList}
 	var buf bytes.Buffer
@@ -253,6 +285,32 @@ func TestExecuteWritesSettingsBriefAndSpawnsInRootPane(t *testing.T) {
 	}
 	if reg.Panes[wt] != "w9:p1" {
 		t.Errorf("pane registry entry for %s: got %q want w9:p1 (herdr's root pane), so prune can later close it", wt, reg.Panes[wt])
+	}
+}
+
+func TestPrepareWorktreePassesLabelNotBranch(t *testing.T) {
+	repo := t.TempDir()
+	rr := &recordingRunner{}
+	cfg := &Config{Client: herdr.NewWithRunner(rr.run), Base: "main"}
+	// Task differs from Branch so a label equal to Branch (the pre-#140
+	// behavior) is distinguishable from a label derived off Task.
+	plans := BuildPlan([]Worker{{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: repo}}, nil)
+
+	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); err != nil {
+		t.Fatalf("prepareWorktree: %v", err)
+	}
+	var labelArg string
+	for _, args := range rr.calls {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			for i, a := range args {
+				if a == "--label" && i+1 < len(args) {
+					labelArg = args[i+1]
+				}
+			}
+		}
+	}
+	if labelArg != "fix bug in parser" {
+		t.Errorf("--label sent to herdr: got %q, want the task-derived label %q, not the branch", labelArg, "fix bug in parser")
 	}
 }
 
