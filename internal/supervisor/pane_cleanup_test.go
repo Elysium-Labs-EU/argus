@@ -21,7 +21,7 @@ func TestClosePaneAndEmptyWorkspaceClosesSoleWorkspace(t *testing.T) {
 		return []byte(`{"result":{}}`), nil
 	})
 
-	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1"); err != nil {
+	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1", false); err != nil {
 		t.Fatalf("ClosePaneAndEmptyWorkspace: %v", err)
 	}
 	if len(calls) != 3 {
@@ -49,7 +49,7 @@ func TestClosePaneAndEmptyWorkspaceLeavesWorkspaceOpenWithSiblings(t *testing.T)
 		return []byte(`{"result":{}}`), nil
 	})
 
-	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1"); err != nil {
+	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1", false); err != nil {
 		t.Fatalf("ClosePaneAndEmptyWorkspace: %v", err)
 	}
 	for _, c := range calls {
@@ -67,7 +67,7 @@ func TestClosePaneAndEmptyWorkspaceNoOpWhenPaneAlreadyGone(t *testing.T) {
 		return []byte(paneList), nil
 	})
 
-	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1"); err != nil {
+	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1", false); err != nil {
 		t.Fatalf("a pane herdr no longer knows about should not error: %v", err)
 	}
 	if len(calls) != 1 {
@@ -80,7 +80,33 @@ func TestClosePaneAndEmptyWorkspacePropagatesPaneListError(t *testing.T) {
 	client := herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
 		return nil, sentinel
 	})
-	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1"); !errors.Is(err, sentinel) {
+	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1", false); !errors.Is(err, sentinel) {
 		t.Fatalf("want wrapped runner error, got %v", err)
+	}
+}
+
+func TestClosePaneAndEmptyWorkspaceLeavesNestedWorkspaceOpenEvenWhenSoleTab(t *testing.T) {
+	const paneList = `{"result":{"panes":[
+{"pane_id":"w1:p1","workspace_id":"w1"}
+]}}`
+	var calls [][]string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		if args[0] == "pane" && args[1] == "list" {
+			return []byte(paneList), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	})
+
+	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1", true); err != nil {
+		t.Fatalf("ClosePaneAndEmptyWorkspace: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("want pane list, pane close only (2 calls), got %d: %v", len(calls), calls)
+	}
+	for _, c := range calls {
+		if c[0] == "workspace" {
+			t.Errorf("a nested worker's shared parent workspace must never be closed, got call %v", c)
+		}
 	}
 }

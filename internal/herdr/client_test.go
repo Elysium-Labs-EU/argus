@@ -108,6 +108,40 @@ func TestWorktreeCreateReturnsRootPane(t *testing.T) {
 	}
 }
 
+func TestWorktreeCreatePassesWorkspaceWhenSet(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"},"worktree":{"path":"/tmp/wt"}}}`), nil
+	})
+	if _, err := c.WorktreeCreate(context.Background(), &WorktreeSpec{
+		Cwd: "/repo", Branch: "argus-x", Base: "main", Path: "/tmp/wt", Workspace: "w1M",
+	}); err != nil {
+		t.Fatalf("WorktreeCreate: %v", err)
+	}
+	want := []string{"worktree", "create", "--cwd", "/repo", "--branch", "argus-x", "--base", "main", "--path", "/tmp/wt", "--no-focus", "--json", "--workspace", "w1M"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("args: got %v want %v", gotArgs, want)
+	}
+}
+
+func TestWorktreeCreateOmitsWorkspaceWhenUnset(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"},"worktree":{"path":"/tmp/wt"}}}`), nil
+	})
+	if _, err := c.WorktreeCreate(context.Background(), &WorktreeSpec{
+		Cwd: "/repo", Branch: "argus-x", Base: "main", Path: "/tmp/wt",
+	}); err != nil {
+		t.Fatalf("WorktreeCreate: %v", err)
+	}
+	want := []string{"worktree", "create", "--cwd", "/repo", "--branch", "argus-x", "--base", "main", "--path", "/tmp/wt", "--no-focus", "--json"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("args: got %v want %v", gotArgs, want)
+	}
+}
+
 func TestAgentGetReportsLiveAgent(t *testing.T) {
 	reply := `{"id":"cli:agent:get","result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"done"}}}`
 	c := NewWithRunner(fakeRunner(reply, nil))

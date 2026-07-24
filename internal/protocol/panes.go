@@ -18,6 +18,13 @@ import (
 // it belonged to is already gone.
 type PaneRegistry struct {
 	Panes map[string]string `json:"panes"`
+	// Nested marks a worktree (by the same key as Panes) whose pane was opened
+	// as a tab inside a shared parent herdr workspace rather than a fresh
+	// top-level workspace argus owns outright (see
+	// herdr.WorktreeSpec.Workspace). A worktree missing from this map was not
+	// nested. Cleanup must not close a nested worktree's workspace — argus
+	// doesn't own it.
+	Nested map[string]bool `json:"nested,omitempty"`
 }
 
 // PaneRegistryPath is repoRoot's registry file — a single file shared across

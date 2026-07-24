@@ -63,6 +63,11 @@ type Config struct {
 	Base     string
 	Home     string
 	Launcher string
+	// ParentWorkspace, when set, is the herdr workspace id every spawned
+	// worker's worktree pane nests into as a tab instead of opening its own
+	// new top-level workspace (see herdr.WorktreeSpec.Workspace). Empty means
+	// today's behavior: each worker gets its own top-level workspace.
+	ParentWorkspace string
 	// WorkerRuntime names a worker-runtime adapter (see
 	// docs/worker-runtime-protocol.md): argus execs argus-runtime-<name> to
 	// isolate the worker instead of running it directly in the host shell.
@@ -763,11 +768,12 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 // fetch-and-fold step.
 func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Worktree, error) {
 	wt, err := cfg.Client.WorktreeCreate(ctx, &herdr.WorktreeSpec{
-		Cwd:    p.RepoRoot,
-		Branch: p.Branch,
-		Base:   cfg.Base,
-		Path:   p.Worktree,
-		Label:  p.Label,
+		Cwd:       p.RepoRoot,
+		Branch:    p.Branch,
+		Base:      cfg.Base,
+		Path:      p.Worktree,
+		Label:     p.Label,
+		Workspace: cfg.ParentWorkspace,
 	})
 	if err != nil {
 		return herdr.Worktree{}, fmt.Errorf("creating worktree for %s: %w", p.Task, err)
@@ -800,6 +806,12 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 			return herdr.Worktree{}, fmt.Errorf("loading pane registry for %s: %w", p.Task, err)
 		}
 		reg.Panes[p.Worktree] = wt.RootPaneID
+		if cfg.ParentWorkspace != "" {
+			if reg.Nested == nil {
+				reg.Nested = map[string]bool{}
+			}
+			reg.Nested[p.Worktree] = true
+		}
 		if err := protocol.WritePaneRegistry(p.RepoRoot, reg); err != nil {
 			return herdr.Worktree{}, fmt.Errorf("recording spawned pane for %s: %w", p.Task, err)
 		}

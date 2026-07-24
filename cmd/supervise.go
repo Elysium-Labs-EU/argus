@@ -181,13 +181,20 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 	defer closeLog()
 
 	cfg := &supervisor.Config{
-		Out:               cmd.OutOrStdout(),
-		Now:               time.Now,
-		Client:            client,
-		Log:               logger,
-		Base:              o.base,
-		Home:              home,
-		Launcher:          o.launcher,
+		Out:      cmd.OutOrStdout(),
+		Now:      time.Now,
+		Client:   client,
+		Log:      logger,
+		Base:     o.base,
+		Home:     home,
+		Launcher: o.launcher,
+		// HERDR_WORKSPACE_ID is herdr's own env var naming the pane argus itself
+		// is running in, when it is running inside a herdr pane at all (e.g.
+		// headless/CI invocations have no such pane and see it unset). Reading
+		// it here nests every worker this invocation spawns as a tab in the
+		// operator's own workspace instead of a disconnected new one, with no
+		// flag required for the common interactive case.
+		ParentWorkspace:   os.Getenv("HERDR_WORKSPACE_ID"),
 		ScrubEnv:          append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
 		Interval:          o.interval,
 		Timeout:           o.timeout,
