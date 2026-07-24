@@ -493,6 +493,76 @@ func TestDispatchIntoPaneAgentGetError(t *testing.T) {
 	}
 }
 
+// TestDispatchIntoPaneLiveAgentPromptNeverPickedUpReturnsError is the direct
+// regression test for argus issue #135: a live agent's AgentPrompt call used
+// to return as soon as herdr accepted the text, with no confirmation the
+// agent ever reacted — so a prompt silently dropped (idle/done agent, or a
+// race with another concurrent AgentPrompt call) left the caller's
+// subsequent status.json poll waiting forever, with no error surfaced
+// anywhere. herdr's own `--wait --until working` now makes that failure
+// mode observable: this fake models herdr reporting it never saw the
+// working transition (the same outcome herdr's own "timeout"/
+// "agent_prompt_stalled" error codes produce), and dispatchIntoPane must
+// return promptly with an error naming the pane instead of reporting nil.
+func TestDispatchIntoPaneLiveAgentPromptNeverPickedUpReturnsError(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "agent" && args[1] == "get":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"idle"}}}`), nil
+		case args[0] == "agent" && args[1] == "prompt":
+			return nil, errors.New(`herdr agent: exit status 1: {"error":{"code":"timeout","message":"no state change to working observed"}}`)
+		default:
+			t.Fatalf("unexpected call: %v", args)
+			return nil, nil
+		}
+	})
+
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &dispatchTarget{worktree: t.TempDir(), launcher: "claude"})
+	if err == nil {
+		t.Fatal("want an error when herdr never observes the live agent pick up the prompt, got nil")
+	}
+	if !strings.Contains(err.Error(), "w1:p1") {
+		t.Errorf("error should name the pane, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("error should surface herdr's underlying failure, got %q", err.Error())
+	}
+}
+
+// TestDispatchIntoPaneLiveAgentPromptUsesLivenessTimeout confirms the
+// live-agent-reuse branch's AgentPrompt call is bounded by the same
+// livenessTimeout knob the spawn branch's waitForAgentLive poll uses (rather
+// than herdr's own indefinite wait), and that a caller-supplied override
+// reaches herdr's `--timeout` flag verbatim instead of always falling back
+// to defaultLivenessTimeout.
+func TestDispatchIntoPaneLiveAgentPromptUsesLivenessTimeout(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	var promptArgs []string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "agent" && args[1] == "get":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"idle"}}}`), nil
+		case args[0] == "agent" && args[1] == "prompt":
+			promptArgs = append([]string(nil), args...)
+			return []byte(`{"result":{}}`), nil
+		default:
+			t.Fatalf("unexpected call: %v", args)
+			return nil, nil
+		}
+	})
+
+	target := &dispatchTarget{worktree: t.TempDir(), launcher: "claude", livenessTimeout: 5 * time.Second}
+	if err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", target); err != nil {
+		t.Fatalf("dispatchIntoPane: %v", err)
+	}
+
+	want := []string{"agent", "prompt", "w1:p1", supervisor.InitialPrompt, "--wait", "--until", "working", "--timeout", "5000"}
+	if strings.Join(promptArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("agent prompt args = %v, want %v", promptArgs, want)
+	}
+}
+
 // capturingSpawnClient is fakeRebaseClient's spawn path (no live agent until a
 // "pane run" call succeeds, so waitForAgentLive's first poll finds it live
 // immediately) plus recording of the exact command line PaneRun was asked to
