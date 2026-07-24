@@ -106,7 +106,7 @@ each pane's directory in --panes mode).`,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewConcurrency: reviewConcurrency,
 				maxDiffLines: maxDiffLines, sharedGlobs: sharedGlobs, osGlobs: osGlobs, reviewGlobs: reviewGlobs,
-				allow: allow, credentialEnv: overrides,
+				allow: allow, credentialEnv: overrides, repoExplicit: repo != "",
 			})
 		},
 	}
@@ -163,6 +163,18 @@ type superviseOpts struct {
 	dryRun            bool
 	noCredProxy       bool
 	review            bool
+	repoExplicit      bool
+}
+
+// parentWorkspace resolves supervisor.Config.ParentWorkspace: nesting a
+// worker's worktree pane into the operator's own workspace only when --repo
+// was left to default, since an explicit --repo must be passed to herdr as
+// --cwd, and herdr's worktree-create rejects --workspace and --cwd together.
+func parentWorkspace(repoExplicit bool) string {
+	if repoExplicit {
+		return ""
+	}
+	return os.Getenv("HERDR_WORKSPACE_ID")
 }
 
 // runSupervision builds the *supervisor.Config for an already-resolved worker
@@ -194,7 +206,14 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		// it here nests every worker this invocation spawns as a tab in the
 		// operator's own workspace instead of a disconnected new one, with no
 		// flag required for the common interactive case.
-		ParentWorkspace:   os.Getenv("HERDR_WORKSPACE_ID"),
+		//
+		// herdr's own worktree-create usage documents --workspace and --cwd as
+		// mutually exclusive. WorktreeCreate always sends --cwd (the repo a
+		// worker's worktree derives from), so an explicit --repo — which names
+		// that repo directly — must win outright rather than being layered on
+		// top of workspace auto-detection; nesting stays a same-repo-only
+		// convenience for the case where --repo was left to default.
+		ParentWorkspace:   parentWorkspace(o.repoExplicit),
 		ScrubEnv:          append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
 		Interval:          o.interval,
 		Timeout:           o.timeout,
