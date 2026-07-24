@@ -350,6 +350,67 @@ func TestRunSupervisionWorkerRuntimeWithKeySucceeds(t *testing.T) {
 	}
 }
 
+// TestParentWorkspace pins down the fix for the reported bug: herdr's own
+// worktree-create usage documents --workspace and --cwd as mutually
+// exclusive, but argus was passing both together whenever it auto-detected
+// HERDR_WORKSPACE_ID from a calling pane and a repo was also known, so every
+// real (non-dry-run) spawn from inside a herdr pane failed with "usage:
+// herdr worktree create [--workspace ID | --cwd PATH]". An explicit --repo
+// must win outright; auto-detected nesting is a fallback for when --repo was
+// left to default.
+func TestParentWorkspace(t *testing.T) {
+	t.Setenv("HERDR_WORKSPACE_ID", "w1M")
+
+	if got := parentWorkspace(true); got != "" {
+		t.Errorf("parentWorkspace(repoExplicit=true) = %q, want empty: explicit --repo must not be layered with --workspace", got)
+	}
+	if got := parentWorkspace(false); got != "w1M" {
+		t.Errorf("parentWorkspace(repoExplicit=false) = %q, want %q", got, "w1M")
+	}
+}
+
+// TestRunSupervisionSpawnRepoExplicitOmitsWorkspace exercises the actual
+// spawn path end to end: with HERDR_WORKSPACE_ID set (as in every herdr pane)
+// and repoExplicit true, the "worktree create" call argus sends to herdr must
+// never carry --workspace alongside --cwd.
+func TestRunSupervisionSpawnRepoExplicitOmitsWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("HERDR_WORKSPACE_ID", "w1M")
+
+	var worktreeCreateArgs []string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			worktreeCreateArgs = append([]string{}, args...)
+			path := ""
+			for i, a := range args {
+				if a == "--path" && i+1 < len(args) {
+					path = args[i+1]
+				}
+			}
+			return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"},"worktree":{"path":"` + path + `"}}}`), nil
+		}
+		return nil, errors.New("stop after worktree create")
+	})
+
+	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: t.TempDir()}}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	// The fake runner errors on every herdr call after "worktree create", so
+	// this always returns an error; only the captured args matter here.
+	_ = runSupervision(cmd, client, workers, &superviseOpts{base: "origin/main", repoExplicit: true})
+
+	if len(worktreeCreateArgs) == 0 {
+		t.Fatal("worktree create was never called")
+	}
+	for _, a := range worktreeCreateArgs {
+		if a == "--workspace" {
+			t.Fatalf("worktree create got --workspace alongside --cwd with --repo explicit: %v", worktreeCreateArgs)
+		}
+	}
+}
+
 // TestTasksFlagRejectsFreeTextBrief pins down the reported bug (#40): --tasks is
 // parsed as CSV by pflag, so a free-text brief containing commas and quotes fails
 // at flag-parse time with "bare \" in non-quoted-field" rather than being taken
