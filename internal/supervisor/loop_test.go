@@ -332,7 +332,7 @@ func TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent(t *testing.T) {
 		if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
 			// Simulate the exact #15 hazard: the pane execute is about to type
 			// into already has a live, unrelated session running in it.
-			return []byte(`{"result":{"agent":{"pane_id":"w9:p1","agent":"claude","agent_session":{"agent":"claude","value":"stale-session-uuid"}}}}`), nil
+			return []byte(`{"result":{"agent":{"pane_id":"w9:p1","cwd":"/tmp/relocated-worktree","agent":"claude","agent_session":{"agent":"claude","value":"stale-session-uuid"}}}}`), nil
 		}
 		if len(args) >= 2 && args[0] == "pane" && args[1] == "run" {
 			paneRunCalled = true
@@ -351,6 +351,8 @@ func TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent(t *testing.T) {
 		t.Fatal("execute should refuse to spawn into a pane with a live agent session, got nil error")
 	} else if !strings.Contains(err.Error(), "stale-session-uuid") {
 		t.Errorf("error should name the live session it refused to attach to, got: %v", err)
+	} else if !strings.Contains(err.Error(), "/tmp/relocated-worktree") {
+		t.Errorf("error should surface the offending pane's cwd so a relocated/removed worktree is obvious without a separate `herdr pane list` query, got: %v", err)
 	}
 	if paneRunCalled {
 		t.Error("execute must not call PaneRun once AgentGet reports a live agent already occupies the pane")
