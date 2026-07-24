@@ -240,6 +240,18 @@ trash <path>            # or your repo's guarded delete flow, if it enforces one
 git worktree prune
 ```
 
+Also check for a herdr pane left rooted in the path you just removed — `trash`/`rm`
+moves the directory but never touches the pane's shell, so its `agent_status` stays
+`idle` instead of going away. Recreating a worktree at that same path and re-running
+supervise will then refuse to spawn there ("already has a live agent session"),
+because argus can't tell that pane apart from one genuinely mid-task. Find and close
+it before retrying:
+
+```bash
+herdr pane list   # look for a pane whose cwd is under the path you just removed
+herdr pane close <pane-id>
+```
+
 And remember: this failure mode happens *before* any worker spawns, so it will not
 appear in `~/.argus/runs/*.jsonl` — note the retry yourself, don't rely on argus's own
 logs to remind you it's outstanding.

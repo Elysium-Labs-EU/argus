@@ -851,11 +851,16 @@ func ensureFreshPane(ctx context.Context, client herdr.Client, paneID, task stri
 		return fmt.Errorf("checking pane %s is free to spawn %s: %w", paneID, task, err)
 	}
 	if ok {
+		cwd := agent.Cwd
+		if cwd == "" {
+			cwd = "unknown"
+		}
 		return fmt.Errorf(
-			"pane %s already has a live agent session (session %s) — refusing to spawn %s there: "+
+			"pane %s already has a live agent session (session %s, cwd %s) — refusing to spawn %s there: "+
 				"typing the launch command in would deliver it as a chat message into that unrelated "+
-				"session instead of starting a fresh one (issue #15)",
-			paneID, agent.AgentSession.Value, task,
+				"session instead of starting a fresh one (issue #15); if that cwd points into a worktree "+
+				"you already removed, close the pane and retry",
+			paneID, agent.AgentSession.Value, cwd, task,
 		)
 	}
 	return nil
