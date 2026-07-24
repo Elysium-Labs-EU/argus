@@ -85,8 +85,13 @@ type PruneCandidate struct {
 	// candidate is confirmed safe to clean. Resolved from the registry, not
 	// the worktree's own lifecycle.json, so it is still known even when the
 	// worktree directory (and everything inside it) is already gone.
-	PaneID      string
-	Reasons     []string
+	PaneID  string
+	Reasons []string
+	// Nested is true when PaneID's pane was opened as a tab inside a shared
+	// parent herdr workspace (see protocol.PaneRegistry.Nested) rather than a
+	// fresh top-level workspace argus owns outright — CleanWorktree must not
+	// close a nested worktree's workspace.
+	Nested      bool
 	Merged      bool
 	DirGone     bool
 	SafeToClean bool
@@ -110,6 +115,7 @@ func EvaluateCandidate(ctx context.Context, f forge.Forge, owner, repo, repoRoot
 		return nil, regErr
 	}
 	c.PaneID = reg.Panes[worktree]
+	c.Nested = reg.Nested[worktree]
 
 	merged, prFound, prURL, prState, err := resolveMergeState(ctx, f, owner, repo, worktree, branch, dirGone, dryRun)
 	if err != nil {
@@ -304,7 +310,7 @@ func CleanWorktree(ctx context.Context, repoRoot string, client herdr.Client, c 
 		return trashPath, "", fmt.Errorf("cleaning worktree registration for %s: %w", c.Path, err)
 	}
 	if c.PaneID != "" {
-		if cerr := ClosePaneAndEmptyWorkspace(ctx, client, c.PaneID); cerr != nil {
+		if cerr := ClosePaneAndEmptyWorkspace(ctx, client, c.PaneID, c.Nested); cerr != nil {
 			paneWarning = fmt.Sprintf("worktree cleaned, but closing herdr pane %s failed: %v", c.PaneID, cerr)
 		}
 		forgetPaneRecord(repoRoot, c.Path)

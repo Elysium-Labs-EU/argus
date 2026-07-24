@@ -274,11 +274,12 @@ func (c Client) AgentWait(ctx context.Context, target string, until []string, ti
 
 // WorktreeSpec describes a worktree for herdr to create.
 type WorktreeSpec struct {
-	Cwd    string // repo the worktree derives from
-	Branch string // new branch name
-	Base   string // base ref, e.g. origin/main
-	Path   string // where to place the worktree
-	Label  string // herdr workspace label
+	Cwd       string // repo the worktree derives from
+	Branch    string // new branch name
+	Base      string // base ref, e.g. origin/main
+	Path      string // where to place the worktree
+	Label     string // herdr workspace label
+	Workspace string // parent workspace id to nest the new pane under as a tab; "" opens a new top-level workspace
 }
 
 // Worktree is what herdr created: the checkout path (which argus supplied) and
@@ -303,6 +304,9 @@ func (c Client) WorktreeCreate(ctx context.Context, spec *WorktreeSpec) (Worktre
 	}
 	if spec.Label != "" {
 		args = append(args, "--label", spec.Label)
+	}
+	if spec.Workspace != "" {
+		args = append(args, "--workspace", spec.Workspace)
 	}
 	out, err := c.run(ctx, args...)
 	if err != nil {
