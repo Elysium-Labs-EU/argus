@@ -267,7 +267,7 @@ func ResolveWorktree(path string) (string, error) {
 // reproduces the plain command unchanged.
 func SpawnCommand(worktree, launcher string, scrubEnv, workerEnv []string) string {
 	if launcher == "" {
-		launcher = DefaultLauncher
+		launcher = defaultAgent.DefaultLauncher()
 	}
 	var prefix strings.Builder
 	if len(scrubEnv) > 0 {
@@ -309,7 +309,7 @@ func shellQuote(s string) string {
 // differently than a plain host shell does.
 func launcherCommand(launcher string) string {
 	if launcher == "" {
-		launcher = DefaultLauncher
+		launcher = defaultAgent.DefaultLauncher()
 	}
 	return fmt.Sprintf("%s %q", launcher, InitialPrompt)
 }
@@ -503,7 +503,7 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
 		}
-		ok, err := HasPlanEvidence(cfg.Home, st.plan.Worktree)
+		ok, err := defaultAgent.PlanEvidence(cfg.Home, st.plan.Worktree)
 		if err != nil {
 			st.planEvidenceErr = err
 			cfg.Log.Fail("plan_evidence", st.plan.Task, err)
@@ -884,7 +884,7 @@ func ensureFreshPane(ctx context.Context, client herdr.Client, paneID, task stri
 func resolveSpawnLine(ctx context.Context, cfg *Config, p *WorkerPlan, workerEnv []string) (string, error) {
 	launcher := cfg.Launcher
 	if launcher == "" {
-		launcher = DefaultLauncher
+		launcher = defaultAgent.DefaultLauncher()
 	}
 
 	if cfg.WorkerRuntime == "" || cfg.WorkerRuntime == "none" {
