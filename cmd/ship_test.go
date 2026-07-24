@@ -14,6 +14,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 )
 
 func TestPrTitleForAndClosesLine(t *testing.T) {
@@ -229,6 +230,31 @@ func TestRunShipDryRunPrintsPlanWithoutShipping(t *testing.T) {
 	}
 	if !strings.Contains(out, "Closes #21") {
 		t.Errorf("dry-run output missing issue-derived commit message: %q", out)
+	}
+}
+
+// TestRunShipOmittedBaseUsesRepoConfig pins issue #161/#160: with baseIsDefault
+// set (the real CLI path when --base is left unset), runShip resolves this
+// repo's .argus/config.yml base_branch instead of trusting the flag's
+// literal "main" default.
+func TestRunShipOmittedBaseUsesRepoConfig(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
+	if err := repoconfig.Save(repoconfig.Path(wt), repoconfig.Config{BaseBranch: "develop"}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{worktree: wt, base: "main", baseIsDefault: true, force: true, dryRun: true})
+	if err != nil {
+		t.Fatalf("dry-run ship should not error: %v", err)
+	}
+	if out := buf.String(); !strings.Contains(out, "-> develop") {
+		t.Errorf("dry-run plan should target the repo-config base branch, got: %q", out)
 	}
 }
 

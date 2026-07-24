@@ -163,5 +163,11 @@ func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status
 	}
 	rest.Phase = next
 	rest.UpdatedAt = now()
+	// Base is set once by supervise at worktree-creation time (see
+	// internal/repoconfig), never by the worker — its reported JSON body has
+	// no "base" key, so unmarshaling it into rest always leaves rest.Base
+	// empty. Carry the prior value forward instead of losing it on every
+	// report.
+	rest.Base = cur.Base
 	return protocol.Write(protocol.StatusPath(worktree), rest)
 }

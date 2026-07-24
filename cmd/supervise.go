@@ -14,6 +14,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/jira"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -100,13 +101,33 @@ each pane's directory in --panes mode).`,
 				return err
 			}
 
+			// The main repo checkout's own .argus/config.yml (see
+			// internal/repoconfig) — read from the first resolved worker's
+			// RepoRoot, since a single supervise invocation targets one repo
+			// in practice. --attach already required an explicit --base above
+			// and never writes worker settings (see supervisor.Attach), so it
+			// has no RepoRoot and needs none here.
+			var repoRoot string
+			if len(workers) > 0 {
+				repoRoot = workers[0].RepoRoot
+			}
+			var rc repoconfig.Config
+			if repoRoot != "" {
+				rc, err = repoconfig.Load(repoconfig.Path(repoRoot))
+				if err != nil {
+					return &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
+				}
+			}
+
+			resolvedBase := resolveSuperviseBase(cmd.Context(), cmd.Flags().Changed("base"), base, repoRoot, rc)
+
 			return runSupervision(cmd, client, workers, &superviseOpts{
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
-				base: base, launcher: launcher, workerRuntime: workerRuntime,
+				base: resolvedBase, launcher: launcher, workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewConcurrency: reviewConcurrency,
 				maxDiffLines: maxDiffLines, sharedGlobs: sharedGlobs, osGlobs: osGlobs, reviewGlobs: reviewGlobs,
-				allow: allow, credentialEnv: overrides, repoExplicit: repo != "",
+				allow: allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
 			})
 		},
 	}
@@ -119,7 +140,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&labels, "labels", nil, "herdr workspace label per worker, paired positionally (default: derived from --tasks, falling back to the branch)")
 	cmd.Flags().StringSliceVar(&panes, "panes", nil, "reuse these existing herdr panes instead of the worktree's own pane")
 	cmd.Flags().StringVar(&repo, "repo", "", "repo root for all workers (default cwd; or each pane's directory in --panes mode)")
-	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref new worktrees branch from; required with --attach (no default applies — argus does not know what an attached worktree actually branched from)")
+	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref new worktrees branch from; required with --attach (no default applies — argus does not know what an attached worktree actually branched from). Without --base, this repo's .argus/config.yml base_branch wins, then the detected origin/HEAD, then this default")
 	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in each worker pane after cd into its worktree")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "how often to poll each worker's status file")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "per-worker wall-clock deadline before argus stops waiting on it (0 = wait indefinitely)")
@@ -136,7 +157,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&workspace, "workspace", "", "with --attach: attach to every herdr pane in this workspace id, using each pane's directory as a worktree")
 	cmd.Flags().StringSliceVar(&worktrees, "worktrees", nil, "with --attach: explicit worktree paths to watch (comma-separated)")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate each worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
-	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a repo not built with make)")
+	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist, on top of this repo's .argus/config.yml allow list if any (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a one-off run)")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	return cmd
 }
@@ -154,6 +175,7 @@ type superviseOpts struct {
 	osGlobs           []string
 	sharedGlobs       []string
 	allow             []string
+	repoAllow         []string
 	reviewGlobs       []string
 	interval          time.Duration
 	timeout           time.Duration
@@ -175,6 +197,29 @@ func parentWorkspace(repoExplicit bool) string {
 		return ""
 	}
 	return os.Getenv("HERDR_WORKSPACE_ID")
+}
+
+// resolveSuperviseBase applies --base > this repo's .argus/config.yml
+// base_branch > detected origin/HEAD > the flag's own default ("origin/main"),
+// threading the bare branch name repoconfig/DetectDefaultBase both return
+// into the "origin/<branch>" ref convention herdr.WorktreeSpec.Base expects
+// (unlike rebase/ship's own --base, which is a bare branch name — see
+// supervisor.ResolveBase). explicit is cmd.Flags().Changed("base"): an
+// operator-passed flag always wins outright, matching ResolveBase's own
+// precedence for the same three sources everywhere else they're read.
+func resolveSuperviseBase(ctx context.Context, explicit bool, flagValue, repoRoot string, rc repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.BaseBranch != "" {
+		return "origin/" + rc.BaseBranch
+	}
+	if repoRoot != "" {
+		if detected, err := supervisor.DetectDefaultBase(ctx, repoRoot); err == nil && detected != "" {
+			return "origin/" + detected
+		}
+	}
+	return flagValue
 }
 
 // runSupervision builds the *supervisor.Config for an already-resolved worker
@@ -219,6 +264,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		Timeout:           o.timeout,
 		ReviewConcurrency: o.reviewConcurrency,
 		WorkerRuntime:     o.workerRuntime,
+		RepoAllow:         o.repoAllow,
 		ExtraAllow:        o.allow,
 		Policy: &supervisor.ReviewPolicy{
 			MaxDiffLines:      o.maxDiffLines,
@@ -442,7 +488,7 @@ func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIs
 	// Jira is an issue tracker with no git-host concept to resolve from the
 	// origin remote.
 	if len(jiraIssues) > 0 {
-		fetched, brs, err := jiraTasksFromIssues(ctx, jiraIssues)
+		fetched, brs, err := jiraTasksFromIssues(ctx, in.repo, jiraIssues)
 		if err != nil {
 			return err
 		}
@@ -596,7 +642,32 @@ func tasksFromIssues(ctx context.Context, repoPath string, issues []int, credent
 	if err != nil {
 		return nil, nil, err
 	}
-	return issuesToTasks(ctx, f, owner, name, issues)
+	return issuesToTasks(ctx, f, owner, name, repoPath, issues)
+}
+
+// repoBriefNote reads this repo's optional .argus/config.yml brief_note (see
+// internal/repoconfig), best-effort: a missing or unreadable config file just
+// means no note to append, not a hard failure of task generation.
+func repoBriefNote(repoPath string) string {
+	rc, err := repoconfig.Load(repoconfig.Path(repoPath))
+	if err != nil {
+		return ""
+	}
+	return rc.BriefNote
+}
+
+// fixedBriefTail appends argus's own non-negotiable ship-pipeline invariant
+// after an optional repo-supplied brief_note. Unlike brief_note (toolchain
+// flavor a repo owner opts into via config, e.g. "keep make ci green"), "don't
+// commit, argus ships" is argus's own pipeline contract — ship phase owns
+// commit/push, the worker must not — so it always applies, not something a
+// repo owner can disable.
+func fixedBriefTail(briefNote string) string {
+	const fixed = "Do NOT git commit or push; argus ships."
+	if briefNote == "" {
+		return fixed
+	}
+	return briefNote + " " + fixed
 }
 
 // resolveForge detects the forge host and owner/repo from a repo path's origin
@@ -622,17 +693,21 @@ func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[
 	return forge.New(host, token, nil), owner, name, nil
 }
 
-// issuesToTasks renders each issue into a worker brief and a default branch name.
-// It takes the forge as a parameter so it is testable without a network.
-func issuesToTasks(ctx context.Context, f forge.Forge, owner, name string, issues []int) (tasks, branches []string, err error) {
+// issuesToTasks renders each issue into a worker brief and a default branch
+// name. It takes the forge as a parameter so it is testable without a
+// network. repoPath resolves this repo's optional brief_note (see
+// repoBriefNote) — argus itself supplies no toolchain-flavored text of its
+// own when no config is present, only the fixed "don't commit" invariant.
+func issuesToTasks(ctx context.Context, f forge.Forge, owner, name, repoPath string, issues []int) (tasks, branches []string, err error) {
+	tail := fixedBriefTail(repoBriefNote(repoPath))
 	for _, n := range issues {
 		iss, ferr := f.FetchIssue(ctx, owner, name, n)
 		if ferr != nil {
 			return nil, nil, fmt.Errorf("fetching issue #%d: %w", n, ferr)
 		}
 		tasks = append(tasks, fmt.Sprintf(
-			"Fix %s/%s issue #%d: %s\n\n%s\n\nAdd a focused test and keep make ci green. Follow the repo STYLE.md. Do NOT git commit or push; argus ships.",
-			owner, name, n, iss.Title, iss.Body))
+			"Fix %s/%s issue #%d: %s\n\n%s\n\n%s",
+			owner, name, n, iss.Title, iss.Body, tail))
 		branches = append(branches, fmt.Sprintf("fix-issue-%d", n))
 	}
 	return tasks, branches, nil
@@ -648,7 +723,7 @@ type jiraIssueFetcher interface {
 // JIRA_API_TOKEN and fetches each key. Unlike tasksFromIssues this does not go
 // through internal/forge or the origin remote: Jira is an issue tracker, not a
 // git host, so there is no owner/repo or PR concept to resolve.
-func jiraTasksFromIssues(ctx context.Context, keys []string) (tasks, branches []string, err error) {
+func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string) (tasks, branches []string, err error) {
 	c, err := jira.NewFromEnv(nil)
 	if err != nil {
 		return nil, nil, &ui.UserError{
@@ -656,20 +731,24 @@ func jiraTasksFromIssues(ctx context.Context, keys []string) (tasks, branches []
 			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN, or write them to a JSON config file at $JIRA_CONFIG_FILE or ~/.argus/jira.json, to fetch --jira-issues",
 		}
 	}
-	return jiraIssuesToTasks(ctx, c, keys)
+	return jiraIssuesToTasks(ctx, c, repoPath, keys)
 }
 
 // jiraIssuesToTasks renders each Jira issue into a worker brief and a default
 // branch name, mirroring issuesToTasks for the git-forge issue pipeline.
-func jiraIssuesToTasks(ctx context.Context, c jiraIssueFetcher, keys []string) (tasks, branches []string, err error) {
+// repoPath resolves this repo's optional brief_note the same way
+// issuesToTasks does — Jira is only the issue tracker here, the tasks it
+// produces still run against this same repo checkout.
+func jiraIssuesToTasks(ctx context.Context, c jiraIssueFetcher, repoPath string, keys []string) (tasks, branches []string, err error) {
+	tail := fixedBriefTail(repoBriefNote(repoPath))
 	for _, key := range keys {
 		iss, ferr := c.FetchIssue(ctx, key)
 		if ferr != nil {
 			return nil, nil, fmt.Errorf("fetching jira issue %s: %w", key, ferr)
 		}
 		tasks = append(tasks, fmt.Sprintf(
-			"Fix Jira issue %s: %s\n\n%s\n\nAdd a focused test and keep make ci green. Follow the repo STYLE.md. Do NOT git commit or push; argus ships.",
-			key, iss.Title, iss.Body))
+			"Fix Jira issue %s: %s\n\n%s\n\n%s",
+			key, iss.Title, iss.Body, tail))
 		branches = append(branches, fmt.Sprintf("fix-%s", strings.ToLower(key)))
 	}
 	return tasks, branches, nil

@@ -15,7 +15,7 @@ func TestClaudeCodeAdapterDefaultLauncher(t *testing.T) {
 
 func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	path, content, err := (claudeCodeAdapter{}).RenderSettings(wt, []string{"Bash(task *)"})
+	path, content, err := (claudeCodeAdapter{}).RenderSettings(wt, []string{"Bash(pnpm *)"}, []string{"Bash(task *)"})
 	if err != nil {
 		t.Fatalf("RenderSettings: %v", err)
 	}
@@ -29,6 +29,9 @@ func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 	}
 	if round.Permissions.Allow[len(round.Permissions.Allow)-1] != "Bash(task *)" {
 		t.Errorf("extraAllow not applied via RenderSettings; got %v", round.Permissions.Allow)
+	}
+	if !slices.Contains(round.Permissions.Allow, "Bash(pnpm *)") {
+		t.Errorf("repoAllow not applied via RenderSettings; got %v", round.Permissions.Allow)
 	}
 }
 

@@ -138,6 +138,42 @@ func TestRunWorkerReportFullLegalSequence(t *testing.T) {
 	}
 }
 
+// TestRunWorkerReportPreservesBaseAcrossReports pins the carry-forward fix in
+// runWorkerReport: Base is set once by supervise (never by the worker), and a
+// worker's own report body has no "base" key at all, so every subsequent
+// report must not clobber it back to empty.
+func TestRunWorkerReportPreservesBaseAcrossReports(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{Base: "develop"}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	body := &protocol.Status{Task: "t", Branch: "b", Plan: []string{"do the thing"}}
+	if err := runWorkerReport(wt, protocol.PhasePlanning, body, fixedNow(time.Now())); err != nil {
+		t.Fatalf("planning report rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Base != "develop" {
+		t.Errorf("Base = %q after planning report, want it preserved as %q", got.Base, "develop")
+	}
+
+	body2 := &protocol.Status{Task: "t", Branch: "b"}
+	if err := runWorkerReport(wt, protocol.PhaseWorking, body2, fixedNow(time.Now())); err != nil {
+		t.Fatalf("working report rejected: %v", err)
+	}
+	got2, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got2.Base != "develop" {
+		t.Errorf("Base = %q after working report, want it still preserved as %q", got2.Base, "develop")
+	}
+}
+
 func TestParseReportablePhaseRejectsUnknown(t *testing.T) {
 	for _, s := range []string{"done", "bogus", ""} {
 		if _, err := parseReportablePhase(s); err == nil {
