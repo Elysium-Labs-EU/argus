@@ -1,0 +1,1 @@
+brief_note: "Comments must be terse and explain WHY (a hidden constraint, subtle invariant, non-obvious reasoning), never WHAT the code already makes obvious. Never cite issue or ticket numbers in comments - that context belongs in the PR description and commit message, not source code."
