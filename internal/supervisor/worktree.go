@@ -12,8 +12,8 @@ import (
 // run before the worker's agent starts, since settings are read once at
 // session launch. This is the generic (agent-agnostic) mechanics — path and
 // content are the agent's own concern; see AgentAdapter.RenderSettings.
-func WriteSettings(worktree string, extraAllow []string) error {
-	relPath, content, err := defaultAgent.RenderSettings(worktree, extraAllow)
+func WriteSettings(worktree string, repoAllow, extraAllow []string) error {
+	relPath, content, err := defaultAgent.RenderSettings(worktree, repoAllow, extraAllow)
 	if err != nil {
 		return fmt.Errorf("rendering settings: %w", err)
 	}

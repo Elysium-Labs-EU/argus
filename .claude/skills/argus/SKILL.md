@@ -39,8 +39,16 @@ covers it is how a stale verdict or an unenforced instruction reaches a PR.
 | Hand off a worktree after a sibling PR merged first | `argus rebase --worktree <path> --base main` |
 | See escalation rate / token cost | `argus stats` |
 | Check/fix the Bash allowlist argus itself needs | `argus config check --write` |
+| Set up a repo's own base branch/allow list/brief note (see `docs/repo-config.md`) | `argus init` |
 
 If `argus` isn't on PATH, fall back to [[supervise-agents]] and say so.
+
+**Non-Go/non-make repos**: `supervise`'s generated worker permission allowlist and
+default base branch used to hardcode Go/make assumptions. `argus init` detects a
+repo's toolchain (Taskfile.yml/Makefile/package.json/go.mod) and writes
+`.argus/config.yml` with a suggested `base_branch`/`allow`/`brief_note` — see
+`docs/repo-config.md`. With no such file, argus assumes nothing about any
+repo's toolchain.
 
 ## What argus guarantees today (rc.20)
 

@@ -24,9 +24,11 @@ type AgentAdapter interface {
 
 	// RenderSettings builds the worktree-scoped permission file this agent
 	// reads at session launch: its path relative to worktree, and its
-	// encoded content. extraAllow appends operator-supplied permission
-	// patterns after the agent's own defaults.
-	RenderSettings(worktree string, extraAllow []string) (path string, content []byte, err error)
+	// encoded content. repoAllow is the repo's own .argus/config.yml allow
+	// list (see internal/repoconfig), inserted after the agent's fixed
+	// structural entries; extraAllow appends operator-supplied CLI --allow
+	// patterns on top of that, for a one-off run.
+	RenderSettings(worktree string, repoAllow, extraAllow []string) (path string, content []byte, err error)
 
 	// PlanEvidence reports whether any session transcript for worktree
 	// contains a real todo-list tool call — the unfakeable backstop for the
@@ -46,8 +48,8 @@ func (claudeCodeAdapter) DefaultLauncher() string {
 	return DefaultLauncher
 }
 
-func (claudeCodeAdapter) RenderSettings(worktree string, extraAllow []string) (string, []byte, error) {
-	settings := settingsFor(worktree, extraAllow)
+func (claudeCodeAdapter) RenderSettings(worktree string, repoAllow, extraAllow []string) (string, []byte, error) {
+	settings := settingsFor(worktree, repoAllow, extraAllow)
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", nil, fmt.Errorf("encoding settings: %w", err)
@@ -76,28 +78,30 @@ type permissionBlock struct {
 
 // settingsFor builds the worktree-scoped permission settings. This is the single
 // source of truth for worker permissions (lifted from the supervise-agents
-// skill): edits/writes are confined to the worktree, build/test/read commands
-// are pre-cleared, commit/push stay gated behind ask, and destructive or
+// skill): edits/writes are confined to the worktree, git read/write plumbing
+// is pre-cleared, commit/push stay gated behind ask, and destructive or
 // out-of-worktree operations are denied outright.
 //
-// extraAllow appends operator-supplied patterns (e.g. "Bash(task *)" for a repo
-// whose runner isn't make) after the Go/make defaults, so a non-Go repo isn't
-// stuck hitting a permission prompt on every command its own AGENTS.md mandates.
-func settingsFor(worktree string, extraAllow []string) permissionSettings {
+// repoAllow is the repo's own .argus/config.yml allow list (see
+// internal/repoconfig) — it replaces the build/test-tool entries argus used
+// to hardcode for every repo regardless of toolchain (issue #161); an empty
+// repoAllow (no config file, or none present) means no build/test tooling is
+// pre-cleared for anyone, not just non-Go repos, since argus itself has no
+// opinion on any repo's toolchain. extraAllow appends operator-supplied CLI
+// --allow patterns after that, for a one-off run.
+func settingsFor(worktree string, repoAllow, extraAllow []string) permissionSettings {
 	glob := worktree + "/**"
 	allow := []string{
 		"Edit(" + glob + ")",
 		"Write(" + glob + ")",
-		"Bash(go build *)",
-		"Bash(go test *)",
-		"Bash(go vet *)",
-		"Bash(go get *)",
-		"Bash(make *)",
+	}
+	allow = append(allow, repoAllow...)
+	allow = append(allow,
 		"Bash(git status*)",
 		"Bash(git diff*)",
 		"Bash(git log*)",
 		"Bash(git add*)",
-	}
+	)
 	allow = append(allow, extraAllow...)
 
 	// Deny wins over allow in Claude Code regardless of pattern specificity

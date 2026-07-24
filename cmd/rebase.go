@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -45,6 +46,7 @@ conflict resolution itself needs the worker.`,
 			return runRebase(cmd, herdr.New(), &rebaseOpts{
 				worktree:      worktree,
 				base:          base,
+				baseIsDefault: !cmd.Flags().Changed("base"),
 				launcher:      launcher,
 				workerRuntime: workerRuntime,
 				interval:      interval,
@@ -75,27 +77,18 @@ var rebaseCmd = newRebaseCmd()
 // in a top-level function go-crap can score (and tests can call) on its own,
 // instead of an inline closure whose complexity gets charged to the constructor.
 type rebaseOpts struct {
-	credentialEnv map[string]string
-	worktree      string
-	base          string
-	launcher      string
-	workerRuntime string
-	interval      time.Duration
-	force         bool
-	dryRun        bool
-	noCredProxy   bool
-	// livenessTimeout bounds how long dispatchIntoPane waits for confirmation
-	// that a dispatch actually landed: on the spawn branch, waitForAgentLive's
-	// post-spawn poll for the agent coming up at all; on the live-agent-reuse
-	// branch, herdr's own `--wait --until working` for the existing agent
-	// picking up the re-tasking prompt (argus issue #135). livenessInterval
-	// only applies to the former, waitForAgentLive's own poll cadence. Both are
-	// internal knobs, not CLI flags — zero means "use the package default"
-	// (defaultLivenessTimeout / defaultLivenessInterval) — so a test can
-	// override them to run on a fast, deterministic clock instead of the real
-	// 30s/500ms production cadence.
+	credentialEnv    map[string]string
+	worktree         string
+	base             string
+	launcher         string
+	workerRuntime    string
+	interval         time.Duration
 	livenessTimeout  time.Duration
 	livenessInterval time.Duration
+	baseIsDefault    bool
+	force            bool
+	dryRun           bool
+	noCredProxy      bool
 }
 
 // defaultLivenessTimeout and defaultLivenessInterval are dispatchIntoPane's
@@ -134,6 +127,9 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 	opts.worktree = abs
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
+	if opts.baseIsDefault {
+		opts.base = supervisor.ResolveBase(ctx, opts.worktree, opts.base, false)
+	}
 
 	branch, conflicts, err := detectRebaseConflict(ctx, opts.worktree, opts.base)
 	if err != nil {
@@ -250,22 +246,20 @@ func (o *rebaseOpts) dispatchTarget() *dispatchTarget {
 }
 
 // dispatchIntoPane gets a worker acting on the freshly written brief inside
-// paneID. rebase and rework both target a worktree an earlier task already ran
-// a worker in (see RebaseBrief: "it already has full context"), so paneID very
-// often still holds that worker's live, idle Claude Code session — not a bare
-// shell. Typing a shell command line into that pane (PaneRun) would land as a
-// chat message in the agent's own input box, not a command a shell executes,
-// which is why the dispatch used to silently no-op (argus issue #88): the
-// pane's scrollback never showed the brief being read at all. So this checks
-// with herdr first: a live agent gets re-tasked in place via AgentPrompt, using
-// the same one-line pointer at the brief a fresh spawn would pass as its
-// initial prompt, and blocks until herdr confirms the agent actually started
-// acting on it (see AgentPrompt's `--wait --until working`, argus issue
-// #135) instead of returning as soon as herdr accepts the text — a live
-// agent already idle or done accepts a prompt identically whether or not
-// anything downstream ever reacts to it. Only a genuinely bare pane (no
-// agent herdr recognizes) falls back to spawning a new one, exactly as
-// supervisor.execute does for a freshly created worktree.
+// paneID. rebase and rework re-dispatch into a worktree an earlier worker
+// already ran in, so paneID often still holds that worker's live, idle
+// Claude Code session rather than a bare shell — typing a command line into
+// it (PaneRun) lands as a chat message in the agent's own input box and
+// silently never launches anything. So this checks with herdr first: a live
+// agent is re-tasked via AgentPrompt and blocked on until herdr confirms it
+// actually started acting, since a bare accept-and-return gives no signal an
+// idle/done agent ever reacted. When that confirmation itself stalls — the
+// agent had already returned to an idle prompt from its prior turn, which
+// AgentPrompt's wait window can be too tight to catch — this falls back to
+// typing the same text and submitting it with an explicit keypress instead
+// of aborting outright. Only a genuinely bare pane (no agent herdr
+// recognizes) falls back to spawning a new one, as supervisor.execute does
+// for a freshly created worktree.
 func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr.Client, paneID, branch string, target *dispatchTarget) error {
 	_, live, err := client.AgentGet(ctx, paneID)
 	if err != nil {
@@ -277,10 +271,14 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 		if timeout <= 0 {
 			timeout = defaultLivenessTimeout
 		}
-		if perr := client.AgentPrompt(ctx, paneID, supervisor.InitialPrompt, timeout); perr != nil {
+		perr := client.AgentPrompt(ctx, paneID, supervisor.InitialPrompt, timeout)
+		if perr == nil {
+			return nil
+		}
+		if !errors.Is(perr, herdr.ErrAgentPromptStalled) {
 			return fmt.Errorf("prompting live agent in pane %s to pick up the rebase brief: %w", paneID, perr)
 		}
-		return nil
+		return fallBackToPaneRun(ctx, logger, client, paneID, branch, supervisor.InitialPrompt, perr, timeout)
 	}
 
 	logger.Action("dispatch", branch, "spawn-new-agent", paneID)
@@ -302,6 +300,28 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	// WaitForStatus below, which is legitimately unbounded once an agent is
 	// known to be live.
 	return waitForAgentLive(ctx, client, paneID, target.livenessTimeout, target.livenessInterval)
+}
+
+// fallBackToPaneRun recovers from an AgentPrompt call herdr reported as
+// stalled (promptErr) by typing the identical text via PaneRun and
+// submitting it with an explicit PaneSendKeys "enter" — PaneRun's own
+// trailing newline landing as a genuine Enter keypress in a live agent's
+// input box is a matter of timing, not something its reply confirms. It then
+// waits, bounded by timeout, for herdr to observe the pane pick the text up,
+// since neither PaneRun nor PaneSendKeys has a wait built in the way
+// AgentPrompt's own `--wait --until working` does.
+func fallBackToPaneRun(ctx context.Context, logger *eventlog.Logger, client herdr.Client, paneID, branch, text string, promptErr error, timeout time.Duration) error {
+	logger.Action("dispatch", branch, "prompt-stalled-fallback-pane-run", paneID)
+	if rerr := client.PaneRun(ctx, paneID, text); rerr != nil {
+		return fmt.Errorf("prompting live agent in pane %s to pick up the rebase brief: %w (pane-run fallback also failed: %w)", paneID, promptErr, rerr)
+	}
+	if kerr := client.PaneSendKeys(ctx, paneID, "enter"); kerr != nil {
+		return fmt.Errorf("prompting live agent in pane %s to pick up the rebase brief: %w (pane-run fallback's submit keystroke failed: %w)", paneID, promptErr, kerr)
+	}
+	if _, werr := client.AgentWait(ctx, paneID, []string{"working"}, timeout); werr != nil {
+		return fmt.Errorf("prompting live agent in pane %s to pick up the rebase brief: %w (pane-run fallback sent, but agent never started working: %w)", paneID, promptErr, werr)
+	}
+	return nil
 }
 
 // waitForAgentLive polls client.AgentGet(paneID) until herdr reports a live

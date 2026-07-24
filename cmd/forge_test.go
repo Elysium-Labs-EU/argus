@@ -10,6 +10,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 )
 
 // fakeForge is a Forge stub for tests: it returns canned issues and records the
@@ -39,7 +40,7 @@ func TestIssuesToTasks(t *testing.T) {
 		142: {Number: 142, Title: "daemon down warning", Body: "warn when down"},
 		145: {Number: 145, Title: "log backoff", Body: "back off on EACCES"},
 	}}
-	tasks, branches, err := issuesToTasks(context.Background(), f, "o", "r", []int{142, 145})
+	tasks, branches, err := issuesToTasks(context.Background(), f, "o", "r", t.TempDir(), []int{142, 145})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -49,8 +50,56 @@ func TestIssuesToTasks(t *testing.T) {
 	if !strings.Contains(tasks[0], "#142") || !strings.Contains(tasks[0], "daemon down warning") || !strings.Contains(tasks[0], "warn when down") {
 		t.Errorf("task 0 missing issue content: %q", tasks[0])
 	}
+	if !strings.Contains(tasks[0], "Do NOT git commit or push; argus ships.") {
+		t.Errorf("task 0 missing the fixed ship-pipeline line: %q", tasks[0])
+	}
 	if branches[0] != "fix-issue-142" || branches[1] != "fix-issue-145" {
 		t.Errorf("branches: %v", branches)
+	}
+}
+
+// TestIssuesToTasksAppendsRepoBriefNote pins issue #161: the old hardcoded
+// "Add a focused test and keep make ci green. Follow the repo STYLE.md." is
+// gone; a repo's own .argus/config.yml brief_note takes its place when
+// present, and is appended before the fixed "don't commit" line.
+func TestIssuesToTasksAppendsRepoBriefNote(t *testing.T) {
+	repo := t.TempDir()
+	if err := repoconfig.Save(repoconfig.Path(repo), repoconfig.Config{
+		BriefNote: "Keep task frontend:ci green.",
+	}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+	f := &fakeForge{issues: map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}}}
+	tasks, _, err := issuesToTasks(context.Background(), f, "o", "r", repo, []int{142})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(tasks))
+	}
+	if !strings.Contains(tasks[0], "Keep task frontend:ci green. Do NOT git commit or push; argus ships.") {
+		t.Errorf("task missing brief_note ahead of the fixed line: %q", tasks[0])
+	}
+}
+
+// TestIssuesToTasksNoRepoConfigOmitsToolchainText pins the other half of
+// issue #161: with no .argus/config.yml, argus asserts no toolchain opinion
+// of its own — only the fixed line survives, not the old "make ci"/"STYLE.md"
+// defaults.
+func TestIssuesToTasksNoRepoConfigOmitsToolchainText(t *testing.T) {
+	f := &fakeForge{issues: map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}}}
+	tasks, _, err := issuesToTasks(context.Background(), f, "o", "r", t.TempDir(), []int{142})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(tasks))
+	}
+	if strings.Contains(tasks[0], "make ci") || strings.Contains(tasks[0], "STYLE.md") {
+		t.Errorf("task should not assume a toolchain with no repo config: %q", tasks[0])
+	}
+	if !strings.Contains(tasks[0], "Do NOT git commit or push; argus ships.") {
+		t.Errorf("task missing the fixed ship-pipeline line: %q", tasks[0])
 	}
 }
 
@@ -69,7 +118,7 @@ func TestJiraIssuesToTasks(t *testing.T) {
 		"PROJ-142": {Title: "daemon down warning", Body: "warn when down"},
 		"PROJ-145": {Title: "log backoff", Body: "back off on EACCES"},
 	}}
-	tasks, branches, err := jiraIssuesToTasks(context.Background(), f, []string{"PROJ-142", "PROJ-145"})
+	tasks, branches, err := jiraIssuesToTasks(context.Background(), f, t.TempDir(), []string{"PROJ-142", "PROJ-145"})
 	if err != nil {
 		t.Fatalf("jiraIssuesToTasks: %v", err)
 	}

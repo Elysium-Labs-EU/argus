@@ -16,6 +16,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -163,6 +164,60 @@ func TestRebaseDryRunNoConflict(t *testing.T) {
 // "not_git_worktree" when the calling pane itself isn't repo-rooted. Dry-run
 // resolves and prints it (read-only git plumbing, no side effect) so a
 // broken worktree is caught here too, not just on the real dispatch.
+// TestRebaseDryRunOmittedBaseUsesRepoConfig pins issue #161/#160 end to end
+// through the real CLI: with --base left unset, runRebase must resolve the
+// repo's own .argus/config.yml base_branch instead of the flag's literal
+// "main" default — here the repo's real default branch is "trunk", so a
+// silent fallback to "main" would target the wrong ref entirely.
+func TestRebaseDryRunOmittedBaseUsesRepoConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	git := func(dir string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare init: %v\n%s", err, out)
+	}
+	seed := t.TempDir()
+	git(seed, "init", "-q")
+	git(seed, "config", "user.email", "t@t")
+	git(seed, "config", "user.name", "t")
+	git(seed, "checkout", "-q", "-b", "trunk")
+	git(seed, "commit", "-q", "--allow-empty", "-m", "base")
+	git(seed, "remote", "add", "origin", remote)
+	git(seed, "push", "-q", "-u", "origin", "trunk")
+
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", remote, wt).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+	git(wt, "config", "user.email", "t@t")
+	git(wt, "config", "user.name", "t")
+	git(wt, "checkout", "-q", "-b", "feat-x", "origin/trunk")
+	git(wt, "commit", "-q", "--allow-empty", "-m", "work")
+
+	if err := repoconfig.Save(repoconfig.Path(wt), repoconfig.Config{BaseBranch: "trunk"}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+
+	cmd := newRebaseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--worktree", wt, "--dry-run"}) // no --base
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("rebase dry-run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "no conflict") {
+		t.Errorf("expected a no-conflict message using the repo-config base:\n%s", buf.String())
+	}
+}
+
 func TestRebaseDryRunForcedShowsRepoRoot(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -527,6 +582,111 @@ func TestDispatchIntoPaneLiveAgentPromptNeverPickedUpReturnsError(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "timeout") {
 		t.Errorf("error should surface herdr's underlying failure, got %q", err.Error())
+	}
+}
+
+// TestDispatchIntoPaneAgentPromptStalledFallsBackToPaneRun confirms herdr's
+// "agent_prompt_stalled" code (distinct from the generic "timeout"
+// TestDispatchIntoPaneLiveAgentPromptNeverPickedUpReturnsError covers) means
+// the prompt landed on a pane whose agent had already returned to an idle
+// prompt after finishing its prior turn — reachable, just not caught by
+// AgentPrompt's own wait window — so dispatchIntoPane must recover via
+// PaneRun plus an explicit PaneSendKeys "enter" instead of aborting.
+func TestDispatchIntoPaneAgentPromptStalledFallsBackToPaneRun(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	var paneRunText string
+	var sawEnterAfterPaneRun bool
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "agent" && args[1] == "get":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"done"}}}`), nil
+		case args[0] == "agent" && args[1] == "prompt":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrAgentPromptStalled)
+		case args[0] == "agent" && args[1] == "wait":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"working"}}}`), nil
+		case args[0] == "pane" && args[1] == "run":
+			paneRunText = args[3]
+			return []byte(`{"result":{}}`), nil
+		case args[0] == "pane" && args[1] == "send-keys":
+			if paneRunText != "" && args[2] == "w1:p1" && len(args) > 3 && args[3] == "enter" {
+				sawEnterAfterPaneRun = true
+			}
+			return []byte(`{"result":{}}`), nil
+		default:
+			t.Fatalf("unexpected call: %v", args)
+			return nil, nil
+		}
+	})
+
+	if err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &dispatchTarget{worktree: t.TempDir(), launcher: "claude"}); err != nil {
+		t.Fatalf("dispatchIntoPane: want the pane-run fallback to succeed, got %v", err)
+	}
+	if paneRunText != supervisor.InitialPrompt {
+		t.Errorf("pane run text = %q, want %q", paneRunText, supervisor.InitialPrompt)
+	}
+	if !sawEnterAfterPaneRun {
+		t.Error("want a `pane send-keys w1:p1 enter` call submitting the pane-run text, saw none")
+	}
+}
+
+// TestDispatchIntoPaneAgentPromptStalledFallbackAlsoFails confirms that when
+// even the PaneRun fallback never gets the agent working, dispatchIntoPane
+// still reports an error (naming both the original stall and the fallback
+// failure) instead of returning nil and leaving the caller to wait forever.
+func TestDispatchIntoPaneAgentPromptStalledFallbackAlsoFails(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "agent" && args[1] == "get":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"done"}}}`), nil
+		case args[0] == "agent" && args[1] == "prompt":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrAgentPromptStalled)
+		case args[0] == "agent" && args[1] == "wait":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrWaitTimeout)
+		case args[0] == "pane" && args[1] == "run":
+			return []byte(`{"result":{}}`), nil
+		case args[0] == "pane" && args[1] == "send-keys":
+			return []byte(`{"result":{}}`), nil
+		default:
+			t.Fatalf("unexpected call: %v", args)
+			return nil, nil
+		}
+	})
+
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &dispatchTarget{worktree: t.TempDir(), launcher: "claude"})
+	if err == nil {
+		t.Fatal("want an error when the pane-run fallback never gets the agent working, got nil")
+	}
+	if !strings.Contains(err.Error(), "w1:p1") {
+		t.Errorf("error should name the pane, got %q", err.Error())
+	}
+}
+
+// TestDispatchIntoPaneAgentPromptStalledSendKeysFails confirms a genuine
+// PaneSendKeys error (not a fallback that merely never gets the agent
+// working) is surfaced directly instead of proceeding to AgentWait as if the
+// submit keystroke had gone through.
+func TestDispatchIntoPaneAgentPromptStalledSendKeysFails(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "agent" && args[1] == "get":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"done"}}}`), nil
+		case args[0] == "agent" && args[1] == "prompt":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrAgentPromptStalled)
+		case args[0] == "pane" && args[1] == "run":
+			return []byte(`{"result":{}}`), nil
+		case args[0] == "pane" && args[1] == "send-keys":
+			return nil, errors.New("herdr: socket unavailable")
+		default:
+			t.Fatalf("unexpected call: %v", args)
+			return nil, nil
+		}
+	})
+
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &dispatchTarget{worktree: t.TempDir(), launcher: "claude"})
+	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
+		t.Fatalf("want the PaneSendKeys error propagated, got %v", err)
 	}
 }
 
