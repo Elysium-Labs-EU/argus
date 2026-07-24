@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
+	"time"
 )
 
 // Runner executes the herdr binary with the given args and returns its stdout.
@@ -206,8 +208,23 @@ func (c Client) AgentGet(ctx context.Context, target string) (Pane, bool, error)
 // and pressing Enter. Use this — not PaneRun — when AgentGet reports a live
 // agent already occupies the pane; it re-tasks that session instead of
 // trying to launch a second one over it.
-func (c Client) AgentPrompt(ctx context.Context, target, text string) error {
-	_, err := c.run(ctx, "agent", "prompt", target, text)
+//
+// A bare submission succeeds identically whether or not the agent ever
+// reacts to it: herdr accepts the text and returns immediately, with no
+// signal that it landed on a live turn rather than being silently dropped
+// (argus issue #135 — an idle/done agent, or two AgentPrompt calls racing
+// each other, produced no error and no observable effect, and the caller's
+// subsequent status.json poll then waited forever). So this always passes
+// herdr's own `--wait --until working` flags, which block in herdr until it
+// observes the pane's agent_status actually become "working" — the only
+// confirmation available that the prompt was picked up, not just accepted.
+// timeout bounds that wait via `--timeout`; timeout <= 0 waits indefinitely.
+func (c Client) AgentPrompt(ctx context.Context, target, text string, timeout time.Duration) error {
+	args := []string{"agent", "prompt", target, text, "--wait", "--until", "working"}
+	if timeout > 0 {
+		args = append(args, "--timeout", strconv.FormatInt(timeout.Milliseconds(), 10))
+	}
+	_, err := c.run(ctx, args...)
 	return err
 }
 

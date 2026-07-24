@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // paneListFixture is a trimmed but real `herdr pane list` reply (three panes
@@ -153,12 +154,36 @@ func TestAgentPromptSendsTextToTarget(t *testing.T) {
 		gotArgs = args
 		return []byte(`{"result":{}}`), nil
 	})
-	if err := c.AgentPrompt(context.Background(), "w1:p1", "hello"); err != nil {
+	if err := c.AgentPrompt(context.Background(), "w1:p1", "hello", 30*time.Second); err != nil {
 		t.Fatalf("AgentPrompt: %v", err)
 	}
-	want := []string{"agent", "prompt", "w1:p1", "hello"}
+	want := []string{"agent", "prompt", "w1:p1", "hello", "--wait", "--until", "working", "--timeout", "30000"}
 	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
 		t.Errorf("AgentPrompt args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestAgentPromptZeroTimeoutOmitsTimeoutFlag(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{}}`), nil
+	})
+	if err := c.AgentPrompt(context.Background(), "w1:p1", "hello", 0); err != nil {
+		t.Fatalf("AgentPrompt: %v", err)
+	}
+	want := []string{"agent", "prompt", "w1:p1", "hello", "--wait", "--until", "working"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("AgentPrompt args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestAgentPromptPropagatesTimeoutError(t *testing.T) {
+	sentinel := errors.New(`herdr agent: exit status 1: {"error":{"code":"timeout","message":"no state change observed"}}`)
+	c := NewWithRunner(fakeRunner("", sentinel))
+	err := c.AgentPrompt(context.Background(), "w1:p1", "hello", 5*time.Second)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want the runner's timeout error propagated, got %v", err)
 	}
 }
 

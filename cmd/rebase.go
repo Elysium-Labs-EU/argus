@@ -84,21 +84,28 @@ type rebaseOpts struct {
 	force         bool
 	dryRun        bool
 	noCredProxy   bool
-	// livenessTimeout and livenessInterval bound dispatchIntoPane's post-spawn
-	// poll confirming the newly spawned agent actually came up (see
-	// waitForAgentLive). They are internal knobs, not CLI flags — zero means
-	// "use the package default" (defaultLivenessTimeout / defaultLivenessInterval)
-	// — so a test can override them to run the poll on a fast, deterministic
-	// clock instead of the real 30s/500ms production cadence.
+	// livenessTimeout bounds how long dispatchIntoPane waits for confirmation
+	// that a dispatch actually landed: on the spawn branch, waitForAgentLive's
+	// post-spawn poll for the agent coming up at all; on the live-agent-reuse
+	// branch, herdr's own `--wait --until working` for the existing agent
+	// picking up the re-tasking prompt (argus issue #135). livenessInterval
+	// only applies to the former, waitForAgentLive's own poll cadence. Both are
+	// internal knobs, not CLI flags — zero means "use the package default"
+	// (defaultLivenessTimeout / defaultLivenessInterval) — so a test can
+	// override them to run on a fast, deterministic clock instead of the real
+	// 30s/500ms production cadence.
 	livenessTimeout  time.Duration
 	livenessInterval time.Duration
 }
 
-// defaultLivenessTimeout and defaultLivenessInterval are waitForAgentLive's
-// production pace: generous enough that a slow shell rc-file startup or a
-// loaded machine doesn't false-positive, but bounded so a pane whose spawn
-// line silently failed (argus issue #96) is reported in tens of seconds
-// instead of hanging WaitForStatus's open-ended wait forever.
+// defaultLivenessTimeout and defaultLivenessInterval are dispatchIntoPane's
+// production pace for confirming a dispatch actually landed, on either
+// branch (see livenessTimeout above): generous enough that a slow shell
+// rc-file startup, a loaded machine, or a busy agent turn doesn't
+// false-positive, but bounded so a pane whose spawn line silently failed
+// (argus issue #96) or whose re-tasking prompt was silently dropped (argus
+// issue #135) is reported in tens of seconds instead of hanging
+// WaitForStatus's open-ended wait forever.
 const (
 	defaultLivenessTimeout  = 30 * time.Second
 	defaultLivenessInterval = 500 * time.Millisecond
@@ -252,9 +259,13 @@ func (o *rebaseOpts) dispatchTarget() *dispatchTarget {
 // pane's scrollback never showed the brief being read at all. So this checks
 // with herdr first: a live agent gets re-tasked in place via AgentPrompt, using
 // the same one-line pointer at the brief a fresh spawn would pass as its
-// initial prompt; only a genuinely bare pane (no agent herdr recognizes) falls
-// back to spawning a new one, exactly as supervisor.execute does for a freshly
-// created worktree.
+// initial prompt, and blocks until herdr confirms the agent actually started
+// acting on it (see AgentPrompt's `--wait --until working`, argus issue
+// #135) instead of returning as soon as herdr accepts the text — a live
+// agent already idle or done accepts a prompt identically whether or not
+// anything downstream ever reacts to it. Only a genuinely bare pane (no
+// agent herdr recognizes) falls back to spawning a new one, exactly as
+// supervisor.execute does for a freshly created worktree.
 func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr.Client, paneID, branch string, target *dispatchTarget) error {
 	_, live, err := client.AgentGet(ctx, paneID)
 	if err != nil {
@@ -262,7 +273,14 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	}
 	if live {
 		logger.Action("dispatch", branch, "reuse-live-agent", paneID)
-		return client.AgentPrompt(ctx, paneID, supervisor.InitialPrompt)
+		timeout := target.livenessTimeout
+		if timeout <= 0 {
+			timeout = defaultLivenessTimeout
+		}
+		if perr := client.AgentPrompt(ctx, paneID, supervisor.InitialPrompt, timeout); perr != nil {
+			return fmt.Errorf("prompting live agent in pane %s to pick up the rebase brief: %w", paneID, perr)
+		}
+		return nil
 	}
 
 	logger.Action("dispatch", branch, "spawn-new-agent", paneID)
@@ -274,15 +292,15 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	if err := client.PaneRun(ctx, paneID, spawnLine); err != nil {
 		return err
 	}
-	// Only the freshly spawned branch needs this check: AgentPrompt above
-	// re-tasked an agent herdr already confirmed live, but PaneRun just typed a
-	// shell command line into the pane blind — it succeeds whether or not the
-	// `cd` at the front of it actually worked (argus issue #96: a relative
-	// --worktree reused into a pane already rooted there breaks the `cd ... &&
-	// <launcher>` chain, so the launcher never runs and no agent ever comes up).
-	// Confirming liveness here, bounded, catches that before it becomes an
-	// open-ended hang in WaitForStatus below, which is legitimately unbounded
-	// once an agent is known to be live.
+	// This spawn branch needs its own liveness check distinct from AgentPrompt's
+	// above: PaneRun just typed a shell command line into the pane blind — it
+	// succeeds whether or not the `cd` at the front of it actually worked
+	// (argus issue #96: a relative --worktree reused into a pane already
+	// rooted there breaks the `cd ... && <launcher>` chain, so the launcher
+	// never runs and no agent ever comes up). Confirming liveness here,
+	// bounded, catches that before it becomes an open-ended hang in
+	// WaitForStatus below, which is legitimately unbounded once an agent is
+	// known to be live.
 	return waitForAgentLive(ctx, client, paneID, target.livenessTimeout, target.livenessInterval)
 }
 
