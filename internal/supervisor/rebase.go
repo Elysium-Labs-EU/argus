@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
@@ -19,10 +21,32 @@ func FetchBase(ctx context.Context, worktree, base string) error {
 }
 
 // ConflictsWith reports whether the worktree's HEAD would conflict when rebased
-// onto origin/<base>. It uses `git merge-tree --write-tree`, which computes the
+// onto origin/<base>. git's own merge-tree is trusted for textual conflicts, but
+// not as a proxy for "semantically safe to combine": two branches can each edit
+// the same function without their edits textually overlapping (one inserts a
+// guard clause immediately above a line the other renames, say), and git's
+// context-based 3-way merge picks a side for that line without ever surfacing a
+// conflict — silently dropping the other branch's edit. So a textually clean
+// merge gets a second, cheaper check: if both branches' diffs against the same
+// merge-base touch the same function in the same file, treat it as a conflict
+// too. False positives here just cost an unnecessary worker dispatch; the false
+// negative this replaces costs silently losing a branch's change.
+func ConflictsWith(ctx context.Context, worktree, base string) (bool, error) {
+	textConflict, err := gitMergeConflicts(ctx, worktree, base)
+	if err != nil {
+		return false, err
+	}
+	if textConflict {
+		return true, nil
+	}
+	return sameFunctionTouchedByBoth(ctx, worktree, base)
+}
+
+// gitMergeConflicts reports whether HEAD would textually conflict when merged
+// with origin/<base>. It uses `git merge-tree --write-tree`, which computes the
 // merge without touching the working tree and exits non-zero (code 1) when the
 // merge has conflicts.
-func ConflictsWith(ctx context.Context, worktree, base string) (bool, error) {
+func gitMergeConflicts(ctx context.Context, worktree, base string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "merge-tree", "--write-tree", "origin/"+base, "HEAD") //nolint:gosec // fixed git binary; worktree/base argus-derived
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
@@ -32,6 +56,98 @@ func ConflictsWith(ctx context.Context, worktree, base string) (bool, error) {
 		return false, fmt.Errorf("checking merge conflicts: %w", err)
 	}
 	return false, nil
+}
+
+// sameFunctionTouchedByBoth reports whether HEAD and origin/<base> each carry a
+// change (vs their shared merge-base) that touches the same function in the
+// same file. It never inspects the merge result itself — only the two sides'
+// independent diffs — so it catches the loss before it happens rather than
+// after.
+func sameFunctionTouchedByBoth(ctx context.Context, worktree, base string) (bool, error) {
+	mergeBase, err := git(ctx, worktree, "merge-base", "HEAD", "origin/"+base)
+	if err != nil {
+		return false, fmt.Errorf("resolving merge base with origin/%s: %w", base, err)
+	}
+	ours, err := touchedFunctions(ctx, worktree, mergeBase, "HEAD")
+	if err != nil {
+		return false, err
+	}
+	theirs, err := touchedFunctions(ctx, worktree, mergeBase, "origin/"+base)
+	if err != nil {
+		return false, err
+	}
+	for file, funcs := range ours {
+		theirFuncs, ok := theirs[file]
+		if !ok {
+			continue
+		}
+		for fn := range funcs {
+			if theirFuncs[fn] {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// touchedFunctions maps each file changed between from and to to the set of
+// enclosing function (or other top-level declaration) names git's diff hunk
+// headers report as touched. It relies on git's own funcname context — the
+// text after the second "@@" in a unified diff hunk header, which by default
+// is the nearest preceding line that looks like the start of a top-level
+// declaration — rather than parsing the language itself, so it works across
+// whatever languages a repo mixes in without argus needing a per-language
+// parser.
+func touchedFunctions(ctx context.Context, worktree, from, to string) (map[string]map[string]bool, error) {
+	out, err := git(ctx, worktree, "diff", "--unified=0", from, to)
+	if err != nil {
+		return nil, fmt.Errorf("diffing %s..%s: %w", from, to, err)
+	}
+	return parseTouchedFunctions(out), nil
+}
+
+var (
+	hunkHeaderRe = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ ?(.*)$`)
+	funcNameRe   = regexp.MustCompile(`(\w+)\s*\(`)
+)
+
+// parseTouchedFunctions extracts the per-file, per-function touch set out of a
+// `git diff --unified=0` transcript (see touchedFunctions).
+func parseTouchedFunctions(diff string) map[string]map[string]bool {
+	touched := map[string]map[string]bool{}
+	var file string
+	for line := range strings.SplitSeq(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+++ "):
+			file = strings.TrimPrefix(strings.TrimPrefix(line, "+++ "), "b/")
+		case strings.HasPrefix(line, "@@"):
+			m := hunkHeaderRe.FindStringSubmatch(line)
+			if m == nil || file == "" {
+				continue
+			}
+			fn := funcNameInContext(m[1])
+			if fn == "" {
+				continue
+			}
+			if touched[file] == nil {
+				touched[file] = map[string]bool{}
+			}
+			touched[file][fn] = true
+		}
+	}
+	return touched
+}
+
+// funcNameInContext pulls the likely declaration name out of a hunk header's
+// context text (e.g. "func (s *Supervisor) reconcile(cfg *Config) error {" ->
+// "reconcile"): the last identifier immediately followed by "(", which for a
+// receiver method skips the receiver's own parenthesized group.
+func funcNameInContext(hunkContext string) string {
+	matches := funcNameRe.FindAllStringSubmatch(hunkContext, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[len(matches)-1][1]
 }
 
 // RebaseBrief is the task brief argus injects when dispatching a worker to

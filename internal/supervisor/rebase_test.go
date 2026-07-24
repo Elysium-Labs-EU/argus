@@ -248,6 +248,245 @@ func TestConflictsWithDetectsCleanAndConflicting(t *testing.T) {
 	}
 }
 
+// reconcileBase is a stand-in for the shape of argus issue #151's repro:
+// reconcile() has two structurally near-identical "for _, st := range states"
+// loops (mirroring the real internal/supervisor/loop.go), which is what leads
+// git's diff to anchor a change to the wrong loop and consider two branches'
+// edits to the second loop non-adjacent even though they aren't.
+const reconcileBase = `package supervisor
+
+func reconcile(cfg *Config, states []*workerState) {
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		measure(st)
+	}
+
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ok, err := HasPlanEvidence(cfg.Home, st.Worktree)
+		if err != nil {
+			continue
+		}
+		st.hasPlanEvidence = ok
+	}
+}
+
+func unrelated() int {
+	return 1
+}
+`
+
+// reconcileWithGuard mirrors argus PR #145: a guard clause inserted between
+// the two loops, directly above the second loop, without touching the
+// HasPlanEvidence line itself.
+const reconcileWithGuard = `package supervisor
+
+func reconcile(cfg *Config, states []*workerState) {
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		measure(st)
+	}
+
+	if !usesDefaultLauncher(cfg.Launcher) {
+		return
+	}
+
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ok, err := HasPlanEvidence(cfg.Home, st.Worktree)
+		if err != nil {
+			continue
+		}
+		st.hasPlanEvidence = ok
+	}
+}
+
+func unrelated() int {
+	return 1
+}
+`
+
+// reconcileWithRename mirrors argus PR #146: the HasPlanEvidence call renamed
+// to route through a seam, without touching any other line reconcileWithGuard
+// touches.
+const reconcileWithRename = `package supervisor
+
+func reconcile(cfg *Config, states []*workerState) {
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		measure(st)
+	}
+
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ok, err := defaultAgent.PlanEvidence(cfg.Home, st.Worktree)
+		if err != nil {
+			continue
+		}
+		st.hasPlanEvidence = ok
+	}
+}
+
+func unrelated() int {
+	return 1
+}
+`
+
+// reconcileUnrelatedEdit touches only the unrelated() function, leaving
+// reconcile() byte-for-byte identical to reconcileBase.
+const reconcileUnrelatedEdit = `package supervisor
+
+func reconcile(cfg *Config, states []*workerState) {
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		measure(st)
+	}
+
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ok, err := HasPlanEvidence(cfg.Home, st.Worktree)
+		if err != nil {
+			continue
+		}
+		st.hasPlanEvidence = ok
+	}
+}
+
+func unrelated() int {
+	return 2
+}
+`
+
+// initGoRepo builds a tiny real git repo — bare origin plus a clone — seeded
+// with content on main, so a test can diverge the clone's branch and origin's
+// main independently and inspect the real git merge-tree/diff plumbing
+// ConflictsWith runs against.
+func initGoRepo(t *testing.T, seedContent string) (worktree, base string) {
+	t.Helper()
+	base = "main"
+	origin := gitTempDir(t)
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	run(origin, "init", "-q", "--bare", "-b", base, ".")
+	seed := gitTempDir(t)
+	run(seed, "init", "-q", "-b", base, ".")
+	if err := os.WriteFile(filepath.Join(seed, "loop.go"), []byte(seedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(seed, "add", "-A")
+	run(seed, "commit", "-q", "-m", "seed")
+	run(seed, "remote", "add", "origin", origin)
+	run(seed, "push", "-q", "origin", base)
+
+	worktree = gitTempDir(t)
+	run(filepath.Dir(worktree), "clone", "-q", origin, filepath.Base(worktree))
+	return worktree, base
+}
+
+// writeAndCommit overwrites loop.go in dir with content and commits it.
+func writeAndCommit(t *testing.T, dir, content, msg string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "loop.go"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, dir, "add", "-A")
+	gitDo(t, dir, "commit", "-q", "-m", msg)
+}
+
+// TestConflictsWithCatchesSameFunctionEditedByBothSides reproduces argus issue
+// #151: PR #145 (merged into origin/main first) inserts a guard clause
+// directly above a line PR #146's own branch renames. The two edits never
+// touch the same line, so git's merge-tree considers the merge clean — but
+// the merge silently keeps only one side's edit to reconcile(). ConflictsWith
+// must report a conflict anyway, even though the underlying git merge-tree
+// check alone would not.
+func TestConflictsWithCatchesSameFunctionEditedByBothSides(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGoRepo(t, reconcileBase)
+
+	// origin/main advances the way PR #145 did: merged first.
+	other := gitTempDir(t)
+	gitDo(t, filepath.Dir(other), "clone", "-q", mustRemote(t, wt), filepath.Base(other))
+	writeAndCommit(t, other, reconcileWithGuard, "145: add guard")
+	gitDo(t, other, "push", "-q", "origin", base)
+
+	// The worktree's own branch, diverged from the same base, as PR #146 did.
+	writeAndCommit(t, wt, reconcileWithRename, "146: rename call via seam")
+
+	if err := FetchBase(ctx, wt, base); err != nil {
+		t.Fatalf("FetchBase: %v", err)
+	}
+
+	textConflict, err := gitMergeConflicts(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("gitMergeConflicts: %v", err)
+	}
+	if textConflict {
+		t.Fatal("test setup should reproduce a textually clean merge (git's own false negative) — got a real conflict instead")
+	}
+
+	conflicts, err := ConflictsWith(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("ConflictsWith: %v", err)
+	}
+	if !conflicts {
+		t.Error("ConflictsWith should flag a conflict when both sides edit reconcile(), even though git's own merge-tree reports clean")
+	}
+}
+
+// TestConflictsWithIgnoresEditsToDifferentFunctions confirms the same-function
+// heuristic doesn't over-fire: two branches editing different functions in the
+// same file, with no textual conflict, should still report no conflict.
+func TestConflictsWithIgnoresEditsToDifferentFunctions(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGoRepo(t, reconcileBase)
+
+	other := gitTempDir(t)
+	gitDo(t, filepath.Dir(other), "clone", "-q", mustRemote(t, wt), filepath.Base(other))
+	writeAndCommit(t, other, reconcileWithGuard, "145: add guard")
+	gitDo(t, other, "push", "-q", "origin", base)
+
+	// The worktree's branch only touches unrelated(), never reconcile().
+	writeAndCommit(t, wt, reconcileUnrelatedEdit, "unrelated: change return value")
+
+	if err := FetchBase(ctx, wt, base); err != nil {
+		t.Fatalf("FetchBase: %v", err)
+	}
+
+	conflicts, err := ConflictsWith(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("ConflictsWith: %v", err)
+	}
+	if conflicts {
+		t.Error("ConflictsWith should not flag a conflict for edits to unrelated functions")
+	}
+}
+
 func mustRemote(t *testing.T, worktree string) string {
 	t.Helper()
 	cmd := exec.Command("git", "-C", worktree, "remote", "get-url", "origin")
