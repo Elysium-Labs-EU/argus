@@ -99,6 +99,32 @@ func settingsFor(worktree string, extraAllow []string) permissionSettings {
 		"Bash(git add*)",
 	}
 	allow = append(allow, extraAllow...)
+
+	// Deny wins over allow in Claude Code regardless of pattern specificity
+	// (deny/ask/allow are checked in that order, first match wins), so these
+	// entries carve the worker's own permission files out of the broad
+	// Edit/Write(glob) allows above: without them a worker could rewrite its
+	// own settings.local.json mid-session and grant itself capability the
+	// operator never approved. WriteSettings only resets the file at the
+	// start of the *next* run, which leaves the entire current session
+	// unprotected.
+	ownSettings := []string{
+		worktree + "/.claude/settings.local.json",
+		worktree + "/.claude/settings.json",
+	}
+	deny := []string{
+		"Bash(rm -rf *)",
+		"Bash(git worktree remove*)",
+		"Bash(git worktree prune*)",
+		"Bash(git clean -f*)",
+		"Bash(git reset --hard*)",
+		"Bash(trash *)",
+		"Bash(sudo *)",
+	}
+	for _, p := range ownSettings {
+		deny = append(deny, "Edit("+p+")", "Write("+p+")")
+	}
+
 	return permissionSettings{
 		Permissions: permissionBlock{
 			Allow: allow,
@@ -106,15 +132,7 @@ func settingsFor(worktree string, extraAllow []string) permissionSettings {
 				"Bash(git commit:*)",
 				"Bash(git push:*)",
 			},
-			Deny: []string{
-				"Bash(rm -rf *)",
-				"Bash(git worktree remove*)",
-				"Bash(git worktree prune*)",
-				"Bash(git clean -f*)",
-				"Bash(git reset --hard*)",
-				"Bash(trash *)",
-				"Bash(sudo *)",
-			},
+			Deny: deny,
 		},
 	}
 }

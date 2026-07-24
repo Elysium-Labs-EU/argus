@@ -3,6 +3,7 @@ package supervisor
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -28,6 +29,23 @@ func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 	}
 	if round.Permissions.Allow[len(round.Permissions.Allow)-1] != "Bash(task *)" {
 		t.Errorf("extraAllow not applied via RenderSettings; got %v", round.Permissions.Allow)
+	}
+}
+
+func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
+	wt := "/repo/.claude/worktrees/feat-x"
+	settings := settingsFor(wt, nil)
+
+	want := []string{
+		"Edit(" + wt + "/.claude/settings.local.json)",
+		"Write(" + wt + "/.claude/settings.local.json)",
+		"Edit(" + wt + "/.claude/settings.json)",
+		"Write(" + wt + "/.claude/settings.json)",
+	}
+	for _, entry := range want {
+		if !slices.Contains(settings.Permissions.Deny, entry) {
+			t.Errorf("deny list missing %q; got %v", entry, settings.Permissions.Deny)
+		}
 	}
 }
 
