@@ -145,7 +145,7 @@ func TestHasUncommittedChangesStashUnpushed(t *testing.T) {
 	if err != nil || dirty {
 		t.Fatalf("clean worktree: dirty=%v err=%v", dirty, err)
 	}
-	stashed, err := hasStash(ctx, worktree)
+	stashed, err := hasStash(ctx, worktree, "feat-y")
 	if err != nil || stashed {
 		t.Fatalf("no stash yet: stashed=%v err=%v", stashed, err)
 	}
@@ -162,7 +162,7 @@ func TestHasUncommittedChangesStashUnpushed(t *testing.T) {
 	}
 
 	gitDo(t, worktree, "stash", "-q")
-	stashed, err = hasStash(ctx, worktree)
+	stashed, err = hasStash(ctx, worktree, "feat-y")
 	if err != nil || !stashed {
 		t.Fatalf("after stash: stashed=%v err=%v", stashed, err)
 	}
@@ -174,6 +174,42 @@ func TestHasUncommittedChangesStashUnpushed(t *testing.T) {
 	gitDo(t, worktree, "commit", "-q", "--allow-empty", "-m", "local only")
 	if !hasUnpushedCommits(ctx, worktree) {
 		t.Fatal("a local-only commit should report unpushed commits")
+	}
+}
+
+// TestHasStashIsScopedPerBranch guards against the bug where hasStash ran
+// `git stash list` unfiltered: refs/stash lives in the repo's shared common
+// .git dir, not per linked worktree, so an unfiltered check saw every
+// worktree's stash from every worktree — one stray stash on branch A
+// permanently blocked pruning of unrelated branch B, forever.
+func TestHasStashIsScopedPerBranch(t *testing.T) {
+	repoRoot, base := initGitRepo(t)
+	ctx := context.Background()
+
+	gitDo(t, repoRoot, "checkout", "-q", "-b", "branch-a")
+	gitDo(t, repoRoot, "push", "-q", "-u", "origin", "branch-a")
+	gitDo(t, repoRoot, "checkout", "-q", base)
+	gitDo(t, repoRoot, "checkout", "-q", "-b", "branch-b")
+	gitDo(t, repoRoot, "push", "-q", "-u", "origin", "branch-b")
+	gitDo(t, repoRoot, "checkout", "-q", base)
+
+	worktreeA := filepath.Join(t.TempDir(), "branch-a")
+	gitDo(t, repoRoot, "worktree", "add", "-q", worktreeA, "branch-a")
+	worktreeB := filepath.Join(t.TempDir(), "branch-b")
+	gitDo(t, repoRoot, "worktree", "add", "-q", worktreeB, "branch-b")
+
+	if err := os.WriteFile(filepath.Join(worktreeA, "f.txt"), []byte("line1\nchanged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, worktreeA, "stash", "-q")
+
+	stashedA, err := hasStash(ctx, worktreeA, "branch-a")
+	if err != nil || !stashedA {
+		t.Fatalf("branch-a's own stash should be seen from its worktree: stashed=%v err=%v", stashedA, err)
+	}
+	stashedB, err := hasStash(ctx, worktreeB, "branch-b")
+	if err != nil || stashedB {
+		t.Fatalf("branch-a's stash must not leak into branch-b's prune check: stashed=%v err=%v", stashedB, err)
 	}
 }
 

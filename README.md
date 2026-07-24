@@ -41,6 +41,29 @@ Then the gate runs. It checks the worker's reported status against a review poli
 
 The design follows Adam Jacob's idea: move the coordinator out of the model, scale review intensity to risk. argus applies that idea to a supervise-agents workflow.
 
+## After the merge: a worktree's post-ship lifecycle
+
+The state machine above ends at `ship`. But the worktree itself doesn't disappear when the PR opens — it sits on disk until someone cleans it up, and a repo accumulates one dead worktree per finished worker if nobody does. `argus worktree prune` is that cleanup, gated on a separate lifecycle argus tracks per worktree (`internal/protocol/lifecycle.go`), not the worker's own Phase:
+
+```mermaid
+stateDiagram-v2
+    [*] --> active
+    active --> shipped: ship opens a PR
+    shipped --> merged: forge reports the PR merged
+    merged --> pruned: worktree prune cleans it up
+```
+
+* **active** — no lifecycle record yet, or a worktree `ship` has never touched.
+* **shipped** — `ship` wrote this the moment it opened the pull request.
+* **merged** — `prune` checks the PR's state on the forge (via `resolveMergeState`, cached once merged so it never re-asks) and advances the record here the instant it sees a merge.
+* **pruned** — `prune` cleaned the worktree up. Terminal.
+
+Before cleaning anything, `EvaluateCandidate` runs a safety gate: the branch's PR must be merged, and — if the working directory still exists — it must be free of uncommitted changes, stash entries, and unpushed commits. Any one of those failing leaves the worktree untouched, with the specific reason reported (`"uncommitted changes"`, `"stash entries present"`, `"unpushed commits"`, `"PR ... not merged (state=...)"`); prune never forces a clean past a failed check.
+
+Cleanup itself (`CleanWorktree`) is a recoverable relocation, never a raw `rm`: the worktree directory is moved into an `argus-trash` holding dir under the repo's common git dir, then `git worktree remove --force` clears its registration. If a herdr pane was recorded for that worktree (see `internal/protocol/panes.go`'s pane registry), prune also closes it, and the workspace too if it was left empty.
+
+Run it with `argus worktree prune --branch <name>` for one worktree, or `--merged` to sweep every worktree under the repo; `--dry-run` prints the plan (which worktrees, which check failed or passed) without moving or deleting anything.
+
 ## Requirements
 
 * Go 1.26 or newer, to build from source.
@@ -131,6 +154,7 @@ argus ship --worktree /path/to/project-feat-retry --issue 42
 | `argus ship --worktree <path>` | Commit, push, and open a pull request (forge auto-detected), refused without an approving verdict unless `--force` |
 | `argus rebase --worktree <path>` | Dispatch the worktree's own worker to resolve a post-merge conflict and force-push |
 | `argus rework --worktree <path>` | Re-dispatch the worktree's own worker with a request-changes verdict's findings, loop the gate/review until it clears or `--max-rounds` is exhausted, and persist the resulting verdict so `ship` sees it |
+| `argus worktree prune --branch <name>` \| `--merged` | Clean up a worktree whose PR has merged (or sweep every worktree under the repo), gated on merge status plus no uncommitted changes, stash entries, or unpushed commits; `--dry-run` prints the plan without changing anything |
 | `argus stats` | Aggregate the run logs under `~/.argus/runs` into escalation rate, review parse-fail rate, and tokens per task |
 | `argus config set credential.<name> <ENV_VAR>` | Persist which env var carries a credential (a forge host or agent-key name) to `~/.argus/config.toml`, so `--credential-env` doesn't need repeating every invocation |
 

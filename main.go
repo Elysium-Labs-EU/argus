@@ -11,8 +11,7 @@ import (
 
 func main() {
 	if err := cmd.Execute(); err != nil {
-		var uerr *ui.UserError
-		if errors.As(err, &uerr) {
+		if uerr, ok := errors.AsType[*ui.UserError](err); ok {
 			fmt.Fprintf(os.Stderr, "%s\n\n", uerr.Render())
 		} else {
 			fmt.Fprintf(os.Stderr, "%s %s\n\n", ui.LabelError.Render("error"), err)

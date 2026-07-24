@@ -132,7 +132,7 @@ func EvaluateCandidate(ctx context.Context, f forge.Forge, owner, repo, repoRoot
 		if dirty {
 			c.Reasons = append(c.Reasons, "uncommitted changes")
 		}
-		stashed, serr := hasStash(ctx, worktree)
+		stashed, serr := hasStash(ctx, worktree, branch)
 		if serr != nil {
 			return nil, serr
 		}
@@ -238,13 +238,30 @@ func isControlPlanePath(path string) bool {
 	return false
 }
 
-// hasStash reports whether worktree carries any stash entries.
-func hasStash(ctx context.Context, worktree string) (bool, error) {
-	out, err := git(ctx, worktree, "stash", "list")
+// hasStash reports whether branch has a stash entry of its own. Stash refs
+// live in the shared refs/stash of the repo's common .git dir, not per
+// worktree — `git stash list` run from any worktree returns the same
+// repo-wide list, so an unfiltered check would block every worktree in the
+// repo forever over one stray stash left on an unrelated branch. Git always
+// prefixes a stash's subject with "On <branch>: " (given an explicit -m
+// message) or "WIP on <branch>: " (the default, message-less form) for a
+// named branch — only a detached-HEAD or otherwise unattributable entry
+// (e.g. a bare "autostash" message some git versions produce for
+// `rebase --autostash`) lacks either prefix — so matching on them is how we
+// scope the check back down to this branch's own stash, if any.
+func hasStash(ctx context.Context, worktree, branch string) (bool, error) {
+	out, err := git(ctx, worktree, "stash", "list", "--format=%gs")
 	if err != nil {
 		return false, err
 	}
-	return out != "", nil
+	onPrefix := "On " + branch + ":"
+	wipPrefix := "WIP on " + branch + ":"
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, onPrefix) || strings.HasPrefix(line, wipPrefix) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // hasUnpushedCommits reports whether HEAD is ahead of its upstream. A branch
