@@ -53,6 +53,9 @@ func TestIssuesToTasks(t *testing.T) {
 	if !strings.Contains(tasks[0], "Do NOT git commit or push; argus ships.") {
 		t.Errorf("task 0 missing the fixed ship-pipeline line: %q", tasks[0])
 	}
+	if !strings.Contains(tasks[0], fixedCommentStyle) {
+		t.Errorf("task 0 missing the fixed comment-style line: %q", tasks[0])
+	}
 	if branches[0] != "fix-issue-142" || branches[1] != "fix-issue-145" {
 		t.Errorf("branches: %v", branches)
 	}
@@ -127,6 +130,12 @@ func TestJiraIssuesToTasks(t *testing.T) {
 	}
 	if !strings.Contains(tasks[0], "PROJ-142") || !strings.Contains(tasks[0], "daemon down warning") || !strings.Contains(tasks[0], "warn when down") {
 		t.Errorf("task 0 missing issue content: %q", tasks[0])
+	}
+	if !strings.Contains(tasks[0], "Do NOT git commit or push; argus ships.") {
+		t.Errorf("task 0 missing the fixed ship-pipeline line: %q", tasks[0])
+	}
+	if !strings.Contains(tasks[0], fixedCommentStyle) {
+		t.Errorf("task 0 missing the fixed comment-style line: %q", tasks[0])
 	}
 	if branches[0] != "fix-proj-142" || branches[1] != "fix-proj-145" {
 		t.Errorf("branches: %v", branches)

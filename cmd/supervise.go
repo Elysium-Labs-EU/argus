@@ -656,14 +656,22 @@ func repoBriefNote(repoPath string) string {
 	return rc.BriefNote
 }
 
-// fixedBriefTail appends argus's own non-negotiable ship-pipeline invariant
-// after an optional repo-supplied brief_note. Unlike brief_note (toolchain
-// flavor a repo owner opts into via config, e.g. "keep make ci green"), "don't
-// commit, argus ships" is argus's own pipeline contract — ship phase owns
-// commit/push, the worker must not — so it always applies, not something a
-// repo owner can disable.
+// fixedCommentStyle is argus's own non-negotiable comment-quality invariant:
+// a worker's comments ship as part of the diff argus opens a PR from, so
+// their quality is argus's responsibility as much as the code's. Like "don't
+// commit, argus ships" below, this is not something a repo owner can disable
+// via brief_note — issue/ticket numbers rot the moment the tracker renumbers
+// or migrates, leaving a comment that cites context no later reader has.
+const fixedCommentStyle = "Comments must be terse and explain WHY (a hidden constraint, subtle invariant, non-obvious reasoning), never WHAT the code already makes obvious. Never cite issue or ticket numbers in comments — that context belongs in the PR description and commit message, not source code."
+
+// fixedBriefTail appends argus's own non-negotiable invariants after an
+// optional repo-supplied brief_note. Unlike brief_note (toolchain flavor a
+// repo owner opts into via config, e.g. "keep make ci green"), "don't commit,
+// argus ships" and the comment-style rule are argus's own contract — ship
+// phase owns commit/push and comment quality ships as part of the diff either
+// way — so they always apply, not something a repo owner can disable.
 func fixedBriefTail(briefNote string) string {
-	const fixed = "Do NOT git commit or push; argus ships."
+	fixed := "Do NOT git commit or push; argus ships. " + fixedCommentStyle
 	if briefNote == "" {
 		return fixed
 	}
