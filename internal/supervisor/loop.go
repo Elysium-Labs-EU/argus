@@ -147,19 +147,16 @@ the supervisor can make.
 }
 
 // taskLabel is a short, log-friendly identifier for a worker task: the first
-// "#<n>" issue reference when present, otherwise the first line trimmed to 60
-// characters. It keeps the run log and `argus stats` keyed by something readable
-// instead of the entire multi-line brief.
+// line, trimmed to 60 characters. It keeps the run log, `argus stats`, and the
+// herdr-visible worker label keyed by something readable instead of the entire
+// multi-line brief.
+//
+// It deliberately does not special-case a leading "#<n>" issue reference into
+// a bare label like "#143" — issuesToTasks renders --issues tasks as "Fix
+// owner/repo issue #143: <title>", so the first line already carries the
+// issue number *and* the repo and title that distinguish it from same-numbered
+// issues in other repos when several workers run side by side.
 func taskLabel(task string) string {
-	if i := strings.IndexByte(task, '#'); i >= 0 {
-		j := i + 1
-		for j < len(task) && task[j] >= '0' && task[j] <= '9' {
-			j++
-		}
-		if j > i+1 {
-			return task[i:j]
-		}
-	}
 	line := task
 	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
 		line = line[:nl]
