@@ -417,13 +417,16 @@ func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
 	}
 }
 
-// TestDispatchRebaseWorkerIgnoresStaleStatus is the direct regression test for
-// argus issue #50: a worktree carrying a leftover terminal status.json from
-// before this rebase was dispatched (the normal supervise flow's own
-// awaiting_review, unrelated to the rebase) must never be reported as this
-// dispatch's outcome. The fake herdr client never actually runs a worker, so
-// no fresh status is written, and dispatchRebaseWorker must time out instead
-// of reporting the stale phase as success.
+// TestDispatchRebaseWorkerIgnoresStaleStatus confirms a worktree carrying a
+// leftover terminal status.json from before this rebase was dispatched (the
+// normal supervise flow's own awaiting_review, unrelated to the rebase) is
+// never reported as this dispatch's outcome. The fake herdr client never
+// actually runs a worker, so no fresh status is written, and
+// dispatchRebaseWorker must time out instead of reporting the stale phase as
+// success. dispatchRebaseWorker re-creates status.json right after
+// invalidating it (see TestDispatchRebaseWorkerPersistsBaseAfterInvalidate),
+// so this only checks the stale phase doesn't survive, not that the file
+// stays absent.
 func TestDispatchRebaseWorkerIgnoresStaleStatus(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()
@@ -443,8 +446,43 @@ func TestDispatchRebaseWorkerIgnoresStaleStatus(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no status before the deadline") {
 		t.Fatalf("want the no-status error for a stale pre-dispatch status.json, got %v", err)
 	}
-	if _, lerr := protocol.Load(protocol.StatusPath(worktree)); lerr == nil {
-		t.Errorf("expected the stale status.json to be invalidated (removed) before dispatch")
+	status, lerr := protocol.Load(protocol.StatusPath(worktree))
+	if lerr != nil {
+		t.Fatalf("loading status.json after dispatch: %v", lerr)
+	}
+	if status.Phase == protocol.PhaseAwaitingReview {
+		t.Errorf("expected the stale awaiting_review status to be invalidated before dispatch, got phase %v", status.Phase)
+	}
+}
+
+// TestDispatchRebaseWorkerPersistsBaseAfterInvalidate confirms Base survives
+// InvalidateStatus (see TestDispatchRebaseWorkerIgnoresStaleStatus above),
+// which removes status.json entirely — a worker's own `argus worker report`
+// never sets Base itself, only carries forward whatever value is already on
+// disk, so a dropped Base stays dropped. No worker reports here (ctx times
+// out first), so the only way status.json can carry Base afterward is
+// dispatchRebaseWorker's own write.
+func TestDispatchRebaseWorkerPersistsBaseAfterInvalidate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := dispatchRebaseWorker(ctx, logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "trunk", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no status before the deadline") {
+		t.Fatalf("want the no-status error, got %v", err)
+	}
+	status, lerr := protocol.Load(protocol.StatusPath(worktree))
+	if lerr != nil {
+		t.Fatalf("loading status.json after dispatch: %v", lerr)
+	}
+	if status.Base != "trunk" {
+		t.Errorf("want Base %q preserved across InvalidateStatus, got %q", "trunk", status.Base)
 	}
 }
 
