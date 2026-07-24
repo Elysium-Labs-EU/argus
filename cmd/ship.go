@@ -49,7 +49,7 @@ worktree unless overridden.`,
 				return err
 			}
 			return runShip(cmd, &shipArgs{
-				worktree: worktree, base: base, title: title, repo: repo,
+				worktree: worktree, base: base, baseIsDefault: !cmd.Flags().Changed("base"), title: title, repo: repo,
 				issue: issue, force: force, dryRun: dryRun, credentialEnv: overrides,
 				jiraIssue: jiraIssue, jiraTransition: jiraTransition, jiraAssignee: jiraAssignee,
 			})
@@ -86,6 +86,14 @@ type shipArgs struct {
 	issue          int
 	force          bool
 	dryRun         bool
+	// baseIsDefault is true only when --base was left at its unset CLI
+	// default (cmd.Flags().Changed("base") == false): runShip then resolves
+	// the real base via supervisor.ResolveBase instead of trusting the
+	// flag's literal "main" default (see internal/repoconfig, issue
+	// #160/#161). Any caller building shipArgs directly (tests,
+	// shipChange's other callers) leaves this false, which means "trust
+	// base as given" — the pre-#161 behavior.
+	baseIsDefault bool
 }
 
 // shipTarget is the forge/branch/PR identity runShip resolves before deciding
@@ -120,6 +128,9 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	}
 	a.worktree = resolved
 	ctx := cmd.Context()
+	if a.baseIsDefault {
+		a.base = supervisor.ResolveBase(ctx, a.worktree, a.base, false)
+	}
 
 	branch, err := currentBranch(ctx, a.worktree)
 	if err != nil {

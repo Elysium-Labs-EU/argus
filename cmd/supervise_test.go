@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -530,6 +532,94 @@ func TestSpawnWorkersRelativeRepoResolvesAbsolute(t *testing.T) {
 	}
 	if workers[0].RepoRoot != wantAbs {
 		t.Errorf("RepoRoot: got %q want %q", workers[0].RepoRoot, wantAbs)
+	}
+}
+
+// runGitForSuperviseTest mirrors internal/supervisor's test-only git setup
+// helper — used here to build a real repo with a detectable origin/HEAD.
+func runGitForSuperviseTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// repoWithOriginHEAD builds a real git repo whose refs/remotes/origin/HEAD
+// resolves to defaultBranch, by cloning a bare "origin" seeded with one
+// commit there.
+func repoWithOriginHEAD(t *testing.T, defaultBranch string) string {
+	t.Helper()
+	origin := t.TempDir()
+	runGitForSuperviseTest(t, origin, "init", "-q", "--initial-branch="+defaultBranch)
+	runGitForSuperviseTest(t, origin, "config", "user.email", "t@t")
+	runGitForSuperviseTest(t, origin, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitForSuperviseTest(t, origin, "add", "README.md")
+	runGitForSuperviseTest(t, origin, "commit", "-q", "-m", "init")
+
+	repo := t.TempDir()
+	runGitForSuperviseTest(t, filepath.Dir(repo), "clone", "-q", origin, repo)
+	return repo
+}
+
+func TestResolveSuperviseBaseExplicitFlagWinsOutright(t *testing.T) {
+	repo := repoWithOriginHEAD(t, "trunk")
+	rc := repoconfig.Config{BaseBranch: "develop"}
+	got := resolveSuperviseBase(context.Background(), true, "origin/explicit", repo, rc)
+	if got != "origin/explicit" {
+		t.Errorf("resolveSuperviseBase = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveSuperviseBasePrefersRepoConfig(t *testing.T) {
+	repo := repoWithOriginHEAD(t, "trunk")
+	rc := repoconfig.Config{BaseBranch: "develop"}
+	got := resolveSuperviseBase(context.Background(), false, "origin/main", repo, rc)
+	if got != "origin/develop" {
+		t.Errorf("resolveSuperviseBase = %q, want origin/%s from repo config", got, "develop")
+	}
+}
+
+func TestResolveSuperviseBaseFallsBackToDetectedOriginHEAD(t *testing.T) {
+	repo := repoWithOriginHEAD(t, "trunk")
+	got := resolveSuperviseBase(context.Background(), false, "origin/main", repo, repoconfig.Config{})
+	if got != "origin/trunk" {
+		t.Errorf("resolveSuperviseBase = %q, want origin/%s detected from origin/HEAD", got, "trunk")
+	}
+}
+
+func TestResolveSuperviseBaseFallsBackToFlagDefault(t *testing.T) {
+	got := resolveSuperviseBase(context.Background(), false, "origin/main", "", repoconfig.Config{})
+	if got != "origin/main" {
+		t.Errorf("resolveSuperviseBase = %q, want the flag's own default when nothing else resolves", got)
+	}
+}
+
+// TestRunSupervisionSpawnDryRunPlumbsRepoAllow checks that superviseOpts.repoAllow
+// (loaded from .argus/config.yml) reaches every worker's generated
+// settings.local.json, the same way --allow always has — the dry-run plan
+// prints each worker's rendered settings verbatim.
+func TestRunSupervisionSpawnDryRunPlumbsRepoAllow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "sk-should-not-be-used")
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetContext(context.Background())
+
+	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: t.TempDir()}}
+	err := runSupervision(cmd, fakeClient(), workers, &superviseOpts{
+		dryRun: true, base: "origin/main", repoAllow: []string{"Bash(pnpm *)"},
+	})
+	if err != nil {
+		t.Fatalf("runSupervision: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Bash(pnpm *)") {
+		t.Errorf("dry-run plan should reflect the repo config allow list; got:\n%s", buf.String())
 	}
 }
 

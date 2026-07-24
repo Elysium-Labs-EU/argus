@@ -89,7 +89,7 @@ func TestTaskLabel(t *testing.T) {
 func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 	plans := BuildPlan([]Worker{
 		{Task: "eos#42", Branch: "feat-x", RepoRoot: "/repo-a"},
-	}, nil)
+	}, nil, nil)
 	if len(plans) != 1 {
 		t.Fatalf("want 1 plan, got %d", len(plans))
 	}
@@ -112,7 +112,7 @@ func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 func TestBuildPlanLabelExplicitWins(t *testing.T) {
 	plans := BuildPlan([]Worker{
 		{Task: "eos#42", Branch: "feat-x", Label: "my-custom-label", RepoRoot: "/repo-a"},
-	}, nil)
+	}, nil, nil)
 	if got := plans[0].Label; got != "my-custom-label" {
 		t.Errorf("an explicit Label should win over any derived default; got %q", got)
 	}
@@ -124,7 +124,7 @@ func TestBuildPlanLabelDefaultsFromTask(t *testing.T) {
 	// issue #140 (argus-worker-N carried zero information).
 	plans := BuildPlan([]Worker{
 		{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: "/repo-a"},
-	}, nil)
+	}, nil, nil)
 	if got := plans[0].Label; got != "fix bug in parser" {
 		t.Errorf("label should derive from task text; got %q", got)
 	}
@@ -135,7 +135,7 @@ func TestBuildPlanLabelFallsBackToBranchWithNoTask(t *testing.T) {
 	// label; the branch itself is the only thing left to show.
 	plans := BuildPlan([]Worker{
 		{Branch: "argus-worker-1", RepoRoot: "/repo-a"},
-	}, nil)
+	}, nil, nil)
 	if got := plans[0].Label; got != "argus-worker-1" {
 		t.Errorf("label should fall back to branch when there's no task; got %q", got)
 	}
@@ -264,7 +264,7 @@ func TestExecuteWritesSettingsBriefAndSpawnsInRootPane(t *testing.T) {
 		Now:    time.Now,
 		Base:   "main",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
 
 	states, err := execute(context.Background(), cfg, plans)
 	if err != nil {
@@ -299,7 +299,7 @@ func TestPrepareWorktreePassesLabelNotBranch(t *testing.T) {
 	cfg := &Config{Client: herdr.NewWithRunner(rr.run), Base: "main"}
 	// Task differs from Branch so a label equal to Branch (the pre-#140
 	// behavior) is distinguishable from a label derived off Task.
-	plans := BuildPlan([]Worker{{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: repo}}, nil)
+	plans := BuildPlan([]Worker{{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: repo}}, nil, nil)
 
 	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); err != nil {
 		t.Fatalf("prepareWorktree: %v", err)
@@ -350,7 +350,7 @@ func TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent(t *testing.T) {
 		Base:   "main",
 		Log:    eventlog.New(io.Discard, "supervise", "r", nil),
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err == nil {
 		t.Fatal("execute should refuse to spawn into a pane with a live agent session, got nil error")
@@ -381,7 +381,7 @@ func TestExecuteWrapsSpawnLineViaRuntimeAdapterWhenConfigured(t *testing.T) {
 		Base:          "main",
 		WorkerRuntime: "fake",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -469,7 +469,7 @@ func TestExecuteFailsWhenConfiguredRuntimeAdapterIsMissing(t *testing.T) {
 		Base:          "main",
 		WorkerRuntime: "does-not-exist",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err == nil {
 		t.Fatal("want an error when the configured runtime adapter cannot be resolved, got nil")
@@ -483,7 +483,7 @@ func TestRenderPlanNeverExecsAnAdapter(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
 	var buf bytes.Buffer
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: "/repo"}}, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: "/repo"}}, nil, nil)
 	renderPlan(&buf, "origin/main", "claude", "docker", nil, plans)
 
 	out := buf.String()
@@ -1072,14 +1072,25 @@ func TestExecuteInvalidatesStaleStatusBeforeSpawn(t *testing.T) {
 		Now:    time.Now,
 		Base:   "main",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
-	if _, err := os.Stat(protocol.StatusPath(wt)); !os.IsNotExist(err) {
-		t.Errorf("stale status.json should have been removed before spawn, stat err = %v", err)
+	// The stale content itself (issue #75) must be gone — but execute now
+	// writes its own fresh status.json right back, recording the base branch
+	// (issue #161/#160), so the file existing again is expected; only its
+	// content must no longer be the unrelated prior task's.
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Task == "unrelated-old-task" || got.Phase == protocol.PhaseDone {
+		t.Errorf("stale status.json content should have been removed before spawn, got %+v", got)
+	}
+	if got.Base != "main" {
+		t.Errorf("Base = %q, want the resolved base %q recorded before spawn", got.Base, "main")
 	}
 	if _, err := os.Stat(protocol.VerdictPath(wt)); !os.IsNotExist(err) {
 		t.Errorf("stale verdict.json should have been removed before spawn, stat err = %v", err)

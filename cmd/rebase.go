@@ -45,6 +45,7 @@ conflict resolution itself needs the worker.`,
 			return runRebase(cmd, herdr.New(), &rebaseOpts{
 				worktree:      worktree,
 				base:          base,
+				baseIsDefault: !cmd.Flags().Changed("base"),
 				launcher:      launcher,
 				workerRuntime: workerRuntime,
 				interval:      interval,
@@ -75,27 +76,18 @@ var rebaseCmd = newRebaseCmd()
 // in a top-level function go-crap can score (and tests can call) on its own,
 // instead of an inline closure whose complexity gets charged to the constructor.
 type rebaseOpts struct {
-	credentialEnv map[string]string
-	worktree      string
-	base          string
-	launcher      string
-	workerRuntime string
-	interval      time.Duration
-	force         bool
-	dryRun        bool
-	noCredProxy   bool
-	// livenessTimeout bounds how long dispatchIntoPane waits for confirmation
-	// that a dispatch actually landed: on the spawn branch, waitForAgentLive's
-	// post-spawn poll for the agent coming up at all; on the live-agent-reuse
-	// branch, herdr's own `--wait --until working` for the existing agent
-	// picking up the re-tasking prompt (argus issue #135). livenessInterval
-	// only applies to the former, waitForAgentLive's own poll cadence. Both are
-	// internal knobs, not CLI flags — zero means "use the package default"
-	// (defaultLivenessTimeout / defaultLivenessInterval) — so a test can
-	// override them to run on a fast, deterministic clock instead of the real
-	// 30s/500ms production cadence.
+	credentialEnv    map[string]string
+	worktree         string
+	base             string
+	launcher         string
+	workerRuntime    string
+	interval         time.Duration
 	livenessTimeout  time.Duration
 	livenessInterval time.Duration
+	baseIsDefault    bool
+	force            bool
+	dryRun           bool
+	noCredProxy      bool
 }
 
 // defaultLivenessTimeout and defaultLivenessInterval are dispatchIntoPane's
@@ -134,6 +126,9 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 	opts.worktree = abs
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
+	if opts.baseIsDefault {
+		opts.base = supervisor.ResolveBase(ctx, opts.worktree, opts.base, false)
+	}
 
 	branch, conflicts, err := detectRebaseConflict(ctx, opts.worktree, opts.base)
 	if err != nil {

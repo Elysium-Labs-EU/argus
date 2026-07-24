@@ -54,14 +54,21 @@ type TestRun struct {
 // Status is the whole typed payload a worker writes to its status file. Fields
 // are ordered for struct alignment (fieldalignment-enforced), not logical order.
 type Status struct {
-	UpdatedAt      time.Time `json:"updated_at"`
-	Task           string    `json:"task"`
-	Branch         string    `json:"branch"`
-	Phase          Phase     `json:"phase"`
-	RealWorldProof string    `json:"real_world_proof"`
-	PRURL          string    `json:"pr_url"`
-	BlockedReason  string    `json:"blocked_reason"`
-	FilesTouched   []string  `json:"files_touched"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Task      string    `json:"task"`
+	Branch    string    `json:"branch"`
+	// Base is the branch this worker's worktree was created from — set by
+	// supervise at worktree-creation time (see internal/repoconfig's
+	// base_branch precedence), not by the worker itself, and carried forward
+	// unchanged by every `argus worker report` (its JSON body never sets this
+	// field). ship/rebase read it back instead of re-defaulting to the
+	// literal "main" when --base is omitted.
+	Base           string   `json:"base"`
+	Phase          Phase    `json:"phase"`
+	RealWorldProof string   `json:"real_world_proof"`
+	PRURL          string   `json:"pr_url"`
+	BlockedReason  string   `json:"blocked_reason"`
+	FilesTouched   []string `json:"files_touched"`
 	// Plan is the worker's todo list, reported during the planning phase (issue
 	// #103). It is the typed evidence RequiresPlanEvidence checks before
 	// letting a report move planning -> working: a prose "write a todo list

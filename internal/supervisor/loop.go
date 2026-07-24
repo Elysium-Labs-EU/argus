@@ -75,11 +75,14 @@ type Config struct {
 	// existing installs are unaffected until an operator opts in.
 	WorkerRuntime string
 	ScrubEnv      []string // env vars withheld from each worker (e.g. forge tokens it never needs)
-	// ExtraAllow appends operator-supplied permission patterns (e.g.
+	// RepoAllow is the repo's own .argus/config.yml allow list (see
+	// internal/repoconfig), the base permission list settingsFor inserts
+	// after its fixed structural entries — replacing the hardcoded Go/make
+	// literal argus used to assume for every repo regardless of toolchain.
+	RepoAllow []string
+	// ExtraAllow appends operator-supplied CLI --allow patterns (e.g.
 	// "Bash(task *)", "Bash(npm *)") to every worker's generated allowlist, on
-	// top of the Go/make defaults settingsFor always includes. This is how a
-	// repo whose mandated command runner isn't make (task, npm, etc.) avoids a
-	// permission prompt on every invocation.
+	// top of RepoAllow, for a one-off run.
 	ExtraAllow []string
 	Interval   time.Duration
 	Timeout    time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
@@ -103,10 +106,11 @@ type WorkerPlan struct {
 
 // BuildPlan resolves each worker into a concrete plan. Missing worktree paths are
 // derived as <repo>/.claude/worktrees/<branch>; each brief is the task text plus
-// the shared status-writing contract so writer and reader can't drift. extraAllow
-// is forwarded to settingsFor so every worker's allowlist reflects the same
-// operator-supplied extension the dry-run preview shows.
-func BuildPlan(workers []Worker, extraAllow []string) []WorkerPlan {
+// the shared status-writing contract so writer and reader can't drift. repoAllow
+// and extraAllow are forwarded to settingsFor so every worker's allowlist
+// reflects the same repo-config and operator-supplied extension the dry-run
+// preview shows.
+func BuildPlan(workers []Worker, repoAllow, extraAllow []string) []WorkerPlan {
 	plans := make([]WorkerPlan, len(workers))
 	for i := range workers {
 		w := workers[i]
@@ -129,7 +133,7 @@ func BuildPlan(workers []Worker, extraAllow []string) []WorkerPlan {
 		}
 		plans[i] = WorkerPlan{
 			Worker:   w,
-			Settings: settingsFor(w.Worktree, extraAllow),
+			Settings: settingsFor(w.Worktree, repoAllow, extraAllow),
 			Brief:    briefFor(&w),
 		}
 	}
@@ -383,7 +387,7 @@ func envMap(env []string) map[string]string {
 // worker, watches and judges each one's status independently until it reaches a
 // terminal phase or ctx is canceled, then prints a metrics report.
 func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error {
-	plans := BuildPlan(workers, cfg.ExtraAllow)
+	plans := BuildPlan(workers, cfg.RepoAllow, cfg.ExtraAllow)
 
 	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
 		return err
@@ -462,7 +466,7 @@ func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 // or grinding on an existing PR branch — under the same deterministic observation
 // instead of eyeballing its pane scrollback.
 func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
-	plans := BuildPlan(workers, cfg.ExtraAllow)
+	plans := BuildPlan(workers, cfg.RepoAllow, cfg.ExtraAllow)
 	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
 		return err
 	}
@@ -788,7 +792,19 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	if err := InvalidateStatus(p.Worktree); err != nil {
 		return herdr.Worktree{}, fmt.Errorf("invalidating stale status before dispatching %s: %w", p.Task, err)
 	}
-	if err := WriteSettings(p.Worktree, cfg.ExtraAllow); err != nil {
+	// Records the base this worktree actually branched from — cfg.Base is a
+	// ref (e.g. "origin/main"), while protocol.Status.Base and every
+	// consumer of it (ResolveBase, used by ship/rebase) use the bare branch
+	// name convention, so the "origin/" prefix is stripped here, once. A
+	// worker's own `argus worker report` never sets this field and carries
+	// it forward unchanged (see runWorkerReport), so ship can read back what
+	// base was actually used instead of re-defaulting to the literal "main"
+	// (closes issue #160 as a side effect of #161).
+	baseBranch := strings.TrimPrefix(cfg.Base, "origin/")
+	if err := protocol.Write(protocol.StatusPath(p.Worktree), &protocol.Status{Base: baseBranch}); err != nil {
+		return herdr.Worktree{}, fmt.Errorf("recording base branch for %s: %w", p.Task, err)
+	}
+	if err := WriteSettings(p.Worktree, cfg.RepoAllow, cfg.ExtraAllow); err != nil {
 		return herdr.Worktree{}, fmt.Errorf("writing settings for %s: %w", p.Task, err)
 	}
 	if err := WriteBrief(p.Worktree, p.Brief); err != nil {
