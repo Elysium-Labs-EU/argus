@@ -131,6 +131,18 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 	if st.measuredOK {
 		reported := st.status.DiffStat.Insertions + st.status.DiffStat.Deletions
 		measured := st.measured.Insertions + st.measured.Deletions
+		// A worker's self-report only ever covers this round's own delta,
+		// never the cumulative diff since base — so once a prior round's
+		// change already cleared a verdict, that verdict's measurement is
+		// subtracted here, or every further round on an already-large change
+		// would fail this check regardless of how correct it is.
+		if st.priorMeasuredOK {
+			if prior := st.priorMeasured.Insertions + st.priorMeasured.Deletions; prior < measured {
+				measured -= prior
+			} else {
+				measured = 0
+			}
+		}
 		if measured-reported > diffMismatchTolerance {
 			v.AutoApprove = false
 			reason := fmt.Sprintf("worker under-reported diff: claimed %d lines, git measured %d", reported, measured)
@@ -140,9 +152,9 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 		// A worker that reaches a terminal phase claiming completed, verified work
 		// but touched zero files per git is exactly the failure mode that let a
 		// launcher spawn silently fail while its stale/fabricated status.json still
-		// sailed through the gate (issue #15): no code change means nothing was
-		// actually done or reviewable, so this must never auto-approve even though
-		// an empty diff looks "clean" by every other check above.
+		// sailed through the gate: no code change means nothing was actually done
+		// or reviewable, so this must never auto-approve even though an empty diff
+		// looks "clean" by every other check above.
 		if len(st.measuredFiles) == 0 && (eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone) {
 			v.AutoApprove = false
 			reason := fmt.Sprintf("worker reports phase %q but git shows zero files changed against base — status may be stale or unverified", eff.Phase)
@@ -152,11 +164,11 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 	}
 
 	// The unfakeable backstop for the planning phase's self-reported Plan
-	// field (issue #103): a status.json claiming a plan/todo list, with no
-	// matching TodoWrite/TaskCreate tool call anywhere in the worker's own
-	// transcript, escalates exactly like a diff under-report does above —
-	// only checked once the worker is asking to be judged, mirroring the diff
-	// checks' own gating on a terminal phase.
+	// field: a status.json claiming a plan/todo list, with no matching
+	// TodoWrite/TaskCreate tool call anywhere in the worker's own transcript,
+	// escalates exactly like a diff under-report does above — only checked
+	// once the worker is asking to be judged, mirroring the diff checks' own
+	// gating on a terminal phase.
 	if eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone {
 		switch {
 		case st.planEvidenceErr != nil:

@@ -496,6 +496,10 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		st.measured = ds
 		st.measuredFiles = files
 		st.measuredOK = true
+		if pm, ok := priorMeasured(st.plan.Worktree); ok {
+			st.priorMeasured = pm
+			st.priorMeasuredOK = true
+		}
 	}
 
 	// A worker started with a non-default --launcher never produces a Claude
@@ -552,6 +556,19 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState, 
 		}
 		reviewOne(ctx, cfg, st, verdict, sem)
 	}
+}
+
+// priorMeasured returns the ground-truth diff argus measured at a worktree's
+// last recorded verdict (whichever way it went), and whether one exists.
+// gateVerdict subtracts this from a fresh measurement so the under-report
+// check judges only what changed since that verdict, not the ever-growing
+// cumulative diff since the original base.
+func priorMeasured(worktree string) (protocol.DiffStat, bool) {
+	prior, found, err := protocol.LoadApproval(worktree)
+	if err != nil || !found {
+		return protocol.DiffStat{}, false
+	}
+	return prior.MeasuredDiff, true
 }
 
 // priorFindings returns the Reasons from a previously recorded, non-approved
@@ -618,18 +635,20 @@ func reviewOne(ctx context.Context, cfg *Config, st *workerState, verdict Verdic
 // recordApproval writes the worker's disposition to its worktree so ship can
 // enforce it, and logs a verdict event for the run log. A write failure is logged
 // but does not abort the run — ship will then see "no verdict" and refuse, which
-// is the safe default.
+// is the safe default. It also stamps argus's own measured diff so a later
+// round can judge only what changed since this verdict — see priorMeasured.
 func recordApproval(cfg *Config, st *workerState, approved bool, source, summary string, reasons []string) {
 	now := time.Now
 	if cfg.Now != nil {
 		now = cfg.Now
 	}
 	a := protocol.Approval{
-		Approved:  approved,
-		Source:    source,
-		Summary:   summary,
-		Reasons:   reasons,
-		UpdatedAt: now(),
+		Approved:     approved,
+		Source:       source,
+		Summary:      summary,
+		Reasons:      reasons,
+		MeasuredDiff: st.measured,
+		UpdatedAt:    now(),
 	}
 	outcome := "approved"
 	if !approved {
@@ -653,8 +672,8 @@ func worktreePaths(plans []WorkerPlan) []string {
 // reported; measured is the ground truth argus computed from git. The gate trusts
 // measured, not status, for diff size and files touched. planEvidenceErr and
 // planEvidenceOK mirror diffErr/measuredOK for the transcript-based plan-evidence
-// check (issue #103): planEvidenceOK true means HasPlanEvidence ran without error
-// and hasPlanEvidence holds its result; planEvidenceErr set means the check itself
+// check: planEvidenceOK true means HasPlanEvidence ran without error and
+// hasPlanEvidence holds its result; planEvidenceErr set means the check itself
 // could not run. Both stay at their zero value — not-applicable, not failed —
 // for a worker started with a non-default launcher, which can never have a
 // Claude Code transcript to check.
@@ -679,6 +698,10 @@ type workerState struct {
 	review   *ReviewResult
 	status   protocol.Status
 	measured protocol.DiffStat
+	// priorMeasured is the worktree's last recorded verdict measurement, if
+	// any (see the package-level priorMeasured func); gateVerdict subtracts
+	// it from measured so a later round is judged on its own delta.
+	priorMeasured protocol.DiffStat
 	// herdrStuckElapsed accumulates poll ticks (in interval-sized steps, not
 	// wall-clock reads) while herdr's own agent_status for this pane reports
 	// blocked or done; it resets to zero the moment that stops being true.
@@ -687,6 +710,7 @@ type workerState struct {
 	measuredOK        bool
 	planEvidenceOK    bool
 	hasPlanEvidence   bool
+	priorMeasuredOK   bool
 }
 
 // effective returns the status the gate should judge: the worker's reported phase,

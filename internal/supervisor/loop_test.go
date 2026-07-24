@@ -614,6 +614,69 @@ func TestReviewEscalationsHardReasonSurvivesReviewerApprove(t *testing.T) {
 	}
 }
 
+// TestReworkRoundNotBlockedByStaleCumulativeUnderReport: a rework round only
+// ever self-reports its own incremental delta, never the cumulative diff
+// since base, so the hard under-report gate must judge a later round against
+// what changed since that round's own prior verdict — otherwise every
+// further round on an already-large change fails it regardless of
+// correctness.
+func TestReworkRoundNotBlockedByStaleCumulativeUnderReport(t *testing.T) {
+	wt := bigGitWorktree(t, "cmd/root.go", 500)
+	cfg := &Config{
+		Base:     "HEAD",
+		Reviewer: NewReviewerWithRunner(fakeReviewRunner(`{"decision":"approve","summary":"big but correct","findings":[]}`)),
+	}
+
+	// Round 1: a large, honestly self-reported feature diff that needs
+	// --review — expected and correct for a big feature.
+	round1 := &workerState{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "feature", Branch: "b", Worktree: wt}},
+		status: protocol.Status{
+			Phase:    protocol.PhaseAwaitingReview,
+			DiffStat: protocol.DiffStat{Files: 1, Insertions: 500},
+			Tests:    []protocol.TestRun{{Cmd: "make ci", Result: protocol.ResultPass}},
+		},
+	}
+	reconcile(context.Background(), cfg, []*workerState{round1})
+	reviewEscalations(context.Background(), cfg, []*workerState{round1}, nil)
+
+	approval, found, err := protocol.LoadApproval(wt)
+	if err != nil || !found || !approval.Approved {
+		t.Fatalf("round 1 should have been approved via review: found=%v approved=%v err=%v", found, approval.Approved, err)
+	}
+
+	// Round 2: a small follow-up fix (e.g. a CI lint fix) dispatched on the
+	// SAME worktree. The worker correctly reports only its own small delta —
+	// it has no way to honestly report the cumulative diff since base.
+	if writeErr := os.WriteFile(filepath.Join(wt, "cmd", "lint_fix.go"), []byte(strings.Repeat("x\n", 16)), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	round2 := &workerState{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "feature", Branch: "b", Worktree: wt}},
+		status: protocol.Status{
+			Phase:    protocol.PhaseAwaitingReview,
+			DiffStat: protocol.DiffStat{Files: 1, Insertions: 16},
+			Tests:    []protocol.TestRun{{Cmd: "make ci", Result: protocol.ResultPass}},
+		},
+	}
+	reconcile(context.Background(), cfg, []*workerState{round2})
+	v := gateVerdict(round2, nil)
+	if hasReasonContaining(v.HardReasons, "under-reported diff") {
+		t.Fatalf("round 2's small honest delta must not trip the under-report hard gate just because the cumulative diff since base is already large, got HardReasons=%v", v.HardReasons)
+	}
+
+	// The round must actually be shippable: --review approving it must stick,
+	// not get silently overridden back to not-approved by a stale hard reason.
+	reviewEscalations(context.Background(), cfg, []*workerState{round2}, nil)
+	approval2, found2, err := protocol.LoadApproval(wt)
+	if err != nil || !found2 || !approval2.Approved {
+		t.Fatalf("round 2 should be approvable now that the gate judges only its own delta: found=%v approved=%v err=%v summary=%q",
+			found2, approval2.Approved, err, approval2.Summary)
+	}
+}
+
 func TestReviewEscalationsThreadsPriorFindingsFromVerdict(t *testing.T) {
 	// argus issue #108: a prior request-changes verdict on this worktree must
 	// reach the next review's prompt, so the reviewer re-checks the specific
