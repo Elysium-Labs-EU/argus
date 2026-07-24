@@ -59,13 +59,18 @@ func TestTaskLabel(t *testing.T) {
 		task string
 		want string
 	}{
-		{"issue ref mid-string wins over the line", "fix #42: reduce CRAP", "#42"},
-		{"issue ref at start", "#7 tidy up logging", "#7"},
-		{"first of multiple issue refs", "see #1 and #2", "#1"},
+		{"issue ref does not collapse the line, title is kept", "fix #42: reduce CRAP", "fix #42: reduce CRAP"},
+		{"issue ref at start, rest of line kept", "#7 tidy up logging", "#7 tidy up logging"},
+		{"multiple issue refs, whole line kept", "see #1 and #2", "see #1 and #2"},
 		{"hash with no trailing digits falls back to the line", "hash with no digits # end", "hash with no digits # end"},
 		{"trailing bare hash falls back to the line", "task #", "task #"},
-		{"digits stop at first non-digit", "#123abc rest", "#123"},
+		{"digits stop at first non-digit but line is kept whole", "#123abc rest", "#123abc rest"},
 		{"no hash, short line, unchanged", "no hash here", "no hash here"},
+		{
+			"issue-driven task keeps repo and title, not just the bare issue number",
+			"Fix argus issue #143: fix taskLabel\n\nbody text",
+			"Fix argus issue #143: fix taskLabel",
+		},
 		{"multi-line uses only the first line", "first line\nsecond line", "first line"},
 		{"line is trimmed after newline split", "  hello  \nworld", "hello"},
 		{"line over 60 chars is truncated to 60", strings.Repeat("a", 90), strings.Repeat("a", 60)},
