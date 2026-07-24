@@ -132,9 +132,7 @@ func TestWriteIsAtomicUnderConcurrentReads(t *testing.T) {
 
 	// Readers: every successful read must parse; a not-exist early on is fine.
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 500 {
 				_, err := Load(path)
 				if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -142,7 +140,7 @@ func TestWriteIsAtomicUnderConcurrentReads(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

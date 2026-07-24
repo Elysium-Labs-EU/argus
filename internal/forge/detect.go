@@ -24,24 +24,24 @@ func Detect(remoteURL string) (host, owner, repo string, err error) {
 		if at := strings.LastIndex(rest, "@"); at >= 0 {
 			rest = rest[at+1:]
 		}
-		slash := strings.IndexByte(rest, '/')
-		if slash < 0 {
+		var path string
+		var ok bool
+		host, path, ok = strings.Cut(rest, "/")
+		if !ok {
 			return "", "", "", fmt.Errorf("cannot parse host/path from remote %q", remoteURL)
 		}
-		host = rest[:slash]
-		owner, repo, err = splitOwnerRepo(rest[slash+1:])
+		owner, repo, err = splitOwnerRepo(path)
 	case strings.Contains(s, ":"):
 		// scp form: [user@]host:owner/repo
-		colon := strings.IndexByte(s, ':')
-		if colon < 0 {
+		hostPart, path, ok := strings.Cut(s, ":")
+		if !ok {
 			return "", "", "", fmt.Errorf("unrecognized remote URL %q", remoteURL)
 		}
-		hostPart := s[:colon]
 		if at := strings.LastIndex(hostPart, "@"); at >= 0 {
 			hostPart = hostPart[at+1:]
 		}
 		host = hostPart
-		owner, repo, err = splitOwnerRepo(s[colon+1:])
+		owner, repo, err = splitOwnerRepo(path)
 	default:
 		return "", "", "", fmt.Errorf("unrecognized remote URL %q", remoteURL)
 	}

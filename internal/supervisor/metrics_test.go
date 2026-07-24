@@ -3,6 +3,7 @@ package supervisor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -19,11 +20,12 @@ func writeTranscript(t *testing.T, home, sessionID string, lines []string) {
 }
 
 func join(lines []string) string {
-	out := ""
+	var out strings.Builder
 	for _, l := range lines {
-		out += l + "\n"
+		out.WriteString(l)
+		out.WriteByte('\n')
 	}
-	return out
+	return out.String()
 }
 
 func TestTokensForSessionSumsTranscript(t *testing.T) {

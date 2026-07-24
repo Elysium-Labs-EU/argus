@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
@@ -215,12 +216,13 @@ func testCounts(s *protocol.Status) (passed, total int) {
 }
 
 func indent(text, prefix string) string {
-	out := prefix
+	var out strings.Builder
+	out.WriteString(prefix)
 	for _, r := range text {
-		out += string(r)
+		out.WriteRune(r)
 		if r == '\n' {
-			out += prefix
+			out.WriteString(prefix)
 		}
 	}
-	return out
+	return out.String()
 }
