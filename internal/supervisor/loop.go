@@ -660,11 +660,23 @@ func recordApproval(cfg *Config, st *workerState, approved bool, source, summary
 		MeasuredDiff: st.measured,
 		UpdatedAt:    now(),
 	}
+	// An approval with no binding is exactly the gap this exists to close, so a
+	// hash failure must not silently ship as an approved verdict.
+	if approved {
+		hash, err := ContentHash(st.plan.Worktree, st.measuredFiles)
+		if err != nil {
+			cfg.Log.Fail("content_hash", st.plan.Task, err)
+			a.Approved = false
+			a.Summary = "could not bind verdict to worktree content: " + err.Error()
+		} else {
+			a.ContentHash = hash
+		}
+	}
 	outcome := "approved"
-	if !approved {
+	if !a.Approved {
 		outcome = "not-approved"
 	}
-	cfg.Log.Action("verdict", st.plan.Task, outcome, summary)
+	cfg.Log.Action("verdict", st.plan.Task, outcome, a.Summary)
 	if err := protocol.WriteApproval(st.plan.Worktree, &a); err != nil {
 		cfg.Log.Fail("verdict_write", st.plan.Task, err)
 	}
