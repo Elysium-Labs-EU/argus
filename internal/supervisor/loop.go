@@ -663,7 +663,7 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 	// their panes. Report them as orphaned so the operator can stop or reuse them,
 	// rather than leaving them running invisibly.
 	fail := func(i int, err error) ([]*workerState, error) {
-		for j := 0; j < i; j++ {
+		for j := range i {
 			if states[j] != nil {
 				cfg.Log.Action("orphaned", taskLabel(states[j].plan.Task), "spawn-aborted", states[j].paneID)
 			}
