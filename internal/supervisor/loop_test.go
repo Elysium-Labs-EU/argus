@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -730,6 +731,47 @@ func TestReviewEscalationsWithoutReviewerJustGates(t *testing.T) {
 	if escalated.review != nil || escalated.reviewErr != nil {
 		t.Errorf("no reviewer should mean no verdict and no error: review=%v err=%v", escalated.review, escalated.reviewErr)
 	}
+}
+
+// recordingBroker is a CredentialBroker that records every Revoke call, so
+// tests can assert exactly which worker's access argus cut off.
+type recordingBroker struct {
+	revoked []string
+	mu      sync.Mutex
+}
+
+func (b *recordingBroker) WorkerEnv(string, string) []string { return nil }
+
+func (b *recordingBroker) Revoke(agent string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.revoked = append(b.revoked, agent)
+	return 1
+}
+
+// TestRecordApprovalRevokesCredentialBroker is the regression for argus issue
+// #184: a judged worker's sentinel must be revoked the moment its verdict is
+// recorded, whether that verdict approves or rejects — the gate has ruled
+// either way, and nothing else in this process learns a worker's fate is
+// decided. A nil Broker (the no-proxy default) must not panic.
+func TestRecordApprovalRevokesCredentialBroker(t *testing.T) {
+	broker := &recordingBroker{}
+	cfg := &Config{Broker: broker}
+
+	approved := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "clean", Worktree: t.TempDir()}}}
+	recordApproval(cfg, approved, true, "gate", "auto-approved", nil)
+
+	rejected := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "bad", Worktree: t.TempDir()}}}
+	recordApproval(cfg, rejected, false, "gate", "escalated, awaiting human decision", []string{"reason"})
+
+	want := []string{"clean", "bad"}
+	if !slices.Equal(broker.revoked, want) {
+		t.Errorf("revoked = %v, want %v", broker.revoked, want)
+	}
+
+	noBroker := &Config{}
+	unbrokered := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "no-broker", Worktree: t.TempDir()}}}
+	recordApproval(noBroker, unbrokered, true, "gate", "auto-approved", nil)
 }
 
 // TestReviewEscalationsGateSurvivesExhaustedReviewSem guards against

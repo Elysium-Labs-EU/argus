@@ -42,11 +42,15 @@ type Worker struct {
 // CredentialBroker mints per-worker credentials so a worker never holds a real
 // API key. WorkerEnv registers the worker (identified by agent label and its
 // branch) and returns the environment assignments — a phantom sentinel plus a
-// proxied base URL — that route the worker's API traffic through argus. A nil
-// Broker means no proxy: workers inherit the host's real credentials, which is
-// the prior behavior.
+// proxied base URL — that route the worker's API traffic through argus. Revoke
+// cuts that same worker's access off once its verdict is recorded (see
+// recordApproval) — the gate has ruled either way, and nothing about a pane
+// staying open afterward should keep its credential live. A nil Broker means
+// no proxy: workers inherit the host's real credentials, which is the prior
+// behavior.
 type CredentialBroker interface {
 	WorkerEnv(agent, branch string) []string
+	Revoke(agent string) int
 }
 
 // Config carries the dependencies and knobs for a supervise run. Everything
@@ -637,6 +641,12 @@ func reviewOne(ctx context.Context, cfg *Config, st *workerState, verdict Verdic
 // but does not abort the run — ship will then see "no verdict" and refuse, which
 // is the safe default. It also stamps argus's own measured diff so a later
 // round can judge only what changed since this verdict — see priorMeasured.
+//
+// Both outcomes are terminal from the gate's point of view — approved heads
+// toward ship, rejected/escalated-without-a-reviewer is abandoned pending a
+// human — so this is the one place every worker's judgment is finalized, and
+// therefore the right place to cut its credential-proxy access: nothing else
+// in this process learns a worker's fate is decided.
 func recordApproval(cfg *Config, st *workerState, approved bool, source, summary string, reasons []string) {
 	now := time.Now
 	if cfg.Now != nil {
@@ -657,6 +667,9 @@ func recordApproval(cfg *Config, st *workerState, approved bool, source, summary
 	cfg.Log.Action("verdict", st.plan.Task, outcome, summary)
 	if err := protocol.WriteApproval(st.plan.Worktree, &a); err != nil {
 		cfg.Log.Fail("verdict_write", st.plan.Task, err)
+	}
+	if cfg.Broker != nil {
+		cfg.Broker.Revoke(taskLabel(st.plan.Task))
 	}
 }
 
