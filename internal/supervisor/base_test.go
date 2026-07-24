@@ -23,12 +23,12 @@ func runGitForTest(t *testing.T, dir string, args ...string) {
 }
 
 // newRepoWithOriginHEAD builds a real git repo whose refs/remotes/origin/HEAD
-// points at defaultBranch, by cloning a bare "origin" repo seeded with one
-// commit on that branch — the same auto-detection a real `git clone` gives.
-func newRepoWithOriginHEAD(t *testing.T, defaultBranch string) string {
+// points at "trunk", by cloning a bare "origin" repo seeded with one commit
+// on that branch — the same auto-detection a real `git clone` gives.
+func newRepoWithOriginHEAD(t *testing.T) string {
 	t.Helper()
 	origin := t.TempDir()
-	runGitForTest(t, origin, "init", "-q", "--initial-branch="+defaultBranch)
+	runGitForTest(t, origin, "init", "-q", "--initial-branch=trunk")
 	runGitForTest(t, origin, "config", "user.email", "t@t")
 	runGitForTest(t, origin, "config", "user.name", "t")
 	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("x"), 0o600); err != nil {
@@ -43,7 +43,7 @@ func newRepoWithOriginHEAD(t *testing.T, defaultBranch string) string {
 }
 
 func TestDetectDefaultBaseReadsOriginHEAD(t *testing.T) {
-	repo := newRepoWithOriginHEAD(t, "trunk")
+	repo := newRepoWithOriginHEAD(t)
 	got, err := DetectDefaultBase(context.Background(), repo)
 	if err != nil {
 		t.Fatalf("DetectDefaultBase: %v", err)
@@ -62,7 +62,7 @@ func TestDetectDefaultBaseErrorsWithNoOriginHEAD(t *testing.T) {
 }
 
 func TestResolveBaseExplicitFlagWinsOutright(t *testing.T) {
-	repo := newRepoWithOriginHEAD(t, "trunk")
+	repo := newRepoWithOriginHEAD(t)
 	if err := protocol.Write(protocol.StatusPath(repo), &protocol.Status{Base: "develop"}); err != nil {
 		t.Fatalf("seeding status: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestResolveBaseExplicitFlagWinsOutright(t *testing.T) {
 }
 
 func TestResolveBasePrefersPersistedStatus(t *testing.T) {
-	repo := newRepoWithOriginHEAD(t, "trunk")
+	repo := newRepoWithOriginHEAD(t)
 	if err := protocol.Write(protocol.StatusPath(repo), &protocol.Status{Base: "develop"}); err != nil {
 		t.Fatalf("seeding status: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestResolveBasePrefersPersistedStatus(t *testing.T) {
 }
 
 func TestResolveBaseFallsBackToRepoConfig(t *testing.T) {
-	repo := newRepoWithOriginHEAD(t, "trunk")
+	repo := newRepoWithOriginHEAD(t)
 	if err := repoconfig.Save(repoconfig.Path(repo), repoconfig.Config{BaseBranch: "from-config"}); err != nil {
 		t.Fatalf("seeding repo config: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestResolveBaseFallsBackToRepoConfig(t *testing.T) {
 }
 
 func TestResolveBaseFallsBackToDetectedOriginHEAD(t *testing.T) {
-	repo := newRepoWithOriginHEAD(t, "trunk")
+	repo := newRepoWithOriginHEAD(t)
 	got := ResolveBase(context.Background(), repo, "main", false)
 	if got != "trunk" {
 		t.Errorf("ResolveBase = %q, want the detected origin/HEAD %q", got, "trunk")

@@ -37,7 +37,7 @@ func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 
 func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	settings := settingsFor(wt, nil)
+	settings := settingsFor(wt, nil, nil)
 
 	want := []string{
 		"Edit(" + wt + "/.claude/settings.local.json)",

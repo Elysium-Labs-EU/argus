@@ -162,7 +162,7 @@ func TestRunWorkerReportPreservesBaseAcrossReports(t *testing.T) {
 	}
 
 	body2 := &protocol.Status{Task: "t", Branch: "b"}
-	if err := runWorkerReport(wt, protocol.PhaseWorking, body2, fixedNow(time.Now())); err != nil {
+	if err = runWorkerReport(wt, protocol.PhaseWorking, body2, fixedNow(time.Now())); err != nil {
 		t.Fatalf("working report rejected: %v", err)
 	}
 	got2, err := protocol.Load(protocol.StatusPath(wt))

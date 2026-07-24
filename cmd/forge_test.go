@@ -74,6 +74,9 @@ func TestIssuesToTasksAppendsRepoBriefNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(tasks))
+	}
 	if !strings.Contains(tasks[0], "Keep task frontend:ci green. Do NOT git commit or push; argus ships.") {
 		t.Errorf("task missing brief_note ahead of the fixed line: %q", tasks[0])
 	}
@@ -88,6 +91,9 @@ func TestIssuesToTasksNoRepoConfigOmitsToolchainText(t *testing.T) {
 	tasks, _, err := issuesToTasks(context.Background(), f, "o", "r", t.TempDir(), []int{142})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(tasks))
 	}
 	if strings.Contains(tasks[0], "make ci") || strings.Contains(tasks[0], "STYLE.md") {
 		t.Errorf("task should not assume a toolchain with no repo config: %q", tasks[0])
