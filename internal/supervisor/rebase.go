@@ -235,11 +235,18 @@ func isStale(path string, since time.Time) bool {
 // returning the last such status read and whether one was seen. A status.json
 // whose file mtime is more than staleTolerance before since is a stale
 // leftover — from before this dispatch, or from a race with
-// InvalidateStatus — and is
-// treated the same as no file at all, so a caller can never mistake it for
-// this dispatch's outcome (argus issue #50). since should be no later than
-// the moment the worker was dispatched. It is the single-worker analog of the
-// supervise watch loop, for commands like rebase that dispatch one worker.
+// InvalidateStatus — and is treated the same as no file at all, so a caller
+// can never mistake it for this dispatch's outcome. since should be no later
+// than the moment the worker was dispatched. It is the single-worker analog
+// of the supervise watch loop, for commands like rebase that dispatch one
+// worker.
+//
+// A status.json with an empty Phase is also treated as not yet seen: a real
+// worker report always sets Phase, so an empty one can only be the
+// dispatcher's own pre-dispatch bookkeeping write (recording Base right
+// after InvalidateStatus so a worker's later report can carry it forward)
+// landing inside staleTolerance of since and so not caught by the mtime
+// check above.
 func WaitForStatus(ctx context.Context, worktree string, interval time.Duration, since time.Time) (protocol.Status, bool) {
 	path := protocol.StatusPath(worktree)
 	timer := time.NewTimer(0)
@@ -251,7 +258,7 @@ func WaitForStatus(ctx context.Context, worktree string, interval time.Duration,
 		case <-ctx.Done():
 			return last, hasFile
 		case <-timer.C:
-			if s, err := protocol.Load(path); err == nil && !isStale(path, since) {
+			if s, err := protocol.Load(path); err == nil && s.Phase != "" && !isStale(path, since) {
 				last = s
 				hasFile = true
 				if protocol.IsTerminal(s.Phase) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -200,6 +201,18 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	}
 	if ierr := supervisor.InvalidateStatus(opts.worktree); ierr != nil {
 		return fmt.Errorf("invalidating stale status before rebase dispatch: %w", ierr)
+	}
+	// InvalidateStatus above removes status.json entirely, which would
+	// otherwise silently drop the worktree's recorded Base — a worker's own
+	// `argus worker report` carries the field forward but never sets it
+	// itself, so it must be re-established here, the same way
+	// supervisor.prepareWorktree does after its own InvalidateStatus call on
+	// the spawn path. opts.base is already a bare branch name from
+	// ResolveBase; trimmed defensively in case a caller passed --base
+	// explicitly as "origin/main".
+	baseBranch := strings.TrimPrefix(opts.base, "origin/")
+	if werr := protocol.Write(protocol.StatusPath(opts.worktree), &protocol.Status{Base: baseBranch}); werr != nil {
+		return fmt.Errorf("recording base branch before rebase dispatch: %w", werr)
 	}
 	if werr := supervisor.WriteBrief(opts.worktree, supervisor.RebaseBrief(branch, opts.base)); werr != nil {
 		return werr
