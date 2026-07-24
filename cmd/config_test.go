@@ -102,6 +102,36 @@ func TestConfigCheckReportsExistingAllowlistEntry(t *testing.T) {
 	}
 }
 
+func TestConfigCheckWarnsWhenEntryCoversShipForce(t *testing.T) {
+	repo := t.TempDir()
+
+	cmd := newConfigCheckCmd()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--repo", repo, "--write"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config check --write: %v", err)
+	}
+	if !strings.Contains(buf.String(), "also authorizes `argus ship --force`") {
+		t.Errorf("expected a warning that the default blanket entry covers ship --force, got %q", buf.String())
+	}
+}
+
+func TestConfigCheckNoWarningForScopedNonShipEntry(t *testing.T) {
+	repo := t.TempDir()
+
+	cmd := newConfigCheckCmd()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--repo", repo, "--write", "--entry", "Bash(argus supervise *)"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config check --write: %v", err)
+	}
+	if strings.Contains(buf.String(), "also authorizes") {
+		t.Errorf("expected no ship --force warning for a supervise-scoped entry, got %q", buf.String())
+	}
+}
+
 func TestConfigCheckWriteAddsEntry(t *testing.T) {
 	repo := t.TempDir()
 

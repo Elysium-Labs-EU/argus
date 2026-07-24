@@ -173,20 +173,40 @@ gh auth status                   # or: [ -n "$GITHUB_TOKEN" ] (don't echo the to
 manual approval and defeats the point of using it):**
 
 ```bash
-argus config check --write   # adds Bash(argus *) to .claude/settings.json unless something already covers it
+argus config check --repo . --write --entry "Bash(argus supervise *)"   # scoped: leaves ship gated
 argus config check           # read-only: reports what's missing without touching the file
 ```
 
 `check` only ever reads/writes `permissions.allow` — every other key in the file
-(hooks, model, unrelated permissions) is round-tripped untouched. It also
-recognizes a narrower entry as already sufficient, so prefer one when you want
-tighter scoping instead of the broad wildcard:
+(hooks, model, unrelated permissions) is round-tripped untouched.
 
-```bash
-argus config check --write --entry "Bash(argus ship *)"
+**Scope the entry away from `ship`, not just to a subcommand.** Bash allow-glob
+only matches a command *prefix* — there is no syntax to permit `argus ship`
+with safe flags while excluding `--force` specifically, since the flag is just
+more text after the same prefix. That means both the blanket wildcard *and* a
+"tighter" `"Bash(argus ship *)"` entry equally authorize `argus ship --force`
+with **no separate approval prompt** — a context that can get `argus ship
+--force` typed (a prompt injection into an agent that already holds either
+entry, say) skips argus's own gate outright. `argus config check` warns
+whenever the entry it's about to check or write covers this case; don't ignore
+that warning. If you want `--force` to always need a human's explicit say-so,
+allowlist only the non-`ship` subcommand you call most (usually `supervise`,
+since a spawn loop is where most of the per-call prompting happens) and leave
+`ship` — forced or not — prompting every time. `--write` only ever adds one
+entry per run and treats any existing argus entry (any scope) as already
+sufficient, so it won't stack a second scoped entry on top of the first — to
+cover more than one non-`ship` subcommand, list them yourself in
+`.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": ["Bash(argus supervise *)", "Bash(argus review *)"]
+  }
+}
 ```
 
-Equivalent by hand, if you'd rather not run the command:
+The blanket wildcard remains available for repos that accept the risk:
 
 ```json
 {
@@ -197,8 +217,9 @@ Equivalent by hand, if you'd rather not run the command:
 ```
 
 This is *not* a blanket bypass of judgment calls — `ship --force` and anything this
-skill tells you to hold for the user still needs their explicit say-so regardless of
-what's allowlisted.
+skill tells you to hold for the user still needs their explicit say-so, and scoping
+your allow entry away from `ship` is what actually backs that with a real prompt
+instead of just a documented intention.
 
 If `argus` is missing, fall back to the [[supervise-agents]] skill and say so.
 
