@@ -111,11 +111,12 @@ const diffMismatchTolerance = 10
 // gateVerdict is Assess applied to a worker's *measured* state plus checks the
 // pure gate can't make: it escalates when argus could not measure the diff (so
 // the self-report is unverifiable), when the real diff materially exceeds what
-// the worker claimed (a buggy or dishonest status.json), and when herdr's own
-// agent_status — not status.json — is the only evidence of the worker's real
-// state (checkHerdrStuck in loop.go), which forces escalation even if status.json
-// was never written at all. This is where "trust typed self-report" becomes
-// "trust it only where it matches ground truth."
+// the worker claimed (a buggy or dishonest status.json), when a claimed test
+// pass does not reproduce (st.testMismatches, from VerifyTests), and when
+// herdr's own agent_status — not status.json — is the only evidence of the
+// worker's real state (checkHerdrStuck in loop.go), which forces escalation
+// even if status.json was never written at all. This is where "trust typed
+// self-report" becomes "trust it only where it matches ground truth."
 func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 	eff := st.effective()
 	v := Assess(&eff, policy)
@@ -173,6 +174,16 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 	// once the worker is asking to be judged, mirroring the diff checks' own
 	// gating on a terminal phase.
 	if eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone {
+		// Same unfakeable treatment for a claimed test pass: VerifyTests
+		// already reproduced (or failed to reproduce) each one against the
+		// real worktree, so a mismatch here means status.json's pass claim
+		// doesn't hold up — no reviewer verdict should be able to waive it,
+		// the same as an under-reported diff.
+		for _, m := range st.testMismatches {
+			v.AutoApprove = false
+			v.Reasons = append(v.Reasons, m)
+			v.HardReasons = append(v.HardReasons, m)
+		}
 		switch {
 		case st.planEvidenceErr != nil:
 			v.AutoApprove = false

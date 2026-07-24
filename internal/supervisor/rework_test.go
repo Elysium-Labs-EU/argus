@@ -62,7 +62,9 @@ func TestJudgeOneAutoApprovesCleanWorkAndPersists(t *testing.T) {
 	plan := &WorkerPlan{Worker: Worker{Task: "clean", Branch: "b", Worktree: wt}}
 	status := protocol.Status{
 		Phase: protocol.PhaseAwaitingReview,
-		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
+		// "true" is genuinely re-run by VerifyTests (see reconcile), unlike a
+		// real test invocation that has nothing to build in an empty worktree.
+		Tests: []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}},
 	}
 
 	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now())

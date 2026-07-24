@@ -506,6 +506,37 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		}
 	}
 
+	// Capture the diff reviewOne will later show the LLM reviewer *before*
+	// VerifyTests runs below: VerifyTests re-executes an arbitrary
+	// worker-supplied command, which may itself write to the worktree (a
+	// coverage file, a regenerated lockfile, ...). Fetching the diff here,
+	// ahead of that, means the reviewer only ever sees the worker's own
+	// change — never a test run's side effects — regardless of whether this
+	// worker later escalates to review.
+	for _, st := range states {
+		if !st.hasFile && st.herdrEscalation == "" {
+			continue
+		}
+		if st.status.Phase != protocol.PhaseAwaitingReview && st.status.Phase != protocol.PhaseDone {
+			continue
+		}
+		st.reviewDiff, st.reviewDiffErr = DiffFor(ctx, st.plan.Worktree, cfg.Base)
+	}
+
+	// Re-run every test the worker claimed passed, independent of the
+	// launcher check below: unlike plan evidence, this reproduces the claim
+	// itself via git worktree + shell, not a Claude Code transcript
+	// convention, so it applies to any launcher.
+	for _, st := range states {
+		if !st.hasFile && st.herdrEscalation == "" {
+			continue
+		}
+		if st.status.Phase != protocol.PhaseAwaitingReview && st.status.Phase != protocol.PhaseDone {
+			continue
+		}
+		st.testMismatches = VerifyTests(ctx, st.plan.Worktree, st.status.Tests, testVerifyTimeout)
+	}
+
 	// A worker started with a non-default --launcher never produces a Claude
 	// Code transcript, so HasPlanEvidence would always report "no evidence
 	// found" — not a real signal, just the absence of a convention that
@@ -590,24 +621,29 @@ func priorFindings(worktree string) []string {
 // reviewOne runs the LLM review for one escalated worker, acquiring sem only
 // around this call — the expensive, slow step — so a sibling worker's gate
 // check never waits on it. sem == nil means unbounded (no limiter configured).
+//
+// It uses st.reviewDiff/reviewDiffErr, captured by reconcile before
+// VerifyTests ran, rather than fetching the diff itself here — by now
+// VerifyTests may already have left its own side effects in the worktree,
+// and a fresh DiffFor call here would show the reviewer those instead of
+// only the worker's actual change.
 func reviewOne(ctx context.Context, cfg *Config, st *workerState, verdict Verdict, sem chan struct{}) {
 	if sem != nil {
 		sem <- struct{}{}
 		defer func() { <-sem }()
 	}
 
-	diff, err := DiffFor(ctx, st.plan.Worktree, cfg.Base)
-	if err != nil {
-		st.reviewErr = err
-		cfg.Log.Fail("review", st.plan.Task, err)
-		recordApproval(cfg, st, false, "gate", "review could not run: "+err.Error(), verdict.Reasons)
+	if st.reviewDiffErr != nil {
+		st.reviewErr = st.reviewDiffErr
+		cfg.Log.Fail("review", st.plan.Task, st.reviewDiffErr)
+		recordApproval(cfg, st, false, "gate", "review could not run: "+st.reviewDiffErr.Error(), verdict.Reasons)
 		return
 	}
 	res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
 		Task:          st.plan.Task,
 		Branch:        st.plan.Branch,
 		Worktree:      st.plan.Worktree,
-		Diff:          diff,
+		Diff:          st.reviewDiff,
 		Reasons:       verdict.Reasons,
 		HardReasons:   verdict.HardReasons,
 		PriorFindings: priorFindings(st.plan.Worktree),
@@ -703,7 +739,19 @@ func worktreePaths(plans []WorkerPlan) []string {
 // for a worker started with a non-default launcher, which can never have a
 // Claude Code transcript to check.
 type workerState struct {
-	measuredFiles   []string
+	measuredFiles []string
+	// testMismatches holds a reason string for each worker-claimed test pass
+	// that VerifyTests reproduced as a failure or could not reproduce at all
+	// (see reconcile) — nil means either no terminal-phase check ran yet or
+	// every claimed pass reproduced clean.
+	testMismatches []string
+	// reviewDiff is the diff reviewOne sends the LLM reviewer, fetched by
+	// reconcile before VerifyTests runs so a test command's own side effects
+	// can never leak into what the reviewer is shown. reviewDiffErr set means
+	// that fetch failed; reviewOne must not fall back to fetching a fresh
+	// (possibly test-polluted) diff itself.
+	reviewDiff      string
+	reviewDiffErr   error
 	started         time.Time
 	dispatchedAt    time.Time
 	reviewErr       error
