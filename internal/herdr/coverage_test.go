@@ -135,6 +135,21 @@ func TestExecRunnerMapsTimeoutCodeToSentinel(t *testing.T) {
 	}
 }
 
+// TestExecRunnerMapsAgentPromptStalledToSentinel exercises execRunner's real
+// ExitError/stderr path to confirm a genuine herdr "agent_prompt_stalled"
+// envelope becomes ErrAgentPromptStalled, which dispatchIntoPane depends on
+// to fall back to a plain pane submission instead of aborting.
+func TestExecRunnerMapsAgentPromptStalledToSentinel(t *testing.T) {
+	dir := fakeHerdrBinary(t, `{"error":{"code":"agent_prompt_stalled","message":"agent prompt produced no observed state change within 5000 ms; status is done and state_change_seq remained 3"}}`)
+	t.Setenv("PATH", dir)
+
+	c := New()
+	err := c.AgentPrompt(context.Background(), "w1:p1", "hello", 0)
+	if !errors.Is(err, ErrAgentPromptStalled) {
+		t.Fatalf("want ErrAgentPromptStalled, got %v", err)
+	}
+}
+
 // TestExecRunnerPreservesOtherErrorCodes confirms only "agent_not_found" is
 // special-cased: a different herdr error code still surfaces as a real error.
 func TestExecRunnerPreservesOtherErrorCodes(t *testing.T) {

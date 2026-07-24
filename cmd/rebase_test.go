@@ -623,6 +623,111 @@ func TestDispatchIntoPaneLiveAgentPromptNeverPickedUpReturnsError(t *testing.T) 
 	}
 }
 
+// TestDispatchIntoPaneAgentPromptStalledFallsBackToPaneRun confirms herdr's
+// "agent_prompt_stalled" code (distinct from the generic "timeout"
+// TestDispatchIntoPaneLiveAgentPromptNeverPickedUpReturnsError covers) means
+// the prompt landed on a pane whose agent had already returned to an idle
+// prompt after finishing its prior turn — reachable, just not caught by
+// AgentPrompt's own wait window — so dispatchIntoPane must recover via
+// PaneRun plus an explicit PaneSendKeys "enter" instead of aborting.
+func TestDispatchIntoPaneAgentPromptStalledFallsBackToPaneRun(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	var paneRunText string
+	var sawEnterAfterPaneRun bool
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "agent" && args[1] == "get":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"done"}}}`), nil
+		case args[0] == "agent" && args[1] == "prompt":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrAgentPromptStalled)
+		case args[0] == "agent" && args[1] == "wait":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"working"}}}`), nil
+		case args[0] == "pane" && args[1] == "run":
+			paneRunText = args[3]
+			return []byte(`{"result":{}}`), nil
+		case args[0] == "pane" && args[1] == "send-keys":
+			if paneRunText != "" && args[2] == "w1:p1" && len(args) > 3 && args[3] == "enter" {
+				sawEnterAfterPaneRun = true
+			}
+			return []byte(`{"result":{}}`), nil
+		default:
+			t.Fatalf("unexpected call: %v", args)
+			return nil, nil
+		}
+	})
+
+	if err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &dispatchTarget{worktree: t.TempDir(), launcher: "claude"}); err != nil {
+		t.Fatalf("dispatchIntoPane: want the pane-run fallback to succeed, got %v", err)
+	}
+	if paneRunText != supervisor.InitialPrompt {
+		t.Errorf("pane run text = %q, want %q", paneRunText, supervisor.InitialPrompt)
+	}
+	if !sawEnterAfterPaneRun {
+		t.Error("want a `pane send-keys w1:p1 enter` call submitting the pane-run text, saw none")
+	}
+}
+
+// TestDispatchIntoPaneAgentPromptStalledFallbackAlsoFails confirms that when
+// even the PaneRun fallback never gets the agent working, dispatchIntoPane
+// still reports an error (naming both the original stall and the fallback
+// failure) instead of returning nil and leaving the caller to wait forever.
+func TestDispatchIntoPaneAgentPromptStalledFallbackAlsoFails(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "agent" && args[1] == "get":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"done"}}}`), nil
+		case args[0] == "agent" && args[1] == "prompt":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrAgentPromptStalled)
+		case args[0] == "agent" && args[1] == "wait":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrWaitTimeout)
+		case args[0] == "pane" && args[1] == "run":
+			return []byte(`{"result":{}}`), nil
+		case args[0] == "pane" && args[1] == "send-keys":
+			return []byte(`{"result":{}}`), nil
+		default:
+			t.Fatalf("unexpected call: %v", args)
+			return nil, nil
+		}
+	})
+
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &dispatchTarget{worktree: t.TempDir(), launcher: "claude"})
+	if err == nil {
+		t.Fatal("want an error when the pane-run fallback never gets the agent working, got nil")
+	}
+	if !strings.Contains(err.Error(), "w1:p1") {
+		t.Errorf("error should name the pane, got %q", err.Error())
+	}
+}
+
+// TestDispatchIntoPaneAgentPromptStalledSendKeysFails confirms a genuine
+// PaneSendKeys error (not a fallback that merely never gets the agent
+// working) is surfaced directly instead of proceeding to AgentWait as if the
+// submit keystroke had gone through.
+func TestDispatchIntoPaneAgentPromptStalledSendKeysFails(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "agent" && args[1] == "get":
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent":"claude","agent_status":"done"}}}`), nil
+		case args[0] == "agent" && args[1] == "prompt":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrAgentPromptStalled)
+		case args[0] == "pane" && args[1] == "run":
+			return []byte(`{"result":{}}`), nil
+		case args[0] == "pane" && args[1] == "send-keys":
+			return nil, errors.New("herdr: socket unavailable")
+		default:
+			t.Fatalf("unexpected call: %v", args)
+			return nil, nil
+		}
+	})
+
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", &dispatchTarget{worktree: t.TempDir(), launcher: "claude"})
+	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
+		t.Fatalf("want the PaneSendKeys error propagated, got %v", err)
+	}
+}
+
 // TestDispatchIntoPaneLiveAgentPromptUsesLivenessTimeout confirms the
 // live-agent-reuse branch's AgentPrompt call is bounded by the same
 // livenessTimeout knob the spawn branch's waitForAgentLive poll uses (rather

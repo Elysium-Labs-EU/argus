@@ -221,6 +221,29 @@ func TestAgentPromptPropagatesTimeoutError(t *testing.T) {
 	}
 }
 
+func TestPaneSendKeysSendsPaneSendKeysCommand(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{}}`), nil
+	})
+	if err := c.PaneSendKeys(context.Background(), "w1:p1", "enter"); err != nil {
+		t.Fatalf("PaneSendKeys: %v", err)
+	}
+	want := []string{"pane", "send-keys", "w1:p1", "enter"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("PaneSendKeys args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestPaneSendKeysPropagatesRunnerError(t *testing.T) {
+	sentinel := errors.New("herdr: no such pane")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	if err := c.PaneSendKeys(context.Background(), "w1:p1", "enter"); !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped runner error, got %v", err)
+	}
+}
+
 func TestPaneCloseSendsPaneCloseCommand(t *testing.T) {
 	var gotArgs []string
 	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {

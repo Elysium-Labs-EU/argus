@@ -30,6 +30,15 @@ var ErrAgentNotFound = errors.New("herdr: agent not found")
 // transport or decoding failure.
 var ErrWaitTimeout = errors.New("herdr: agent wait timed out")
 
+// ErrAgentPromptStalled is what AgentPrompt's err wraps when herdr reports its
+// "agent_prompt_stalled" code: the prompt was accepted but the pane's
+// agent_status never observably changed within the wait window. AgentGet
+// already confirmed a live agent occupies the pane, so this means the prompt
+// landed on one already idle/done from a completed prior turn — not a dead
+// pane (that surfaces as ErrAgentNotFound) — which callers can recover from
+// with a plain pane submission instead.
+var ErrAgentPromptStalled = errors.New("herdr: agent prompt stalled")
+
 // Client issues typed calls to herdr.
 type Client struct {
 	run Runner
@@ -57,6 +66,8 @@ func execRunner(bin string) Runner {
 					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentNotFound)
 				case "timeout":
 					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWaitTimeout)
+				case "agent_prompt_stalled":
+					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentPromptStalled)
 				}
 				return nil, fmt.Errorf("herdr %s: %w: %s", args[0], err, ee.Stderr)
 			}
@@ -174,6 +185,17 @@ func (c Client) PaneSplit(ctx context.Context, paneID string, dir SplitDirection
 // message instead of a command a shell executes.
 func (c Client) PaneRun(ctx context.Context, paneID, command string) error {
 	_, err := c.run(ctx, "pane", "run", paneID, command)
+	return err
+}
+
+// PaneSendKeys sends literal key presses to a pane, the same as pressing them
+// on the keyboard while it's focused — e.g. "enter" to submit text already
+// typed but unsent in a live agent's own input box, since PaneRun's trailing
+// newline landing as a genuine Enter keypress there is a matter of timing,
+// not something PaneRun's own reply confirms.
+func (c Client) PaneSendKeys(ctx context.Context, paneID string, keys ...string) error {
+	args := append([]string{"pane", "send-keys", paneID}, keys...)
+	_, err := c.run(ctx, args...)
 	return err
 }
 
