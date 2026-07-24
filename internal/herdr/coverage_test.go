@@ -119,6 +119,22 @@ func TestExecRunnerMapsAgentNotFoundToSentinel(t *testing.T) {
 	}
 }
 
+// TestExecRunnerMapsTimeoutCodeToSentinel exercises execRunner's real
+// ExitError/stderr path to confirm a genuine herdr "timeout" envelope (what
+// `herdr agent wait` replies when its own --timeout elapses with no matching
+// state observed) becomes ErrWaitTimeout, which callers depend on to
+// distinguish "nothing to report yet" from a real failure.
+func TestExecRunnerMapsTimeoutCodeToSentinel(t *testing.T) {
+	dir := fakeHerdrBinary(t, `{"error":{"code":"timeout","message":"timed out waiting for agent status"}}`)
+	t.Setenv("PATH", dir)
+
+	c := New()
+	_, err := c.AgentWait(context.Background(), "w1:p1", []string{"idle"}, 0)
+	if !errors.Is(err, ErrWaitTimeout) {
+		t.Fatalf("want ErrWaitTimeout, got %v", err)
+	}
+}
+
 // TestExecRunnerPreservesOtherErrorCodes confirms only "agent_not_found" is
 // special-cased: a different herdr error code still surfaces as a real error.
 func TestExecRunnerPreservesOtherErrorCodes(t *testing.T) {

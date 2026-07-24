@@ -953,13 +953,94 @@ func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Log
 	return true
 }
 
+// herdrWaitStates are the herdr pane-lifecycle states waitForWake blocks on
+// via `herdr agent wait` — herdr's own generic vocabulary, not argus's
+// status.json phases. A pane reaching one of these doesn't mean the worker
+// reached a terminal argus phase; it only means it's worth re-reading
+// status.json to find out.
+var herdrWaitStates = []string{"idle", "blocked", "done"}
+
+// herdrWaitInstantThreshold bounds how quickly an AgentWait call can return a
+// match before waitForWake treats it as "the pane was already sitting in one
+// of herdrWaitStates when we asked" rather than "it just transitioned while
+// we were waiting". herdr's wait is level-triggered: calling it against a pane
+// already idle/blocked/done returns right away every time, indistinguishable
+// on its face from a fresh transition. The two cases need different
+// responses — a fresh transition (this call actually blocked for a while)
+// means something just happened, so status.json is worth reading right away;
+// an already-matching pane whose status.json read moments ago was still
+// non-terminal means nothing is progressing, so repeating the same call
+// immediately would just spin.
+const herdrWaitInstantThreshold = 50 * time.Millisecond
+
+// herdrWaitBackoff floors the gap before the next AgentWait call once one
+// resolves within herdrWaitInstantThreshold — see herdrWaitInstantThreshold.
+// Without this floor a pane parked in a non-terminal herdrWaitStates state (a
+// worker that idled without finishing, or crashed and left its pane "done")
+// would spin waitForWake in a tight subprocess-spawning loop instead of
+// waiting for something to actually change.
+const herdrWaitBackoff = 2 * time.Second
+
+// waitForWake decides how long pollStatus's fallback timer should wait before
+// its next tick, called once per tick after that tick's status.json read
+// already found a non-terminal phase (a terminal read returns from pollStatus
+// before waitForWake is ever reached). A worker with a resolvable pane
+// (st.paneID set) blocks on herdr's own `agent wait` — a real,
+// server-mediated wait on pane lifecycle state, not a client-side sleep — so
+// a worker that finishes is noticed close to the moment herdr sees its pane
+// go idle rather than up to a full interval later: the call
+// having taken herdrWaitInstantThreshold or longer means the pane transitioned
+// during this call, most plausibly right around the same status.json write,
+// so the next tick fires immediately. A call that resolved faster than that
+// means the pane was already sitting in a matching state before this tick's
+// (already non-terminal) status read, so the next attempt is floored at
+// herdrWaitBackoff — see herdrWaitBackoff. A wait that timed out (herdr's own
+// --timeout, sized to interval) already spent about interval waiting, so the
+// next tick fires immediately too. A worker with no pane (--attach
+// --worktrees, with nothing herdr can watch) keeps the plain interval
+// unchanged — the pre-existing timer poll is the only option there. A herdr
+// error that isn't a timeout is logged once (mirroring pollStatus's own
+// status_unreadable dedupe) and falls back to the plain interval until herdr
+// wait starts working again.
+func waitForWake(ctx context.Context, client herdr.Client, log *eventlog.Logger, st *workerState, interval time.Duration, lastWaitErr *string) time.Duration {
+	if st.paneID == "" {
+		return interval
+	}
+
+	started := time.Now()
+	_, err := client.AgentWait(ctx, st.paneID, herdrWaitStates, interval)
+	if ctx.Err() != nil {
+		return 0
+	}
+	switch {
+	case err == nil:
+		if time.Since(started) < herdrWaitInstantThreshold {
+			return herdrWaitBackoff
+		}
+		return 0
+	case errors.Is(err, herdr.ErrWaitTimeout):
+		return 0
+	default:
+		if err.Error() != *lastWaitErr {
+			*lastWaitErr = err.Error()
+			if log != nil {
+				log.Fail("herdr_wait_unreadable", st.plan.Task, err)
+			}
+		}
+		return interval
+	}
+}
+
 // pollStatus polls one worker's status file until it reaches a terminal phase,
 // its deadline passes, or ctx is canceled. A timer (not time.After) drives the
 // poll so we don't leak a timer per tick. The deadline is what stops a hung or
 // dead worker from blocking its caller forever. client cross-checks herdr's own
 // agent_status for st.paneID on every tick alongside status.json (see
 // checkHerdrStuck), since a pane herdr reports blocked or done can never write
-// status.json to reflect that itself.
+// status.json to reflect that itself. Between ticks, waitForWake blocks on
+// herdr's own pane-lifecycle wait rather than sleeping blind for interval, so
+// a pane-backed worker's terminal status is noticed close to the moment herdr
+// observes its pane go idle, not up to a full interval later.
 func pollStatus(ctx context.Context, client herdr.Client, interval, timeout time.Duration, log *eventlog.Logger, st *workerState) {
 	path := protocol.StatusPath(st.plan.Worktree)
 
@@ -976,6 +1057,7 @@ func pollStatus(ctx context.Context, client herdr.Client, interval, timeout time
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	var lastErr string
+	var lastWaitErr string
 	var loggedStale bool
 	for {
 		select {
@@ -1022,7 +1104,7 @@ func pollStatus(ctx context.Context, client herdr.Client, interval, timeout time
 			if checkHerdrStuck(ctx, client, log, st, interval) {
 				return
 			}
-			timer.Reset(interval)
+			timer.Reset(waitForWake(ctx, client, log, st, interval, &lastWaitErr))
 		}
 	}
 }

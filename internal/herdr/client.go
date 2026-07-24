@@ -25,6 +25,11 @@ type Runner func(ctx context.Context, args ...string) ([]byte, error)
 // recognizes (a bare shell prompt), not a transport or decoding failure.
 var ErrAgentNotFound = errors.New("herdr: agent not found")
 
+// ErrWaitTimeout is what AgentWait's err wraps when herdr's own --timeout
+// elapses before the pane reaches one of the requested states, rather than a
+// transport or decoding failure.
+var ErrWaitTimeout = errors.New("herdr: agent wait timed out")
+
 // Client issues typed calls to herdr.
 type Client struct {
 	run Runner
@@ -47,8 +52,11 @@ func execRunner(bin string) Runner {
 		if err != nil {
 			var ee *exec.ExitError
 			if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-				if errorCode(ee.Stderr) == "agent_not_found" {
+				switch errorCode(ee.Stderr) {
+				case "agent_not_found":
 					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentNotFound)
+				case "timeout":
+					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWaitTimeout)
 				}
 				return nil, fmt.Errorf("herdr %s: %w: %s", args[0], err, ee.Stderr)
 			}
@@ -226,6 +234,42 @@ func (c Client) AgentPrompt(ctx context.Context, target, text string, timeout ti
 	}
 	_, err := c.run(ctx, args...)
 	return err
+}
+
+// AgentWait blocks until pane target's agent reaches one of the states in
+// until (herdr's own generic pane lifecycle vocabulary — "idle", "working",
+// "blocked", "done", "unknown" — distinct from any caller-specific status),
+// or timeout elapses (<=0 waits indefinitely), and returns the matched pane.
+// This is a server-mediated blocking wait, not a client-side sleep-poll: the
+// call only returns once herdr itself observes the pane reach one of until.
+//
+// herdr's wait is level-triggered — a pane already sitting in one of until
+// when the call is made returns immediately — so a caller looping on this
+// must not treat a fast return as confirmation that something just changed,
+// only that it's worth checking again.
+//
+// err wraps ErrWaitTimeout when herdr's own --timeout elapsed with no match,
+// which callers should treat as a cue to retry, not as a hard failure.
+func (c Client) AgentWait(ctx context.Context, target string, until []string, timeout time.Duration) (Pane, error) {
+	args := make([]string, 0, 3+2*len(until)+2)
+	args = append(args, "agent", "wait", target)
+	for _, u := range until {
+		args = append(args, "--until", u)
+	}
+	if timeout > 0 {
+		args = append(args, "--timeout", strconv.FormatInt(timeout.Milliseconds(), 10))
+	}
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		return Pane{}, err
+	}
+	var result struct {
+		Agent Pane `json:"agent"`
+	}
+	if err := decodeEnvelope(out, &result); err != nil {
+		return Pane{}, err
+	}
+	return result.Agent, nil
 }
 
 // WorktreeSpec describes a worktree for herdr to create.

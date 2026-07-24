@@ -900,6 +900,134 @@ func TestPollStatusAcceptsStatusWrittenAfterDispatch(t *testing.T) {
 	}
 }
 
+// fakeAgentWaitRunner answers `agent wait` by blocking until unblock closes
+// (simulating herdr's own blocking wait for a real pane transition), then
+// records that a call happened before returning a matched idle pane. Any
+// other command gets an empty result so PaneList calls from checkHerdrStuck
+// don't error.
+func fakeAgentWaitRunner(unblock <-chan struct{}, calls *int32, mu *sync.Mutex) herdr.Runner {
+	return func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "wait" {
+			mu.Lock()
+			*calls++
+			mu.Unlock()
+			select {
+			case <-unblock:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent_status":"idle"}}}`), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	}
+}
+
+// TestPollStatusWakesOnHerdrAgentWaitNotFixedInterval: a pane-backed worker
+// whose status.json turns terminal must be noticed close to the moment
+// herdr's own `agent wait` unblocks, not up to a full --interval later.
+// interval is set far
+// longer than the test's own timeout budget, so the old fixed-sleep poll
+// would fail this test by never noticing the write in time.
+func TestPollStatusWakesOnHerdrAgentWaitNotFixedInterval(t *testing.T) {
+	wt := t.TempDir()
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}, paneID: "w1:p1"}
+
+	unblock := make(chan struct{})
+	var mu sync.Mutex
+	var calls int32
+	client := herdr.NewWithRunner(fakeAgentWaitRunner(unblock, &calls, &mu))
+
+	done := make(chan struct{})
+	go func() {
+		pollStatus(context.Background(), client, time.Hour, 0, nil, st)
+		close(done)
+	}()
+
+	// Give pollStatus a moment to reach its first blocking AgentWait call —
+	// comfortably longer than herdrWaitInstantThreshold, so waitForWake reads
+	// this as a genuine transition rather than an already-matching pane — then
+	// write the terminal status and unblock it, mirroring a worker writing
+	// status.json right as its pane goes idle.
+	time.Sleep(200 * time.Millisecond)
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task:  "a",
+		Phase: protocol.PhaseAwaitingReview,
+	}); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	close(unblock)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("pollStatus did not wake on herdr agent wait; it appears to be sleeping for the full interval instead")
+	}
+
+	if st.status.Phase != protocol.PhaseAwaitingReview {
+		t.Errorf("phase: got %q want awaiting_review", st.status.Phase)
+	}
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got == 0 {
+		t.Error("pollStatus never called herdr agent wait for a pane-backed worker")
+	}
+}
+
+// TestPollStatusFallsBackToIntervalWhenNoPane confirms an attach with no
+// resolvable pane (--attach --worktrees) never calls herdr at all and keeps
+// polling status.json on the plain --interval timer — there is no pane to
+// wait on.
+func TestPollStatusFallsBackToIntervalWhenNoPane(t *testing.T) {
+	wt := t.TempDir()
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}}
+
+	called := false
+	client := herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
+		called = true
+		return []byte(`{"result":{}}`), nil
+	})
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_ = protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+			Task:  "a",
+			Phase: protocol.PhaseAwaitingReview,
+		})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	pollStatus(ctx, client, 5*time.Millisecond, 0, nil, st)
+
+	if st.status.Phase != protocol.PhaseAwaitingReview {
+		t.Fatalf("phase: got %q want awaiting_review", st.status.Phase)
+	}
+	if called {
+		t.Error("pollStatus must not call herdr at all for a worker with no pane id")
+	}
+}
+
+// TestWaitForWakeFloorsRepeatCallsWhenAlreadyMatching guards the busy-loop
+// hazard herdr's level-triggered wait creates: a pane already sitting in a
+// herdrWaitStates state (e.g. idle, but status.json never reached a terminal
+// phase — a worker that idled without finishing) must not make waitForWake
+// return a near-zero duration, or pollStatus would spin AgentWait calls in a
+// tight loop instead of waiting for something to actually change.
+func TestWaitForWakeFloorsRepeatCallsWhenAlreadyMatching(t *testing.T) {
+	client := herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
+		// Returns immediately, as herdr does for a pane already in a matching state.
+		return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent_status":"idle"}}}`), nil
+	})
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+
+	var lastWaitErr string
+	got := waitForWake(context.Background(), client, nil, st, time.Hour, &lastWaitErr)
+	if got < herdrWaitBackoff {
+		t.Errorf("waitForWake returned %v for an instantly-matching pane, want at least herdrWaitBackoff (%v)", got, herdrWaitBackoff)
+	}
+}
+
 // TestExecuteInvalidatesStaleStatusBeforeSpawn covers argus issue #75: a
 // worktree directory can carry a leftover status.json/verdict.json from an
 // unrelated prior task even though the branch itself is freshly created

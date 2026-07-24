@@ -233,6 +233,58 @@ func TestWorkspaceClosePropagatesRunnerError(t *testing.T) {
 	}
 }
 
+func TestAgentWaitBuildsUntilFlagsAndTimeout(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{"agent":{"pane_id":"w1:p1","agent_status":"idle"}}}`), nil
+	})
+	pane, err := c.AgentWait(context.Background(), "w1:p1", []string{"idle", "blocked", "done"}, 15*time.Second)
+	if err != nil {
+		t.Fatalf("AgentWait: %v", err)
+	}
+	want := []string{"agent", "wait", "w1:p1", "--until", "idle", "--until", "blocked", "--until", "done", "--timeout", "15000"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("AgentWait args = %v, want %v", gotArgs, want)
+	}
+	if pane.PaneID != "w1:p1" || pane.AgentStatus != "idle" {
+		t.Errorf("unexpected pane: %+v", pane)
+	}
+}
+
+func TestAgentWaitZeroTimeoutOmitsTimeoutFlag(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{"agent":{"pane_id":"w1:p1"}}}`), nil
+	})
+	if _, err := c.AgentWait(context.Background(), "w1:p1", []string{"idle"}, 0); err != nil {
+		t.Fatalf("AgentWait: %v", err)
+	}
+	want := []string{"agent", "wait", "w1:p1", "--until", "idle"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("AgentWait args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestAgentWaitWrapsTimeoutCode(t *testing.T) {
+	sentinel := fmt.Errorf("herdr agent: %w", ErrWaitTimeout)
+	c := NewWithRunner(fakeRunner("", sentinel))
+	_, err := c.AgentWait(context.Background(), "w1:p1", []string{"idle"}, time.Second)
+	if !errors.Is(err, ErrWaitTimeout) {
+		t.Fatalf("want ErrWaitTimeout, got %v", err)
+	}
+}
+
+func TestAgentWaitPropagatesOtherErrors(t *testing.T) {
+	sentinel := errors.New("herdr: socket unavailable")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	_, err := c.AgentWait(context.Background(), "w1:p1", []string{"idle"}, time.Second)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want the runner error propagated, got %v", err)
+	}
+}
+
 func TestPaneSplitReturnsNewID(t *testing.T) {
 	reply := `{"id":"cli:pane:split","result":{"pane":{"pane_id":"wZ:p2"}}}`
 	c := NewWithRunner(fakeRunner(reply, nil))
