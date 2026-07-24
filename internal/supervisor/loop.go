@@ -174,6 +174,16 @@ func taskLabel(task string) string {
 // DefaultLauncher is the agent argus starts in each worker pane.
 const DefaultLauncher = "claude --permission-mode auto"
 
+// usesDefaultLauncher reports whether launcher actually starts a Claude Code
+// session — the only launcher that writes a ~/.claude/projects transcript for
+// HasPlanEvidence to grep. An empty launcher resolves to DefaultLauncher the
+// same way SpawnCommand and LaunchViaRuntime resolve it; anything else is a
+// --launcher override (e.g. a non-Claude-Code agent) for which no such
+// transcript can ever exist.
+func usesDefaultLauncher(launcher string) bool {
+	return launcher == "" || launcher == DefaultLauncher
+}
+
 // InitialPrompt is the one-line prompt argus passes to the launcher. It points the
 // worker at its brief file rather than pasting a multi-line brief into the TUI —
 // a real agent would submit that at the first newline.
@@ -482,6 +492,16 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		st.measuredOK = true
 	}
 
+	// A worker started with a non-default --launcher never produces a Claude
+	// Code transcript, so HasPlanEvidence would always report "no evidence
+	// found" — not a real signal, just the absence of a convention that
+	// doesn't apply. Leaving planEvidenceOK/hasPlanEvidence at their zero
+	// value here makes gateVerdict treat plan evidence as not-applicable
+	// rather than failed.
+	if !usesDefaultLauncher(cfg.Launcher) {
+		return
+	}
+
 	for _, st := range states {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
@@ -629,7 +649,9 @@ func worktreePaths(plans []WorkerPlan) []string {
 // planEvidenceOK mirror diffErr/measuredOK for the transcript-based plan-evidence
 // check (issue #103): planEvidenceOK true means HasPlanEvidence ran without error
 // and hasPlanEvidence holds its result; planEvidenceErr set means the check itself
-// could not run.
+// could not run. Both stay at their zero value — not-applicable, not failed —
+// for a worker started with a non-default launcher, which can never have a
+// Claude Code transcript to check.
 type workerState struct {
 	measuredFiles   []string
 	started         time.Time
