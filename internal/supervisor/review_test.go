@@ -79,6 +79,17 @@ func TestAssess(t *testing.T) {
 			approve: true,
 		},
 		{
+			name: "argus config change escalates by default",
+			status: protocol.Status{
+				Phase:        protocol.PhaseAwaitingReview,
+				Tests:        pass,
+				FilesTouched: []string{".argus/config.yml"},
+				DiffStat:     protocol.DiffStat{Insertions: 1, Deletions: 0},
+			},
+			approve:    false,
+			reasonHint: "behavior-critical",
+		},
+		{
 			name:       "blocked escalates",
 			status:     protocol.Status{Phase: protocol.PhaseBlocked, BlockedReason: "needs prod path"},
 			approve:    false,

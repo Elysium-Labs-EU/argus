@@ -24,13 +24,16 @@ type ReviewPolicy struct {
 // DefaultReviewPolicy is a conservative starting gate: modest diff ceiling, the
 // OS-integration surfaces the supervise-agents skill calls out as needing
 // real-world testing, and the behavior-critical (degraded-mode) surfaces that
-// must never auto-approve on diff size alone. No shared-path restrictions until
-// the caller sets them.
+// must never auto-approve on diff size alone. .argus/config.yml is in that last
+// set too: a worker can't widen its own RepoAllow this run (base.go bakes it in
+// before the worker touches anything), but an undetected change merges straight
+// into next run's config, so the gate must flag it even at a one-line diff. No
+// shared-path restrictions until the caller sets them.
 func DefaultReviewPolicy() ReviewPolicy {
 	return ReviewPolicy{
 		MaxDiffLines:      400,
 		OSPathGlobs:       []string{"systemd", "openrc", "launchd", "install", "/etc/"},
-		AlwaysReviewGlobs: []string{"monitor", "daemon", "restart", "health", "liveness"},
+		AlwaysReviewGlobs: []string{"monitor", "daemon", "restart", "health", "liveness", ".argus/config.yml"},
 	}
 }
 
