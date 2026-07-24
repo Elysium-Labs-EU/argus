@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -144,6 +145,89 @@ func TestGateEscalatesWhenPlanEvidenceUnverifiable(t *testing.T) {
 	}
 	if !hasReasonContaining(v.Reasons, "could not verify plan evidence") {
 		t.Errorf("expected an unverifiable reason, got %v", v.Reasons)
+	}
+}
+
+func TestUsesDefaultLauncher(t *testing.T) {
+	cases := []struct {
+		launcher string
+		want     bool
+	}{
+		{"", true},
+		{DefaultLauncher, true},
+		{"codex --full-auto", false},
+		{"claude", false}, // a real but non-default launcher string still counts as an override
+	}
+	for _, c := range cases {
+		if got := usesDefaultLauncher(c.launcher); got != c.want {
+			t.Errorf("usesDefaultLauncher(%q) = %v, want %v", c.launcher, got, c.want)
+		}
+	}
+}
+
+// TestReconcileSkipsPlanEvidenceForNonDefaultLauncher is the regression test
+// for issue #145: a worker spawned with a non-Claude-Code --launcher can
+// never produce a ~/.claude/projects transcript, so reconcile must not judge
+// it against one — even when a transcript happens to exist (e.g. left over
+// from an unrelated Claude Code session in the same worktree) and it carries
+// no plan evidence, which is exactly the state that used to force a
+// permanent escalation.
+func TestReconcileSkipsPlanEvidenceForNonDefaultLauncher(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", projectPathReplacer.Replace(wt))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	noEvidence := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "session-1.jsonl"), []byte(noEvidence), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	states := []*workerState{{hasFile: true, plan: &WorkerPlan{Worker: Worker{Task: "t", Worktree: wt}}}}
+	cfg := &Config{Base: "HEAD", Home: home, Launcher: "codex --full-auto"}
+	reconcile(context.Background(), cfg, states)
+
+	if states[0].planEvidenceOK {
+		t.Error("planEvidenceOK should stay false for a non-default launcher — plan evidence is not applicable, not checked")
+	}
+	if states[0].hasPlanEvidence {
+		t.Error("hasPlanEvidence should stay false — HasPlanEvidence must not have run")
+	}
+
+	states[0].status = protocol.Status{Phase: protocol.PhaseAwaitingReview, Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}}}
+	v := gateVerdict(states[0], nil)
+	if hasReasonContaining(v.Reasons, "plan evidence") || hasReasonContaining(v.Reasons, "TodoWrite") {
+		t.Errorf("gate must not escalate a non-default-launcher worker for missing plan evidence, got %v", v.Reasons)
+	}
+}
+
+// TestReconcileChecksPlanEvidenceForDefaultLauncher is the control for
+// TestReconcileSkipsPlanEvidenceForNonDefaultLauncher: the default (or
+// unset) launcher is a real Claude Code session, so reconcile must still run
+// HasPlanEvidence and let the gate escalate on a genuine missing-evidence
+// transcript.
+func TestReconcileChecksPlanEvidenceForDefaultLauncher(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", projectPathReplacer.Replace(wt))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	noEvidence := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "session-1.jsonl"), []byte(noEvidence), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	states := []*workerState{{hasFile: true, plan: &WorkerPlan{Worker: Worker{Task: "t", Worktree: wt}}}}
+	cfg := &Config{Base: "HEAD", Home: home} // Launcher unset -> default
+	reconcile(context.Background(), cfg, states)
+
+	if !states[0].planEvidenceOK {
+		t.Fatal("planEvidenceOK should be true — HasPlanEvidence must run for the default launcher")
+	}
+	if states[0].hasPlanEvidence {
+		t.Error("hasPlanEvidence should be false — the transcript has no TodoWrite/TaskCreate call")
 	}
 }
 
