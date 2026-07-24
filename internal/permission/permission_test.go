@@ -24,6 +24,26 @@ func TestCovers(t *testing.T) {
 	}
 }
 
+func TestCoversShipForce(t *testing.T) {
+	cases := map[string]bool{
+		"Bash(argus *)":           true,
+		"Bash(argus ship *)":      true,
+		"Bash(argus ship:*)":      true,
+		"Bash(argus)":             false,
+		"Bash(argus ship)":        false,
+		"Bash(argus supervise *)": false,
+		"Bash(argus supervise:*)": false,
+		"Bash(argus review *)":    false,
+		"Bash(argustest *)":       false,
+		"Bash(git *)":             false,
+	}
+	for entry, want := range cases {
+		if got := CoversShipForce(entry); got != want {
+			t.Errorf("CoversShipForce(%q) = %v, want %v", entry, got, want)
+		}
+	}
+}
+
 func TestCheckMissingFileIsNotCovered(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".claude", "settings.json")
 	covered, matches, err := Check(path)

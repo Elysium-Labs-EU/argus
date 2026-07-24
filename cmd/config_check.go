@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -64,12 +65,14 @@ func runConfigCheck(cmd *cobra.Command, a *configCheckArgs) error {
 	if covered {
 		_, _ = fmt.Fprintf(out, "%s argus is allowlisted in %s (%s)\n",
 			ui.LabelSuccess.Render("✓"), path, strings.Join(matches, ", "))
+		warnIfCoversShipForce(out, matches)
 		return nil
 	}
 
 	if !a.write {
 		_, _ = fmt.Fprintf(out, "%s no Bash permission allowlist entry for argus in %s\n", ui.LabelWarning.Render("!"), path)
 		_, _ = fmt.Fprintf(out, "  add this to fix it:\n  {\n    \"permissions\": {\n      \"allow\": [\"%s\"]\n    }\n  }\n", a.entry)
+		warnIfCoversShipForce(out, []string{a.entry})
 		return &ui.UserError{
 			Err:  fmt.Errorf("argus is not allowlisted in %s", path),
 			Hint: fmt.Sprintf("argus config check --repo %s --write", a.repo),
@@ -80,5 +83,22 @@ func runConfigCheck(cmd *cobra.Command, a *configCheckArgs) error {
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "%s added %s to %s\n", ui.LabelSuccess.Render("✓"), a.entry, path)
+	warnIfCoversShipForce(out, []string{a.entry})
 	return nil
+}
+
+// warnIfCoversShipForce flags any entry broad enough to also authorize
+// `argus ship --force` without a prompt: the harness's own Bash-tool gate is
+// the only thing standing between a compromised context (e.g. prompt
+// injection) and a --force ship that skips argus's approval gate outright.
+// Bash allow-glob can't exclude a single flag from a scoped prefix, so the
+// only fix is scoping the entry away from ship entirely.
+func warnIfCoversShipForce(out io.Writer, entries []string) {
+	for _, entry := range entries {
+		if permission.CoversShipForce(entry) {
+			_, _ = fmt.Fprintf(out, "%s %s also authorizes `argus ship --force` without a prompt — scope it away from ship (e.g. \"Bash(argus supervise *)\") if --force should always need explicit say-so\n",
+				ui.LabelWarning.Render("!"), entry)
+			return
+		}
+	}
 }
