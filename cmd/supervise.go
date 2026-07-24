@@ -22,6 +22,7 @@ func newSuperviseCmd() *cobra.Command {
 	var (
 		panes             []string
 		branches          []string
+		labels            []string
 		tasks             []string
 		tasksFile         string
 		repo              string
@@ -92,7 +93,7 @@ each pane's directory in --panes mode).`,
 				workers, err = attachWorkers(cmd.Context(), client, workspace, worktrees)
 			} else {
 				workers, err = spawnWorkers(cmd.Context(), client, &workerInput{
-					panes: panes, branches: branches, tasks: tasks, tasksFile: tasksFile, repo: repo,
+					panes: panes, branches: branches, labels: labels, tasks: tasks, tasksFile: tasksFile, repo: repo,
 				}, issues, jiraIssues, overrides)
 			}
 			if err != nil {
@@ -115,6 +116,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated); drives worker count in the default mode")
 	cmd.Flags().StringVar(&tasksFile, "tasks-file", "", "path to a file with one task per line, appended after --tasks; unlike --tasks this is not CSV-parsed, so commas and quotes in a free-text brief are safe")
 	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>)")
+	cmd.Flags().StringSliceVar(&labels, "labels", nil, "herdr workspace label per worker, paired positionally (default: derived from --tasks, falling back to the branch)")
 	cmd.Flags().StringSliceVar(&panes, "panes", nil, "reuse these existing herdr panes instead of the worktree's own pane")
 	cmd.Flags().StringVar(&repo, "repo", "", "repo root for all workers (default cwd; or each pane's directory in --panes mode)")
 	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref new worktrees branch from; required with --attach (no default applies — argus does not know what an attached worktree actually branched from)")
@@ -319,6 +321,7 @@ type workerInput struct {
 	tasksFile string
 	panes     []string
 	branches  []string
+	labels    []string
 	tasks     []string
 }
 
@@ -430,6 +433,8 @@ func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIs
 // there (PaneID left empty); in --panes mode existing panes are reused and their
 // current directory supplies the repo root unless --repo pins one. The worker
 // count is driven by --panes if given, else by the longer of --branches/--tasks.
+// --labels is paired the same way but never drives the count; an empty Worker.Label
+// leaves the default (task-derived, falling back to branch) to supervisor.BuildPlan.
 func buildWorkers(ctx context.Context, client herdr.Client, in *workerInput) ([]supervisor.Worker, error) {
 	n := len(in.panes)
 	if n == 0 {
@@ -481,6 +486,7 @@ func buildWorkers(ctx context.Context, client herdr.Client, in *workerInput) ([]
 		workers = append(workers, supervisor.Worker{
 			Task:     task,
 			Branch:   branch,
+			Label:    at(in.labels, i),
 			RepoRoot: repoRoot,
 			PaneID:   pane,
 		})

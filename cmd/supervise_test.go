@@ -187,6 +187,26 @@ func TestBuildWorkersPanesDefaultBranchAndTask(t *testing.T) {
 	}
 }
 
+func TestBuildWorkersPairsLabels(t *testing.T) {
+	client := fakeClient()
+	workers, err := buildWorkers(context.Background(), client, &workerInput{
+		panes:    []string{"1-2", "1-3"},
+		branches: []string{"feat-a", "feat-b"},
+		labels:   []string{"worker-a"},
+		// second worker omits --labels → Worker.Label stays "" here; the
+		// task-derived default is BuildPlan's job, not buildWorkers's.
+	})
+	if err != nil {
+		t.Fatalf("buildWorkers: %v", err)
+	}
+	if workers[0].Label != "worker-a" {
+		t.Errorf("--labels should set Worker.Label positionally; got %q", workers[0].Label)
+	}
+	if workers[1].Label != "" {
+		t.Errorf("a worker with no --labels entry should get an empty Label, not a default; got %q", workers[1].Label)
+	}
+}
+
 func TestBuildWorkersRejectsUnsafeBranch(t *testing.T) {
 	client := fakeClient()
 	_, err := buildWorkers(context.Background(), client, &workerInput{
