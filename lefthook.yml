@@ -17,7 +17,10 @@ pre-commit:
 
     test:
       glob: "*.go"
-      run: go test -short ./...
+      # git exports GIT_DIR et al. into this hook's own environment; unset
+      # them before go test starts so an inherited value can't silently
+      # override an explicit `git -C <dir>` in a fixture the tests spawn.
+      run: unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES; go test -short ./...
       priority: 3
 
 pre-push:

@@ -1,5 +1,12 @@
 .PHONY: help build test test-coverage-check lint nilcheck sg gitnexus eventlog-gate check-pubkey-sync fix setup ci clean release pre-release changelog changelog-preview
 
+# git exports these into every hook's environment so the hook's own git
+# invocations resolve to the repo/worktree that triggered it. If a recipe
+# below (or a script it shells out to, e.g. go-crap-gate.sh's own `git diff`)
+# inherits a leaked value, an explicit `git -C <dir>` gets silently
+# overridden and targets the wrong repo instead of the one it names.
+unexport GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 COVERAGE_THRESHOLD ?= 75
 BINARY_NAME=argus
 GOBIN=./bin
