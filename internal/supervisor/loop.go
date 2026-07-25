@@ -68,9 +68,9 @@ type Config struct {
 	Home     string
 	Launcher string
 	// ParentWorkspace, when set, is the herdr workspace id every spawned
-	// worker's worktree pane nests into as a tab instead of opening its own
-	// new top-level workspace (see herdr.WorktreeSpec.Workspace). Empty means
-	// today's behavior: each worker gets its own top-level workspace.
+	// worker's worktree pane nests into as a tab instead of staying in its own
+	// new top-level workspace (see prepareWorktree's use of herdr.Client.PaneMove).
+	// Empty means today's behavior: each worker keeps its own top-level workspace.
 	ParentWorkspace string
 	// WorkerRuntime names a worker-runtime adapter (see
 	// docs/worker-runtime-protocol.md): argus execs argus-runtime-<name> to
@@ -876,15 +876,27 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 // fetch-and-fold step.
 func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Worktree, error) {
 	wt, err := cfg.Client.WorktreeCreate(ctx, &herdr.WorktreeSpec{
-		Cwd:       p.RepoRoot,
-		Branch:    p.Branch,
-		Base:      cfg.Base,
-		Path:      p.Worktree,
-		Label:     p.Label,
-		Workspace: cfg.ParentWorkspace,
+		Cwd:    p.RepoRoot,
+		Branch: p.Branch,
+		Base:   cfg.Base,
+		Path:   p.Worktree,
+		Label:  p.Label,
 	})
 	if err != nil {
 		return herdr.Worktree{}, fmt.Errorf("creating worktree for %s: %w", p.Task, err)
+	}
+	// WorktreeCreate always opens its own new top-level workspace — it has no
+	// nesting flag (see its doc comment). Nesting into cfg.ParentWorkspace is
+	// PaneMove's job, moving the just-created root pane into a new tab there;
+	// herdr closes the now-empty top-level workspace WorktreeCreate opened as
+	// part of that move. Every later use of wt.RootPaneID (pane registry,
+	// resolvePaneID) must see the moved pane's id, not the original one.
+	if cfg.ParentWorkspace != "" && wt.RootPaneID != "" {
+		moved, err := cfg.Client.PaneMove(ctx, wt.RootPaneID, cfg.ParentWorkspace)
+		if err != nil {
+			return herdr.Worktree{}, fmt.Errorf("nesting worktree pane for %s into workspace %s: %w", p.Task, cfg.ParentWorkspace, err)
+		}
+		wt.RootPaneID = moved.PaneID
 	}
 	// A worktree directory can carry a leftover status.json/verdict.json from an
 	// unrelated prior task (issue #75) — e.g. directory reuse in worktree

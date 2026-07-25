@@ -3,6 +3,7 @@ package supervisor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -317,6 +318,77 @@ func TestPrepareWorktreePassesLabelNotBranch(t *testing.T) {
 	}
 	if labelArg != "fix bug in parser" {
 		t.Errorf("--label sent to herdr: got %q, want the task-derived label %q, not the branch", labelArg, "fix bug in parser")
+	}
+}
+
+// TestPrepareWorktreeNestsViaPaneMove pins down the actual nesting mechanism
+// (issue #216's --worker-placement tab, reworked after a real-herdr repro
+// showed WorktreeCreate's own --workspace param never nests — see its doc
+// comment): with cfg.ParentWorkspace set, prepareWorktree must call
+// herdr.Client.PaneMove on the pane WorktreeCreate opened, and the returned
+// Worktree must carry PaneMove's new pane id, not WorktreeCreate's original
+// one — every downstream use (pane registry, resolvePaneID) needs the pane
+// that's actually still open.
+func TestPrepareWorktreeNestsViaPaneMove(t *testing.T) {
+	repo := t.TempDir()
+	var paneMoveArgs []string
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "worktree" && args[1] == "create":
+			return []byte(`{"result":{"root_pane":{"pane_id":"wAP:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		case len(args) >= 2 && args[0] == "pane" && args[1] == "move":
+			paneMoveArgs = args
+			return []byte(`{"result":{"move_result":{"pane":{"pane_id":"w3X:p2"}}}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	}
+	cfg := &Config{Client: herdr.NewWithRunner(runner), Base: "main", ParentWorkspace: "w3X"}
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+
+	wt, err := prepareWorktree(context.Background(), cfg, &plans[0])
+	if err != nil {
+		t.Fatalf("prepareWorktree: %v", err)
+	}
+	want := []string{"pane", "move", "wAP:p1", "--workspace", "w3X", "--new-tab", "--no-focus"}
+	if strings.Join(paneMoveArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("pane move args: got %v want %v", paneMoveArgs, want)
+	}
+	if wt.RootPaneID != "w3X:p2" {
+		t.Errorf("RootPaneID: got %q want w3X:p2 (PaneMove's new pane, not WorktreeCreate's original wAP:p1)", wt.RootPaneID)
+	}
+	reg, rerr := protocol.LoadPaneRegistry(repo)
+	if rerr != nil {
+		t.Fatalf("LoadPaneRegistry: %v", rerr)
+	}
+	if reg.Panes[wt.Path] != "w3X:p2" {
+		t.Errorf("pane registry entry: got %q want w3X:p2, so prune later closes the pane that's actually still open", reg.Panes[wt.Path])
+	}
+}
+
+// TestPrepareWorktreeFailsClosedWhenNestingFails proves a PaneMove error
+// surfaces as a hard prepareWorktree error rather than silently leaving the
+// worker in the unrequested top-level workspace WorktreeCreate opened —
+// --worker-placement tab is an explicit ask, so failing to honor it should
+// not be quietly downgraded to "workspace" mode.
+func TestPrepareWorktreeFailsClosedWhenNestingFails(t *testing.T) {
+	repo := t.TempDir()
+	sentinel := errors.New("boom")
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "worktree" && args[1] == "create":
+			return []byte(`{"result":{"root_pane":{"pane_id":"wAP:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		case len(args) >= 2 && args[0] == "pane" && args[1] == "move":
+			return nil, sentinel
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	}
+	cfg := &Config{Client: herdr.NewWithRunner(runner), Base: "main", ParentWorkspace: "w3X"}
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+
+	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); !errors.Is(err, sentinel) {
+		t.Fatalf("prepareWorktree: got %v, want it to wrap the PaneMove error", err)
 	}
 }
 

@@ -20,13 +20,6 @@ import (
 // It is the one effectful seam in this package; tests substitute a fake.
 type Runner func(ctx context.Context, args ...string) ([]byte, error)
 
-// DirRunner is Runner plus a working directory for the child process. Only
-// WorktreeCreate's nested-tab path needs this: herdr's own worktree-create
-// usage rejects --workspace and --cwd together, so nesting a worker's pane
-// into an existing workspace has to tell herdr which repo to use by running
-// the command from inside it instead of via --cwd.
-type DirRunner func(ctx context.Context, dir string, args ...string) ([]byte, error)
-
 // ErrAgentNotFound is what AgentGet's err wraps when herdr reports its
 // "agent_not_found" code: the target pane has no live agent session herdr
 // recognizes (a bare shell prompt), not a transport or decoding failure.
@@ -56,16 +49,11 @@ var ErrWorkspaceNotFound = errors.New("herdr: workspace not found")
 // Client issues typed calls to herdr.
 type Client struct {
 	run Runner
-	// runDir is the DirRunner counterpart to run, used only by WorktreeCreate's
-	// nested-tab path (see DirRunner). Left nil by NewWithRunner: tests that
-	// don't care about the working directory a call ran from get the plain
-	// Runner behavior, since runInDir falls back to run when this is nil.
-	runDir DirRunner
 }
 
 // New returns a Client that shells out to the real herdr binary on PATH.
 func New() Client {
-	return Client{run: execRunner("herdr"), runDir: execRunnerDir("herdr")}
+	return Client{run: execRunner("herdr")}
 }
 
 // NewWithRunner returns a Client backed by a caller-supplied Runner, for tests.
@@ -76,51 +64,26 @@ func NewWithRunner(r Runner) Client {
 func execRunner(bin string) Runner {
 	return func(ctx context.Context, args ...string) ([]byte, error) {
 		//nolint:gosec // bin is the fixed "herdr" binary and args are argus-composed herdr subcommands (pane/worktree ids from herdr itself), not user shell input
-		return runHerdr(exec.CommandContext(ctx, bin, args...), args)
-	}
-}
-
-// execRunnerDir is execRunner plus a working directory for the child process.
-func execRunnerDir(bin string) DirRunner {
-	return func(ctx context.Context, dir string, args ...string) ([]byte, error) {
-		//nolint:gosec // bin is the fixed "herdr" binary and args are argus-composed herdr subcommands (pane/worktree ids from herdr itself), not user shell input
-		cmd := exec.CommandContext(ctx, bin, args...)
-		cmd.Dir = dir
-		return runHerdr(cmd, args)
-	}
-}
-
-func runHerdr(cmd *exec.Cmd, args []string) ([]byte, error) {
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			switch errorCode(ee.Stderr) {
-			case "agent_not_found":
-				return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentNotFound)
-			case "timeout":
-				return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWaitTimeout)
-			case "agent_prompt_stalled":
-				return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentPromptStalled)
-			case "workspace_not_found":
-				return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWorkspaceNotFound)
+		out, err := exec.CommandContext(ctx, bin, args...).Output()
+		if err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+				switch errorCode(ee.Stderr) {
+				case "agent_not_found":
+					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentNotFound)
+				case "timeout":
+					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWaitTimeout)
+				case "agent_prompt_stalled":
+					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentPromptStalled)
+				case "workspace_not_found":
+					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWorkspaceNotFound)
+				}
+				return nil, fmt.Errorf("herdr %s: %w: %s", args[0], err, ee.Stderr)
 			}
-			return nil, fmt.Errorf("herdr %s: %w: %s", args[0], err, ee.Stderr)
+			return nil, fmt.Errorf("herdr %s: %w", args[0], err)
 		}
-		return nil, fmt.Errorf("herdr %s: %w", args[0], err)
+		return out, nil
 	}
-	return out, nil
-}
-
-// runInDir runs args from within dir when both dir and c.runDir are available,
-// otherwise falls back to the plain Runner (dir ignored) so every other call
-// through this Client, and any test Client built with only a Runner, is
-// unaffected.
-func (c Client) runInDir(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	if dir == "" || c.runDir == nil {
-		return c.run(ctx, args...)
-	}
-	return c.runDir(ctx, dir, args...)
 }
 
 // errorCode extracts a herdr error envelope's machine-readable code from a
@@ -251,6 +214,30 @@ func (c Client) PaneClose(ctx context.Context, paneID string) error {
 	return err
 }
 
+// PaneMove relocates paneID into workspace as a brand-new tab, focus left
+// untouched. herdr replaces paneID with a new pane id on the move (confirmed
+// directly: `pane move <id> --workspace <ws> --new-tab --no-focus` returns a
+// fresh pane_id under the target workspace) and closes paneID's now-empty
+// prior workspace itself, so this is the actual nesting primitive — unlike
+// WorktreeCreate/WorktreeOpen's own --workspace param, which does not nest
+// (see WorktreeCreate's doc comment). Callers must use the returned Pane's
+// PaneID from here on, not the one WorktreeCreate returned.
+func (c Client) PaneMove(ctx context.Context, paneID, workspace string) (Pane, error) {
+	out, err := c.run(ctx, "pane", "move", paneID, "--workspace", workspace, "--new-tab", "--no-focus")
+	if err != nil {
+		return Pane{}, err
+	}
+	var result struct {
+		MoveResult struct {
+			Pane Pane `json:"pane"`
+		} `json:"move_result"`
+	}
+	if err := decodeEnvelope(out, &result); err != nil {
+		return Pane{}, err
+	}
+	return result.MoveResult.Pane, nil
+}
+
 // WorkspaceClose closes workspace workspaceID.
 func (c Client) WorkspaceClose(ctx context.Context, workspaceID string) error {
 	_, err := c.run(ctx, "workspace", "close", workspaceID)
@@ -342,12 +329,11 @@ func (c Client) AgentWait(ctx context.Context, target string, until []string, ti
 
 // WorktreeSpec describes a worktree for herdr to create.
 type WorktreeSpec struct {
-	Cwd       string // repo the worktree derives from
-	Branch    string // new branch name
-	Base      string // base ref, e.g. origin/main
-	Path      string // where to place the worktree
-	Label     string // herdr workspace label
-	Workspace string // parent workspace id to nest the new pane under as a tab; "" opens a new top-level workspace
+	Cwd    string // repo the worktree derives from
+	Branch string // new branch name
+	Base   string // base ref, e.g. origin/main
+	Path   string // where to place the worktree
+	Label  string // herdr workspace label
 }
 
 // Worktree is what herdr created: the checkout path (which argus supplied) and
@@ -362,32 +348,26 @@ type Worktree struct {
 // worktree's root pane so the caller can spawn a worker there directly. spec is
 // taken by pointer only to avoid copying; it is not mutated.
 //
-// herdr's own worktree-create usage rejects --workspace and --cwd together, so
-// when spec.Workspace nests the new pane into an existing workspace, --cwd is
-// left off and the herdr invocation itself runs from spec.Cwd instead (see
-// runInDir/DirRunner) — telling herdr which repo to use by ambient working
-// directory, the same way it learns it when invoked from inside one of its
-// own panes.
+// It always opens its own new top-level workspace — herdr has no flag on this
+// call that nests the result into an existing workspace as a tab (confirmed
+// directly: `worktree create --workspace <id>` without --cwd still creates a
+// fresh top-level workspace; the --workspace param there only lets an
+// existing workspace's own repo stand in for --cwd, unrelated to placement).
+// Nesting a worktree's pane into an existing workspace is PaneMove's job,
+// applied to the RootPaneID this returns.
 func (c Client) WorktreeCreate(ctx context.Context, spec *WorktreeSpec) (Worktree, error) {
-	args := []string{"worktree", "create"}
-	if spec.Workspace == "" {
-		args = append(args, "--cwd", spec.Cwd)
-	}
-	args = append(args,
+	args := []string{
+		"worktree", "create",
+		"--cwd", spec.Cwd,
 		"--branch", spec.Branch,
 		"--base", spec.Base,
 		"--path", spec.Path,
 		"--no-focus", "--json",
-	)
+	}
 	if spec.Label != "" {
 		args = append(args, "--label", spec.Label)
 	}
-	dir := ""
-	if spec.Workspace != "" {
-		args = append(args, "--workspace", spec.Workspace)
-		dir = spec.Cwd
-	}
-	out, err := c.runInDir(ctx, dir, args...)
+	out, err := c.run(ctx, args...)
 	if err != nil {
 		return Worktree{}, err
 	}
