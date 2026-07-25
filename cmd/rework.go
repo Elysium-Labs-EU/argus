@@ -189,41 +189,66 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 	}
 
 	for round := 1; round <= opts.maxRounds; round++ {
-		status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, logger, client, repoRoot, branch, task, findings, round, opts)
-		if derr != nil {
-			return derr
+		outcome, rerr := runReworkRound(ctx, out, logger, client, cfg, repoRoot, branch, task, findings, round, opts)
+		if rerr != nil {
+			return rerr
 		}
-		if status.Phase == protocol.PhaseBlocked {
-			_, _ = fmt.Fprintf(out, "\n%s round %d/%d: worker blocked: %s\n", ui.LabelError.Render("✗"), round, opts.maxRounds, status.BlockedReason)
+		if outcome.stop {
 			return nil
 		}
-
-		plan := &supervisor.WorkerPlan{Worker: supervisor.Worker{Task: task, Branch: branch, Worktree: opts.worktree}}
-		result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt)
-		approved := result.Gate.AutoApprove || (result.Review != nil && result.Review.Decision == "approve")
-		renderReworkRound(out, round, opts.maxRounds, &result, approved)
-
-		if approved {
-			return nil
-		}
-		if result.Review == nil {
-			_, _ = fmt.Fprintf(out, "%s escalating: no reviewer verdict available (%v)\n", ui.LabelWarning.Render("!"), result.ReviewErr)
-			return nil
-		}
-		if result.Review.Decision == "needs-human" {
-			_, _ = fmt.Fprintf(out, "%s escalating: reviewer could not judge (needs-human)\n", ui.LabelWarning.Render("!"))
-			return nil
-		}
-		if round == opts.maxRounds {
-			_, _ = fmt.Fprintf(out, "%s rework rounds exhausted (%d/%d), still not approved — escalating to the supervisor\n", ui.LabelWarning.Render("!"), round, opts.maxRounds)
-			return nil
-		}
-		findings = result.Review.Findings
-		if len(findings) == 0 {
-			findings = []string{result.Review.Summary}
-		}
+		findings = outcome.findings
 	}
 	return nil
+}
+
+// reworkRoundOutcome is what one dispatch-and-judge round decided: stop is
+// true once the loop has a terminal answer (approved, blocked, no reviewer
+// verdict, needs-human, or rounds exhausted); otherwise findings carries the
+// next round's brief.
+type reworkRoundOutcome struct {
+	findings []string
+	stop     bool
+}
+
+// runReworkRound dispatches one round, judges the result, renders it, and
+// decides whether runRework's loop should stop or continue — split out of
+// runRework so this branching (blocked/approved/no-reviewer/needs-human/
+// rounds-exhausted) doesn't inflate runRework's own cyclomatic complexity.
+func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger, client herdr.Client, cfg *supervisor.Config, repoRoot, branch, task string, findings []string, round int, opts *reworkOpts) (reworkRoundOutcome, error) {
+	status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, logger, client, repoRoot, branch, task, findings, round, opts)
+	if derr != nil {
+		return reworkRoundOutcome{}, derr
+	}
+	if status.Phase == protocol.PhaseBlocked {
+		_, _ = fmt.Fprintf(out, "\n%s round %d/%d: worker blocked: %s\n", ui.LabelError.Render("✗"), round, opts.maxRounds, status.BlockedReason)
+		return reworkRoundOutcome{stop: true}, nil
+	}
+
+	plan := &supervisor.WorkerPlan{Worker: supervisor.Worker{Task: task, Branch: branch, Worktree: opts.worktree}}
+	result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt)
+	approved := result.Gate.AutoApprove || (result.Review != nil && result.Review.Decision == "approve")
+	renderReworkRound(out, round, opts.maxRounds, &result, approved)
+
+	if approved {
+		return reworkRoundOutcome{stop: true}, nil
+	}
+	if result.Review == nil {
+		_, _ = fmt.Fprintf(out, "%s escalating: no reviewer verdict available (%v)\n", ui.LabelWarning.Render("!"), result.ReviewErr)
+		return reworkRoundOutcome{stop: true}, nil
+	}
+	if result.Review.Decision == "needs-human" {
+		_, _ = fmt.Fprintf(out, "%s escalating: reviewer could not judge (needs-human)\n", ui.LabelWarning.Render("!"))
+		return reworkRoundOutcome{stop: true}, nil
+	}
+	if round == opts.maxRounds {
+		_, _ = fmt.Fprintf(out, "%s rework rounds exhausted (%d/%d), still not approved — escalating to the supervisor\n", ui.LabelWarning.Render("!"), round, opts.maxRounds)
+		return reworkRoundOutcome{stop: true}, nil
+	}
+	next := result.Review.Findings
+	if len(next) == 0 {
+		next = []string{result.Review.Summary}
+	}
+	return reworkRoundOutcome{findings: next}, nil
 }
 
 // startingFindings resolves round 1's findings: an explicit --findings
