@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
@@ -12,6 +13,10 @@ import (
 // how a worker's worktree and pane are spawned together (see prepareWorktree).
 // A pane herdr no longer recognizes (already closed by hand, or herdr
 // restarted since) is treated as nothing left to do rather than an error.
+// Likewise, herdr can close a workspace itself the instant its last pane
+// closes — the explicit close below then finds nothing there and reports
+// workspace_not_found, which is the desired end state having already been
+// reached, not a failure.
 //
 // nested must be true when the pane was opened as a tab in a shared parent
 // workspace (see herdr.WorktreeSpec.Workspace, protocol.PaneRegistry.Nested)
@@ -47,7 +52,7 @@ func ClosePaneAndEmptyWorkspace(ctx context.Context, client herdr.Client, paneID
 		return fmt.Errorf("closing pane %s: %w", paneID, err)
 	}
 	if !nested && sameWorkspace == 1 {
-		if err := client.WorkspaceClose(ctx, workspaceID); err != nil {
+		if err := client.WorkspaceClose(ctx, workspaceID); err != nil && !errors.Is(err, herdr.ErrWorkspaceNotFound) {
 			return fmt.Errorf("closing workspace %s: %w", workspaceID, err)
 		}
 	}
