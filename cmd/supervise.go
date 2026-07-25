@@ -656,14 +656,20 @@ func repoBriefNote(repoPath string) string {
 	return rc.BriefNote
 }
 
-// fixedBriefTail appends argus's own non-negotiable ship-pipeline invariant
+// fixedBriefTail appends argus's own non-negotiable ship-pipeline invariants
 // after an optional repo-supplied brief_note. Unlike brief_note (toolchain
-// flavor a repo owner opts into via config, e.g. "keep make ci green"), "don't
-// commit, argus ships" is argus's own pipeline contract — ship phase owns
-// commit/push, the worker must not — so it always applies, not something a
+// flavor a repo owner opts into via config, e.g. "keep make ci green"), these
+// are argus's own pipeline contract — ship phase owns commit/push, and the
+// under-report gate compares the worker's self-reported diff_stat against
+// MeasureDiff's ground truth (internal/supervisor/measure.go) which counts
+// untracked new files as added lines — so they always apply, not something a
 // repo owner can disable.
 func fixedBriefTail(briefNote string) string {
-	const fixed = "Do NOT git commit or push; argus ships."
+	const fixed = "Do NOT git commit or push; argus ships. " +
+		"When reporting your diff size, count untracked new files too " +
+		"(e.g. `git diff --stat <base>` plus every new file's own line count) " +
+		"— a plain `git diff` alone misses files you just created, and argus's " +
+		"own measurement does not."
 	if briefNote == "" {
 		return fixed
 	}
