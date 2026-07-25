@@ -23,6 +23,7 @@ piping the rest of the status as a JSON body on stdin, in exactly this shape:
       "real_world_proof": "<how you verified against a real target, or \"\" if n/a>",
       "pr_url": "<set once the PR exists, else \"\">",
       "blocked_reason": "<set only when phase is blocked, else \"\">",
+      "title": "<conventional-commit-style PR/commit title, <=72 chars>",
       "files_touched": ["path/one.go", "path/two.go"],
       "plan": ["<todo item 1>", "<todo item 2>"],
       "tests": [
@@ -31,6 +32,17 @@ piping the rest of the status as a JSON body on stdin, in exactly this shape:
       "diff_stat": {"files": 0, "insertions": 0, "deletions": 0}
     }
     JSON
+
+` + "`title`" + ` becomes the PR and commit title argus ships with — write it
+yourself, informed by the issue and by what you actually built (your diff),
+not copied verbatim from the issue title. Use whichever conventional-commit
+prefix actually fits the change (` + "`feat:`, `fix:`, `chore:`" + `, etc.) —
+do not default to ` + "`fix:`" + ` for a change that isn't a fix. Keep it
+<=72 chars; a longer title gets truncated or rejected at ship time, so a
+tight, accurate summary beats a padded one. Leaving it empty is legal — ship
+then falls back to the fetched issue title — but a title you write yourself,
+grounded in the actual diff, is almost always more accurate than the issue
+title alone.
 
 Compute ` + "`diff_stat`" + ` the same way argus itself will: ` + "`git diff --stat HEAD`" + `
 for tracked edits, plus every untracked, non-ignored file (` + "`git ls-files --others --exclude-standard`" + `)

@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
@@ -143,11 +147,20 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	if err != nil {
 		return err
 	}
-	prTitle := prTitleFor(a.title, a.issue, branch)
-	target := &shipTarget{host: host, owner: owner, name: name, branch: branch, prTitle: prTitle, commitMsg: prTitle + closesLine(a.issue)}
+
+	reader := bufio.NewReader(cmd.InOrStdin())
+	out := cmd.OutOrStdout()
 
 	if a.dryRun {
-		renderShipPlan(cmd.OutOrStdout(), target, a.base)
+		// No token/forge client yet at this point (see below) — the issue-title
+		// fetch fallback is simply skipped for the preview; status.Title and the
+		// old branch/issue default need no network and still apply.
+		prTitle, terr := resolvePRTitle(ctx, nil, reader, out, a, owner, name, branch)
+		if terr != nil {
+			return terr
+		}
+		target := &shipTarget{host: host, owner: owner, name: name, branch: branch, prTitle: prTitle, commitMsg: prTitle + closesLine(a.issue)}
+		renderShipPlan(out, target, a.base)
 		return nil
 	}
 
@@ -158,7 +171,13 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN), or run `gh auth login` / `glab auth login`",
 		}
 	}
-	return shipChange(cmd, forge.New(host, token, nil), a, target)
+	f := forge.New(host, token, nil)
+	prTitle, terr := resolvePRTitle(ctx, f, reader, out, a, owner, name, branch)
+	if terr != nil {
+		return terr
+	}
+	target := &shipTarget{host: host, owner: owner, name: name, branch: branch, prTitle: prTitle, commitMsg: prTitle + closesLine(a.issue)}
+	return shipChange(cmd, f, a, target)
 }
 
 func renderShipPlan(out io.Writer, target *shipTarget, base string) {
@@ -349,14 +368,86 @@ func splitOwnerRepo(s string) (owner, name string, ok bool) {
 	return "", "", false
 }
 
-func prTitleFor(title string, issue int, branch string) string {
-	if title != "" {
-		return title
+// prTitleMaxLen is the hard cap ship enforces on every PR/commit title except
+// an explicit --title, which always wins untouched. Forges truncate or wrap
+// long titles inconsistently in PR lists and notification emails, so ship
+// picks one length and enforces it up front rather than letting each forge
+// mangle it differently.
+const prTitleMaxLen = 72
+
+// isStdinInteractive is a var, not a plain call, so a test can force either
+// branch of resolvePRTitle's too-long handling deterministically — go-isatty
+// always reports false under `go test`, which already matches the headless
+// case (see internal/ui/spinner.go's isStderrInteractive for the same
+// pattern).
+var isStdinInteractive = func() bool {
+	return isatty.IsTerminal(os.Stdin.Fd())
+}
+
+// resolvePRTitle picks the PR/commit title ship uses to open the PR and to
+// title the commit it makes, in priority order: an explicit --title (exempt
+// from the length rule below — the human asked for exactly this), the
+// worker's own status.Title (internal/protocol.Status, written via `argus
+// worker report`, informed by the worker's actual diff rather than the issue
+// title verbatim), the linked issue's fetched title (f is nil during
+// --dry-run, which has no forge client yet — the fetch is then simply
+// skipped), and finally the old branch/issue default as a last resort.
+// Whichever of the last three wins is then subject to the 72-char rule.
+func resolvePRTitle(ctx context.Context, f forge.Forge, in *bufio.Reader, out io.Writer, a *shipArgs, owner, name, branch string) (string, error) {
+	if a.title != "" {
+		return a.title, nil
 	}
+	status, _ := protocol.Load(protocol.StatusPath(a.worktree))
+	title := status.Title
+	if title == "" && a.issue > 0 && f != nil {
+		if iss, err := f.FetchIssue(ctx, owner, name, a.issue); err == nil {
+			title = iss.Title
+		}
+	}
+	if title == "" {
+		title = defaultPRTitle(a.issue, branch)
+	}
+	return enforceTitleLength(title, in, out)
+}
+
+func defaultPRTitle(issue int, branch string) string {
 	if issue > 0 {
 		return fmt.Sprintf("fix: %s (#%d)", branch, issue)
 	}
 	return "fix: " + branch
+}
+
+// enforceTitleLength applies the 72-char rule to a title that did not come
+// from --title. A title that fits passes through untouched. Over the limit
+// with a TTY attached, the operator gets a chance to type a shorter one or
+// hit Enter to auto-truncate; over the limit with no TTY errors instead of
+// blocking on stdin that a headless spawn (a worker's own `ship` call, CI)
+// will never answer.
+func enforceTitleLength(title string, in *bufio.Reader, out io.Writer) (string, error) {
+	n := utf8.RuneCountInString(title)
+	if n <= prTitleMaxLen {
+		return title, nil
+	}
+	if !isStdinInteractive() {
+		return "", &ui.UserError{
+			Err:  fmt.Errorf("PR title is %d chars, over the %d-char limit: %q", n, prTitleMaxLen, title),
+			Hint: "re-run with --title to set one under the limit",
+		}
+	}
+	_, _ = fmt.Fprintf(out, "%s PR title is %d chars (max %d): %q\n", ui.LabelWarning.Render("!"), n, prTitleMaxLen, title)
+	_, _ = fmt.Fprintf(out, "%s enter a shorter title, or press Enter to auto-truncate: ", ui.LabelWarning.Render("?"))
+	line, _ := in.ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return string([]rune(title)[:prTitleMaxLen]), nil
+	}
+	if ln := utf8.RuneCountInString(line); ln > prTitleMaxLen {
+		return "", &ui.UserError{
+			Err:  fmt.Errorf("shortened title is still %d chars, over the %d-char limit: %q", ln, prTitleMaxLen, line),
+			Hint: "re-run with --title to set one under the limit",
+		}
+	}
+	return line, nil
 }
 
 func closesLine(issue int) string {
