@@ -43,7 +43,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		Allow:      []string{"Bash(task *)", "Bash(pnpm *)"},
 		BriefNote:  "Add a focused test and keep task frontend:ci green. Follow the repo AGENTS.md.",
 	}
-	if err := Save(path, want); err != nil {
+	if err := Save(path, &want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	got, err := Load(path)
@@ -55,10 +55,48 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveLoadRoundTripGateKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	maxDiffLines := 200
+	want := Config{
+		MaxDiffLines:       &maxDiffLines,
+		ProofRequiredPaths: []string{"terraform", "deploy"},
+		AlwaysReviewPaths:  []string{"auth", "billing"},
+	}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestSaveLoadRoundTripMaxDiffLinesZeroDisablesLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	zero := 0
+	want := Config{MaxDiffLines: &zero}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.MaxDiffLines == nil || *got.MaxDiffLines != 0 {
+		t.Errorf("MaxDiffLines = %v, want a pointer to 0 (explicit disable, not unset)", got.MaxDiffLines)
+	}
+}
+
 func TestSaveLoadEmptyConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
-	if err := Save(path, Config{}); err != nil {
+	if err := Save(path, &Config{}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	got, err := Load(path)

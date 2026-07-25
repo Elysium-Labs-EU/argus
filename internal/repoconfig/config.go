@@ -2,12 +2,13 @@
 // declarative contract a repo owner can write once instead of fighting
 // argus's toolchain-neutral defaults with --allow/--base on every
 // invocation (see argus issue #161). argus itself assigns no semantics to
-// any value here beyond the three narrow places that read it back
+// any value here beyond the four narrow places that read it back
 // (agentadapter's base allow-list, supervise/rebase/ship's base-branch
-// resolution, and the brief_note appended verbatim to a generated brief) —
-// it never runs a build/test/lint command of its own, so there is nothing
-// else for this schema to grow into without relocating the same
-// toolchain-hardcoding problem from code into config.
+// resolution, the brief_note appended verbatim to a generated brief, and
+// cmd/gatepolicy.go's review-gate precedence) — it never runs a build/test/
+// lint command of its own, so there is nothing else for this schema to grow
+// into without relocating the same toolchain-hardcoding problem from code
+// into config.
 package repoconfig
 
 import (
@@ -17,11 +18,19 @@ import (
 )
 
 // Config is the in-memory shape of .argus/config.yml. All fields are
-// optional; a missing file is equivalent to a zero Config.
+// optional; a missing file is equivalent to a zero Config. The gate keys
+// mirror supervisor.ReviewPolicy field-for-field so a repo owner sets gate
+// policy once instead of repeating --max-diff-lines/--proof-required-path/
+// --always-review-path on every supervise/rework invocation.
+// MaxDiffLines is a pointer because 0 is a legal value (disables the diff
+// ceiling entirely) and must stay distinguishable from "key not present".
 type Config struct {
-	BaseBranch string
-	BriefNote  string
-	Allow      []string
+	BaseBranch         string
+	BriefNote          string
+	MaxDiffLines       *int
+	Allow              []string
+	ProofRequiredPaths []string
+	AlwaysReviewPaths  []string
 }
 
 // pathEnvVar overrides the default <repo>/.argus/config.yml location for
@@ -56,7 +65,9 @@ func Load(path string) (Config, error) {
 }
 
 // Save writes cfg to path as YAML, creating its parent directory if needed.
-func Save(path string, cfg Config) error {
+// cfg is a pointer solely to avoid copying the struct at the call site; Save
+// does not mutate it.
+func Save(path string, cfg *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // .argus/ dir inside a repo checkout, standard perms
 		return fmt.Errorf("creating config directory: %w", err)
 	}

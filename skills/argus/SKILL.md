@@ -295,16 +295,28 @@ Useful flags (see `argus supervise --help` for all):
 - Gate tuning — `--max-diff-lines` (default 400, `0` disables): counts
   insertions+deletions together from the *measured* git diff; over the limit
   escalates regardless of whether every test passed. It's a pure size-based risk
-  proxy, independent of the shared-path/OS-integration/under-report checks — real
-  diffs of 1178, 1527, and 461 lines have all correctly escalated past the 400
-  default. `--shared-glob`, `--os-glob`, `--always-review-glob` are the
-  content-based escalation triggers alongside it.
+  proxy, independent of the always-review-path/proof-required-path/under-report
+  checks — real diffs of 1178, 1527, and 461 lines have all correctly escalated
+  past the 400 default. `--proof-required-path` (change needs real-world proof)
+  and `--always-review-path` (behavior-critical, always escalates) are the
+  content-based escalation triggers alongside it. Each matches a whole path
+  segment/word, or — if the value contains `/` — a path substring; these are
+  not shell wildcards, `*` and `?` have no special meaning. All three can also
+  be set once in this repo's `.argus/config.yml` (`max_diff_lines`,
+  `proof_required_paths`, `always_review_paths`) instead of repeating the flag
+  every invocation — an explicitly passed flag still wins. There used to be a
+  separate --shared-glob flag for shared/prod paths; it behaved identically
+  to `--always-review-path` (unconditional escalation, differing only in the
+  reported reason) and was deliberately folded into it rather than kept as a
+  duplicate mechanism. That old flag is gone, not renamed — an invocation
+  still passing it now fails with an unknown-flag error; use
+  `--always-review-path` instead.
 
 ## 2. React to escalations
 
 The gate is the cheap path: it auto-approves only when the worker is `awaiting_review`,
-every reported test passed, the diff is within `--max-diff-lines`, no shared path was
-touched, any OS-integration change carries real-world proof, and (as of v0.1.0-rc.20)
+every reported test passed, the diff is within `--max-diff-lines`, no always-review
+path was touched, any proof-required-path change carries real-world proof, and (as of v0.1.0-rc.20)
 the worker's transcript shows genuine plan evidence — see "What argus guarantees
 today" above for exactly which of these are hard, unfakeable checks vs. softer
 content-based triggers.

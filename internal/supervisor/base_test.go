@@ -77,7 +77,7 @@ func TestResolveBasePrefersPersistedStatus(t *testing.T) {
 	if err := protocol.Write(protocol.StatusPath(repo), &protocol.Status{Base: "develop"}); err != nil {
 		t.Fatalf("seeding status: %v", err)
 	}
-	if err := repoconfig.Save(repoconfig.Path(repo), repoconfig.Config{BaseBranch: "from-config"}); err != nil {
+	if err := repoconfig.Save(repoconfig.Path(repo), &repoconfig.Config{BaseBranch: "from-config"}); err != nil {
 		t.Fatalf("seeding repo config: %v", err)
 	}
 	got := ResolveBase(context.Background(), repo, "main", false)
@@ -88,7 +88,7 @@ func TestResolveBasePrefersPersistedStatus(t *testing.T) {
 
 func TestResolveBaseFallsBackToRepoConfig(t *testing.T) {
 	repo := newRepoWithOriginHEAD(t)
-	if err := repoconfig.Save(repoconfig.Path(repo), repoconfig.Config{BaseBranch: "from-config"}); err != nil {
+	if err := repoconfig.Save(repoconfig.Path(repo), &repoconfig.Config{BaseBranch: "from-config"}); err != nil {
 		t.Fatalf("seeding repo config: %v", err)
 	}
 	got := ResolveBase(context.Background(), repo, "main", false)

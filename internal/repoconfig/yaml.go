@@ -7,11 +7,11 @@ import (
 )
 
 // encodeYAML renders cfg as the minimal YAML document parseYAML can read
-// back: a leading comment, then any of the three keys that are actually set,
-// in field order. Like internal/config's TOML encoder, this is deliberately
-// not a general-purpose YAML encoder — the schema is exactly three optional
-// keys (see Config's doc comment).
-func encodeYAML(cfg Config) string {
+// back: a leading comment, then any of the keys that are actually set, in
+// field order. Like internal/config's TOML encoder, this is deliberately not
+// a general-purpose YAML encoder — the schema is exactly the optional keys
+// listed in Config's doc comment.
+func encodeYAML(cfg *Config) string {
 	var b strings.Builder
 	b.WriteString("# .argus/config.yml — all keys are optional; see `argus init`.\n")
 	if cfg.BaseBranch != "" {
@@ -26,7 +26,24 @@ func encodeYAML(cfg Config) string {
 	if cfg.BriefNote != "" {
 		fmt.Fprintf(&b, "brief_note: %s\n", quoteYAML(cfg.BriefNote))
 	}
+	if cfg.MaxDiffLines != nil {
+		fmt.Fprintf(&b, "max_diff_lines: %d\n", *cfg.MaxDiffLines)
+	}
+	writeYAMLList(&b, "proof_required_paths", cfg.ProofRequiredPaths)
+	writeYAMLList(&b, "always_review_paths", cfg.AlwaysReviewPaths)
 	return b.String()
+}
+
+// writeYAMLList writes a key's indented "- value" list block, or nothing if
+// items is empty, matching the "allow:" block's own shape above.
+func writeYAMLList(b *strings.Builder, key string, items []string) {
+	if len(items) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "%s:\n", key)
+	for _, item := range items {
+		fmt.Fprintf(b, "  - %s\n", quoteYAML(item))
+	}
 }
 
 // quoteYAML double-quotes s using Go's own quoting rules. Go's backslash/
@@ -46,14 +63,31 @@ func unquoteYAML(s string) (string, error) {
 	return s, nil
 }
 
+// listFieldFor returns a pointer to cfg's field for key, for the keys whose
+// value is a list block (`allow`, `proof_required_paths`,
+// `always_review_paths`), or nil if key names a scalar or unknown key.
+func listFieldFor(cfg *Config, key string) *[]string {
+	switch key {
+	case "allow":
+		return &cfg.Allow
+	case "proof_required_paths":
+		return &cfg.ProofRequiredPaths
+	case "always_review_paths":
+		return &cfg.AlwaysReviewPaths
+	default:
+		return nil
+	}
+}
+
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
-// scalars (base_branch, brief_note; value optionally quoted), and a top-level
-// `allow:` key followed by indented `- value` list items. Any other
-// top-level key is ignored (along with any indented block under it), so a
-// future config key this version doesn't know about doesn't break parsing —
-// the same forward-compatibility internal/config's TOML parser gives unknown
-// sections.
+// scalars (base_branch, brief_note, max_diff_lines; value optionally
+// quoted), and a top-level list key (`allow`, `proof_required_paths`,
+// `always_review_paths`) followed by indented `- value` list items. Any
+// other top-level key is ignored (along with any indented block under it),
+// so a future config key this version doesn't know about doesn't break
+// parsing — the same forward-compatibility internal/config's TOML parser
+// gives unknown sections.
 func parseYAML(data string) (Config, error) {
 	var cfg Config
 	lines := strings.Split(data, "\n")
@@ -72,7 +106,7 @@ func parseYAML(data string) (Config, error) {
 		key = strings.TrimSpace(key)
 		rest = strings.TrimSpace(rest)
 
-		if key == "allow" {
+		if dst := listFieldFor(&cfg, key); dst != nil {
 			if rest != "" {
 				return Config{}, fmt.Errorf("config: line %d: %q expects a list on following indented lines, not an inline value", i+1, key)
 			}
@@ -80,7 +114,7 @@ func parseYAML(data string) (Config, error) {
 			if err != nil {
 				return Config{}, err
 			}
-			cfg.Allow = items
+			*dst = items
 			i += consumed
 			continue
 		}
@@ -94,6 +128,12 @@ func parseYAML(data string) (Config, error) {
 			cfg.BaseBranch = value
 		case "brief_note":
 			cfg.BriefNote = value
+		case "max_diff_lines":
+			n, perr := strconv.Atoi(value)
+			if perr != nil {
+				return Config{}, fmt.Errorf("config: line %d: max_diff_lines: %w", i+1, perr)
+			}
+			cfg.MaxDiffLines = &n
 		default:
 			// Unknown key: if it introduces its own indented list block, skip
 			// past it too so the next iteration doesn't trip the "list item

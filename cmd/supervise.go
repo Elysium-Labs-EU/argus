@@ -21,33 +21,32 @@ import (
 
 func newSuperviseCmd() *cobra.Command {
 	var (
-		panes             []string
-		branches          []string
-		labels            []string
-		tasks             []string
-		tasksFile         string
-		repo              string
-		base              string
-		launcher          string
-		sharedGlobs       []string
-		osGlobs           []string
-		reviewGlobs       []string
-		reviewModel       string
-		review            bool
-		maxDiffLines      int
-		interval          time.Duration
-		timeout           time.Duration
-		reviewConcurrency int
-		issues            []int
-		jiraIssues        []string
-		dryRun            bool
-		noCredProxy       bool
-		attach            bool
-		workspace         string
-		worktrees         []string
-		workerRuntime     string
-		allow             []string
-		credentialEnv     map[string]string
+		panes              []string
+		branches           []string
+		labels             []string
+		tasks              []string
+		tasksFile          string
+		repo               string
+		base               string
+		launcher           string
+		proofRequiredPaths []string
+		alwaysReviewPaths  []string
+		reviewModel        string
+		review             bool
+		maxDiffLines       int
+		interval           time.Duration
+		timeout            time.Duration
+		reviewConcurrency  int
+		issues             []int
+		jiraIssues         []string
+		dryRun             bool
+		noCredProxy        bool
+		attach             bool
+		workspace          string
+		worktrees          []string
+		workerRuntime      string
+		allow              []string
+		credentialEnv      map[string]string
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -119,15 +118,23 @@ each pane's directory in --panes mode).`,
 				}
 			}
 
-			resolvedBase := resolveSuperviseBase(cmd.Context(), cmd.Flags().Changed("base"), base, repoRoot, rc)
+			resolvedBase := resolveSuperviseBase(cmd.Context(), cmd.Flags().Changed("base"), base, repoRoot, &rc)
+			policy := resolveGatePolicy(gateFlags{
+				maxDiffLines:          maxDiffLines,
+				proofRequiredPaths:    proofRequiredPaths,
+				alwaysReviewPaths:     alwaysReviewPaths,
+				maxDiffLinesExplicit:  cmd.Flags().Changed("max-diff-lines"),
+				proofRequiredExplicit: cmd.Flags().Changed("proof-required-path"),
+				alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
+			}, &rc)
 
 			return runSupervision(cmd, client, workers, &superviseOpts{
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
 				base: resolvedBase, launcher: launcher, workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewConcurrency: reviewConcurrency,
-				maxDiffLines: maxDiffLines, sharedGlobs: sharedGlobs, osGlobs: osGlobs, reviewGlobs: reviewGlobs,
-				allow: allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
+				policy: policy,
+				allow:  allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
 			})
 		},
 	}
@@ -144,10 +151,9 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in each worker pane after cd into its worktree")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "how often to poll each worker's status file")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "per-worker wall-clock deadline before argus stops waiting on it (0 = wait indefinitely)")
-	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables")
-	cmd.Flags().StringSliceVar(&sharedGlobs, "shared-glob", nil, "review gate: path substrings that always require review (shared/prod surface)")
-	cmd.Flags().StringSliceVar(&osGlobs, "os-glob", policyDefaults.OSPathGlobs, "review gate: path substrings whose change requires real-world proof")
-	cmd.Flags().StringSliceVar(&reviewGlobs, "always-review-glob", policyDefaults.AlwaysReviewGlobs, "review gate: behavior-critical path words that always escalate, even for a small clean diff")
+	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
+	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
+	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().IntVar(&reviewConcurrency, "review-concurrency", 0, "max concurrent claude -p --review calls when the gate escalates several workers at once (0 = supervisor.defaultReviewConcurrency)")
@@ -172,14 +178,11 @@ type superviseOpts struct {
 	base              string
 	launcher          string
 	workerRuntime     string
-	osGlobs           []string
-	sharedGlobs       []string
+	policy            *supervisor.ReviewPolicy
 	allow             []string
 	repoAllow         []string
-	reviewGlobs       []string
 	interval          time.Duration
 	timeout           time.Duration
-	maxDiffLines      int
 	reviewConcurrency int
 	attach            bool
 	dryRun            bool
@@ -206,8 +209,9 @@ func parentWorkspace(repoExplicit bool) string {
 // (unlike rebase/ship's own --base, which is a bare branch name — see
 // supervisor.ResolveBase). explicit is cmd.Flags().Changed("base"): an
 // operator-passed flag always wins outright, matching ResolveBase's own
-// precedence for the same three sources everywhere else they're read.
-func resolveSuperviseBase(ctx context.Context, explicit bool, flagValue, repoRoot string, rc repoconfig.Config) string {
+// precedence for the same three sources everywhere else they're read. rc is
+// a pointer solely to avoid copying the struct at the call site.
+func resolveSuperviseBase(ctx context.Context, explicit bool, flagValue, repoRoot string, rc *repoconfig.Config) string {
 	if explicit {
 		return flagValue
 	}
@@ -266,12 +270,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		WorkerRuntime:     o.workerRuntime,
 		RepoAllow:         o.repoAllow,
 		ExtraAllow:        o.allow,
-		Policy: &supervisor.ReviewPolicy{
-			MaxDiffLines:      o.maxDiffLines,
-			SharedGlobs:       o.sharedGlobs,
-			OSPathGlobs:       o.osGlobs,
-			AlwaysReviewGlobs: o.reviewGlobs,
-		},
+		Policy:            o.policy,
 	}
 	if o.review {
 		cfg.Reviewer = supervisor.NewCLIReviewer(o.reviewModel).WithLog(logger)

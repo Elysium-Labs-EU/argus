@@ -47,16 +47,21 @@ func TestAssess(t *testing.T) {
 			approve:    false,
 			reasonHint: "exceeds max",
 		},
+		// This case used to be "shared path escalates", set SharedGlobs, and
+		// asserted a distinct "shared path" reason. SharedGlobs was
+		// deliberately folded into AlwaysReviewPaths (see ReviewPolicy's doc
+		// comment) rather than kept separate, so this case now exercises the
+		// same escalation through AlwaysReviewPaths instead of being dropped.
 		{
-			name: "shared path escalates",
+			name: "always-review path escalates",
 			status: protocol.Status{
 				Phase:        protocol.PhaseAwaitingReview,
 				Tests:        pass,
 				FilesTouched: []string{"internal/config/config.go"},
 			},
-			policy:     &ReviewPolicy{SharedGlobs: []string{"internal/config"}},
+			policy:     &ReviewPolicy{AlwaysReviewPaths: []string{"internal/config"}},
 			approve:    false,
-			reasonHint: "shared path",
+			reasonHint: "behavior-critical",
 		},
 		{
 			name: "OS-integration change without proof escalates",

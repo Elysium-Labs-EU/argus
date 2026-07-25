@@ -12,13 +12,21 @@ import (
 // can skip human/LLM review. It is the cheap-path half of Adam Jacob's tactic 6
 // (slide review intensity to the risk): the low-risk majority auto-approves on
 // plain facts from the status file, so the expensive review is spent only where
-// it earns its keep. Glob fields are matched as path substrings — predictable and
-// enough here (e.g. "internal/config", "systemd", "/etc/").
+// it earns its keep. Path fields match a whole path segment/word, or — if the
+// value contains "/" — a path substring; these are not shell wildcards, "*" and
+// "?" have no special meaning (see matchAny).
+//
+// This used to be three path fields (SharedGlobs, OSPathGlobs, AlwaysReviewGlobs).
+// SharedGlobs is not merely renamed here — it is gone, deliberately consolidated
+// into AlwaysReviewPaths: both escalated unconditionally on match and differed
+// only in their reason string ("shared path" vs "behavior-critical path"), so
+// keeping two lists for one behavior was duplication, not a real distinction.
+// A caller still passing the old --shared-glob flag now fails with an
+// unknown-flag error and must switch to --always-review-path.
 type ReviewPolicy struct {
-	SharedGlobs       []string // paths that always require review (shared/prod surface)
-	OSPathGlobs       []string // paths whose change needs real-world proof
-	AlwaysReviewGlobs []string // behavior-critical paths that always escalate, even for a small clean diff
-	MaxDiffLines      int      // insertions+deletions above this escalate; 0 = no limit
+	ProofRequiredPaths []string // paths whose change needs real-world proof
+	AlwaysReviewPaths  []string // behavior-critical paths that always escalate, even for a small clean diff — also covers what was once the separate SharedGlobs (shared/prod-path) field, see the consolidation note above
+	MaxDiffLines       int      // insertions+deletions above this escalate; 0 = no limit
 }
 
 // DefaultReviewPolicy is a conservative starting gate: modest diff ceiling, the
@@ -28,12 +36,14 @@ type ReviewPolicy struct {
 // set too: a worker can't widen its own RepoAllow this run (base.go bakes it in
 // before the worker touches anything), but an undetected change merges straight
 // into next run's config, so the gate must flag it even at a one-line diff. No
-// shared-path restrictions until the caller sets them.
+// default shared/prod-path restrictions until the caller sets them via
+// AlwaysReviewPaths — this default set never populated the old SharedGlobs
+// either, so the consolidation above changes no default behavior.
 func DefaultReviewPolicy() ReviewPolicy {
 	return ReviewPolicy{
-		MaxDiffLines:      400,
-		OSPathGlobs:       []string{"systemd", "openrc", "launchd", "install", "/etc/"},
-		AlwaysReviewGlobs: []string{"monitor", "daemon", "restart", "health", "liveness", ".argus/config.yml"},
+		MaxDiffLines:       400,
+		ProofRequiredPaths: []string{"systemd", "openrc", "launchd", "install", "/etc/"},
+		AlwaysReviewPaths:  []string{"monitor", "daemon", "restart", "health", "liveness", ".argus/config.yml"},
 	}
 }
 
@@ -52,9 +62,9 @@ type Verdict struct {
 
 // Assess applies the policy to a worker's reported status. It auto-approves only
 // when the worker is actually ready for review (awaiting_review or done), every
-// test passed, the diff is within the ceiling, no shared path was touched, and any
-// OS-integration change carries real-world proof. Anything else escalates with a
-// reason. A nil policy uses DefaultReviewPolicy.
+// test passed, the diff is within the ceiling, no always-review path was touched,
+// and any proof-required-path change carries real-world proof. Anything else
+// escalates with a reason. A nil policy uses DefaultReviewPolicy.
 func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 	p := DefaultReviewPolicy()
 	if policy != nil {
@@ -85,16 +95,13 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 	}
 
 	for _, f := range s.FilesTouched {
-		if g, ok := matchAny(f, p.SharedGlobs); ok {
-			reasons = append(reasons, fmt.Sprintf("touches shared path %q (matched %q)", f, g))
-		}
-		if g, ok := matchAny(f, p.AlwaysReviewGlobs); ok {
+		if g, ok := matchAny(f, p.AlwaysReviewPaths); ok {
 			reasons = append(reasons, fmt.Sprintf("touches behavior-critical path %q (matched %q) — always reviewed", f, g))
 		}
 	}
 
 	if s.RealWorldProof == "" {
-		if f, g, ok := firstOSPath(s.FilesTouched, p.OSPathGlobs); ok {
+		if f, g, ok := firstProofRequiredPath(s.FilesTouched, p.ProofRequiredPaths); ok {
 			reasons = append(reasons, fmt.Sprintf("OS-integration change %q (matched %q) has no real-world proof", f, g))
 		}
 	}
@@ -204,29 +211,30 @@ func blockedText(s *protocol.Status) string {
 	return "no reason given"
 }
 
-// matchAny reports whether path matches any glob on a word boundary, so "install"
+// matchAny reports whether path matches any entry on a word boundary, so "install"
 // matches cmd/install.go and install/main.go but not uninstall.go or reinstaller/,
 // and "systemd" matches pkg/systemd/unit.go but not mysystemdemo/. Each path
 // segment is tokenized into alphanumeric words (splitting on ., -, _, /), and a
-// single-word glob matches when it equals one of those words. A multi-segment glob
-// (one containing a separator, e.g. "internal/config") is matched as a path
-// substring instead, since it is already a path fragment.
-func matchAny(path string, globs []string) (string, bool) {
+// single-word entry matches when it equals one of those words. A multi-segment
+// entry (one containing a separator, e.g. "internal/config") is matched as a path
+// substring instead, since it is already a path fragment. These are not shell
+// wildcards: "*" and "?" have no special meaning.
+func matchAny(path string, paths []string) (string, bool) {
 	slash := filepath.ToSlash(path)
 	words := tokenizePath(slash)
-	for _, g := range globs {
-		if g == "" {
+	for _, p := range paths {
+		if p == "" {
 			continue
 		}
-		needle := strings.Trim(g, "/")
+		needle := strings.Trim(p, "/")
 		if strings.Contains(needle, "/") {
 			if strings.Contains(slash, needle) {
-				return g, true
+				return p, true
 			}
 			continue
 		}
 		if _, ok := words[needle]; ok {
-			return g, true
+			return p, true
 		}
 	}
 	return "", false
@@ -254,10 +262,10 @@ func tokenizePath(path string) map[string]struct{} {
 	return words
 }
 
-func firstOSPath(files, globs []string) (file, glob string, ok bool) {
+func firstProofRequiredPath(files, paths []string) (file, matched string, ok bool) {
 	for _, f := range files {
-		if g, matched := matchAny(f, globs); matched {
-			return f, g, true
+		if m, hit := matchAny(f, paths); hit {
+			return f, m, true
 		}
 	}
 	return "", "", false

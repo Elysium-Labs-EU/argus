@@ -12,28 +12,28 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 func newReworkCmd() *cobra.Command {
 	var (
-		worktree      string
-		base          string
-		task          string
-		findings      []string
-		launcher      string
-		workerRuntime string
-		reviewModel   string
-		sharedGlobs   []string
-		osGlobs       []string
-		reviewGlobs   []string
-		credentialEnv map[string]string
-		interval      time.Duration
-		maxRounds     int
-		maxDiffLines  int
-		dryRun        bool
-		noCredProxy   bool
+		worktree           string
+		base               string
+		task               string
+		findings           []string
+		launcher           string
+		workerRuntime      string
+		reviewModel        string
+		proofRequiredPaths []string
+		alwaysReviewPaths  []string
+		credentialEnv      map[string]string
+		interval           time.Duration
+		maxRounds          int
+		maxDiffLines       int
+		dryRun             bool
+		noCredProxy        bool
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -60,11 +60,13 @@ outcome instead of retrying forever.`,
 				worktree: worktree, base: base, task: task, findings: findings,
 				launcher: launcher, workerRuntime: workerRuntime, interval: interval,
 				maxRounds: maxRounds, dryRun: dryRun, noCredProxy: noCredProxy, credentialEnv: overrides,
-				policy: &supervisor.ReviewPolicy{
-					MaxDiffLines:      maxDiffLines,
-					SharedGlobs:       sharedGlobs,
-					OSPathGlobs:       osGlobs,
-					AlwaysReviewGlobs: reviewGlobs,
+				gate: gateFlags{
+					maxDiffLines:          maxDiffLines,
+					proofRequiredPaths:    proofRequiredPaths,
+					alwaysReviewPaths:     alwaysReviewPaths,
+					maxDiffLinesExplicit:  cmd.Flags().Changed("max-diff-lines"),
+					proofRequiredExplicit: cmd.Flags().Changed("proof-required-path"),
+					alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
 				},
 			})
 		},
@@ -79,10 +81,9 @@ outcome instead of retrying forever.`,
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "status poll cadence")
 	cmd.Flags().IntVar(&maxRounds, "max-rounds", supervisor.DefaultMaxReworkRounds, "give up and escalate after this many request-changes rounds")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
-	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables")
-	cmd.Flags().StringSliceVar(&sharedGlobs, "shared-glob", nil, "review gate: path substrings that always require review")
-	cmd.Flags().StringSliceVar(&osGlobs, "os-glob", policyDefaults.OSPathGlobs, "review gate: path substrings whose change requires real-world proof")
-	cmd.Flags().StringSliceVar(&reviewGlobs, "always-review-glob", policyDefaults.AlwaysReviewGlobs, "review gate: behavior-critical path words that always escalate, even for a small clean diff")
+	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
+	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
+	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan without dispatching a worker")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front the rework worker's API traffic with the credential proxy; it inherits the host's real ANTHROPIC_API_KEY")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
@@ -95,19 +96,19 @@ var reworkCmd = newReworkCmd()
 // rebaseOpts's split of constructor-flag-registration from RunE logic.
 type reworkOpts struct {
 	credentialEnv    map[string]string
-	policy           *supervisor.ReviewPolicy
+	workerRuntime    string
 	worktree         string
 	base             string
 	task             string
 	launcher         string
-	workerRuntime    string
 	findings         []string
+	gate             gateFlags
 	interval         time.Duration
 	maxRounds        int
-	dryRun           bool
-	noCredProxy      bool
 	livenessTimeout  time.Duration // internal knob, mirrors rebaseOpts; zero = package default
 	livenessInterval time.Duration
+	dryRun           bool
+	noCredProxy      bool
 }
 
 // dispatchTarget builds dispatchIntoPane's input from a reworkOpts, mirroring
@@ -170,6 +171,10 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 	if err != nil {
 		return fmt.Errorf("resolving repo root for %s: %w", opts.worktree, err)
 	}
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		return &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolving home dir: %w", err)
@@ -177,7 +182,7 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 	cfg := &supervisor.Config{
 		Now:      time.Now,
 		Log:      logger,
-		Policy:   opts.policy,
+		Policy:   resolveGatePolicy(opts.gate, &rc),
 		Home:     home,
 		Base:     opts.base,
 		Reviewer: reviewer,

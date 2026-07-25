@@ -81,7 +81,7 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.BriefNote = promptLine(reader, out, "brief_note", suggested.BriefNote)
 	}
 
-	if err := repoconfig.Save(path, cfg); err != nil {
+	if err := repoconfig.Save(path, &cfg); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "%s wrote %s\n", ui.LabelSuccess.Render("✓"), path)
