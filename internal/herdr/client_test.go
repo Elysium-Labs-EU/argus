@@ -108,24 +108,13 @@ func TestWorktreeCreateReturnsRootPane(t *testing.T) {
 	}
 }
 
-func TestWorktreeCreatePassesWorkspaceWhenSet(t *testing.T) {
-	var gotArgs []string
-	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
-		gotArgs = args
-		return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"},"worktree":{"path":"/tmp/wt"}}}`), nil
-	})
-	if _, err := c.WorktreeCreate(context.Background(), &WorktreeSpec{
-		Cwd: "/repo", Branch: "argus-x", Base: "main", Path: "/tmp/wt", Workspace: "w1M",
-	}); err != nil {
-		t.Fatalf("WorktreeCreate: %v", err)
-	}
-	want := []string{"worktree", "create", "--cwd", "/repo", "--branch", "argus-x", "--base", "main", "--path", "/tmp/wt", "--no-focus", "--json", "--workspace", "w1M"}
-	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
-		t.Errorf("args: got %v want %v", gotArgs, want)
-	}
-}
-
-func TestWorktreeCreateOmitsWorkspaceWhenUnset(t *testing.T) {
+// TestWorktreeCreateAlwaysSendsCwd pins down that WorktreeCreate no longer has
+// a --workspace-based nesting path: confirmed directly against a real herdr
+// (0.7.5) that `worktree create --workspace <id>` without --cwd still opens
+// its own new top-level workspace regardless — that flag only lets an
+// existing workspace's repo stand in for --cwd, it never nests. Nesting is
+// PaneMove's job now (see TestPaneMove), applied after this call succeeds.
+func TestWorktreeCreateAlwaysSendsCwd(t *testing.T) {
 	var gotArgs []string
 	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
 		gotArgs = args
@@ -139,6 +128,34 @@ func TestWorktreeCreateOmitsWorkspaceWhenUnset(t *testing.T) {
 	want := []string{"worktree", "create", "--cwd", "/repo", "--branch", "argus-x", "--base", "main", "--path", "/tmp/wt", "--no-focus", "--json"}
 	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
 		t.Errorf("args: got %v want %v", gotArgs, want)
+	}
+}
+
+// TestPaneMove pins down the args PaneMove sends and that it decodes the
+// *new* pane id herdr assigns on the move, not the one passed in — confirmed
+// directly against a real herdr that `pane move <id> --workspace <ws>
+// --new-tab --no-focus` returns a fresh pane_id under the target workspace
+// and closes the moved pane's now-empty prior workspace itself.
+func TestPaneMove(t *testing.T) {
+	reply := `{"id":"cli:pane:move","result":{"move_result":{
+"changed":true,"closed_workspace_id":"wAP",
+"pane":{"pane_id":"w3X:p2","cwd":"/repo/wt","workspace_id":"w3X"}
+}}}`
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(reply), nil
+	})
+	pane, err := c.PaneMove(context.Background(), "wAP:p1", "w3X")
+	if err != nil {
+		t.Fatalf("PaneMove: %v", err)
+	}
+	want := []string{"pane", "move", "wAP:p1", "--workspace", "w3X", "--new-tab", "--no-focus"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("args: got %v want %v", gotArgs, want)
+	}
+	if pane.PaneID != "w3X:p2" {
+		t.Errorf("PaneID: got %q want w3X:p2 (the new pane id, not the one passed in)", pane.PaneID)
 	}
 }
 
