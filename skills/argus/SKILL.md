@@ -237,6 +237,16 @@ argus supervise --repo <path> \
 # then drop --dry-run to run for real
 ```
 
+**Track spawned workers as Claude Code tasks, not just in your head.** On every real
+(non-`--dry-run`) `supervise` call, `TaskCreate` one task per worker/issue spawned —
+description a checkable acceptance criterion, e.g. "`argus ship` succeeds with an
+approved verdict and opens a PR closing #142" — then immediately `TaskUpdate` it to
+`in_progress`: the session's own Stop hook blocks ending the turn on a task left
+`pending`. Mark `completed` only once `ship` actually opens that worker's PR; an
+escalation, a `blocked` phase, or a worker still running all stay `in_progress`.
+Ending the turn to wait on workers rather than finishing them now is a legitimate
+pause — say so, don't go quiet.
+
 `--tasks` is CSV-parsed, so a free-text brief containing commas or quotes will fail
 to parse. For multi-sentence briefs with punctuation, put one brief per line in a
 file and pass `--tasks-file` instead (appended after any `--tasks`):
