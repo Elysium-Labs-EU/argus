@@ -30,6 +30,8 @@ make ci
 
 This runs the full local gate: tests with the race detector, golangci-lint, nilaway nil-safety analysis, the ast-grep scan, a coverage floor, the go-crap change-risk check, the eventlog-open gate, and the pubkey-sync check. It must pass before opening a PR. If lint reports violations, `make fix` resolves most of them automatically (gofmt and struct field alignment); run `make ci` again after.
 
+Building or testing from inside a linked worktree (e.g. `.claude/worktrees/<branch>`)? `go build`'s VCS-stamping walks past a worktree's `.git` file — which isn't a directory, just a pointer — into the parent checkout, and errors out (`error obtaining VCS status: exit status 128`) if that parent isn't in a state git recognizes as a work tree. Pass `-buildvcs=false` to `go build`/`go vet` to skip the stamping; the Makefile's own `build` target already gets correct version info from `LDFLAGS`, not from VCS auto-stamping.
+
 ## Commit Format
 
 argus uses [Conventional Commits](https://www.conventionalcommits.org). The prefix determines which section of the changelog the commit appears in.
