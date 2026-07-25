@@ -76,6 +76,22 @@ func TestSaveLoadRoundTripGateKeys(t *testing.T) {
 	}
 }
 
+func TestSaveLoadRoundTripWorkerPlacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	want := Config{WorkerPlacement: "tab"}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
 func TestSaveLoadRoundTripMaxDiffLinesZeroDisablesLimit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")

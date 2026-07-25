@@ -646,6 +646,29 @@ func TestResolveSuperviseBaseFallsBackToFlagDefault(t *testing.T) {
 	}
 }
 
+func TestResolveWorkerPlacementExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{WorkerPlacement: "tab"}
+	got := resolveWorkerPlacement(true, workerPlacementWorkspace, &rc)
+	if got != workerPlacementWorkspace {
+		t.Errorf("resolveWorkerPlacement = %q, want the explicit flag value even with a repo config default", got)
+	}
+}
+
+func TestResolveWorkerPlacementPrefersRepoConfig(t *testing.T) {
+	rc := repoconfig.Config{WorkerPlacement: "tab"}
+	got := resolveWorkerPlacement(false, workerPlacementWorkspace, &rc)
+	if got != "tab" {
+		t.Errorf("resolveWorkerPlacement = %q, want the repo config value when the flag was not passed", got)
+	}
+}
+
+func TestResolveWorkerPlacementFallsBackToFlagDefault(t *testing.T) {
+	got := resolveWorkerPlacement(false, workerPlacementWorkspace, &repoconfig.Config{})
+	if got != workerPlacementWorkspace {
+		t.Errorf("resolveWorkerPlacement = %q, want the flag's own default when config sets nothing", got)
+	}
+}
+
 // TestRunSupervisionSpawnDryRunPlumbsRepoAllow checks that superviseOpts.repoAllow
 // (loaded from .argus/config.yml) reaches every worker's generated
 // settings.local.json, the same way --allow always has — the dry-run plan

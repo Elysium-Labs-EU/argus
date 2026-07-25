@@ -17,6 +17,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.BaseBranch != "" {
 		fmt.Fprintf(&b, "base_branch: %s\n", quoteYAML(cfg.BaseBranch))
 	}
+	if cfg.WorkerPlacement != "" {
+		fmt.Fprintf(&b, "worker_placement: %s\n", quoteYAML(cfg.WorkerPlacement))
+	}
 	if len(cfg.Allow) > 0 {
 		b.WriteString("allow:\n")
 		for _, a := range cfg.Allow {
@@ -81,8 +84,8 @@ func listFieldFor(cfg *Config, key string) *[]string {
 
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
-// scalars (base_branch, brief_note, max_diff_lines; value optionally
-// quoted), and a top-level list key (`allow`, `proof_required_paths`,
+// scalars (base_branch, worker_placement, brief_note, max_diff_lines; value
+// optionally quoted), and a top-level list key (`allow`, `proof_required_paths`,
 // `always_review_paths`) followed by indented `- value` list items. Any
 // other top-level key is ignored (along with any indented block under it),
 // so a future config key this version doesn't know about doesn't break
@@ -126,6 +129,8 @@ func parseYAML(data string) (Config, error) {
 		switch key {
 		case "base_branch":
 			cfg.BaseBranch = value
+		case "worker_placement":
+			cfg.WorkerPlacement = value
 		case "brief_note":
 			cfg.BriefNote = value
 		case "max_diff_lines":

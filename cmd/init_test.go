@@ -138,6 +138,70 @@ func TestRunInitInteractivePromptsAcceptEdits(t *testing.T) {
 	}
 }
 
+func TestRunInitInteractivePromptsAllFields(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker(t, dir, "Makefile")
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	// base_branch, allow, brief_note (keep detected), max_diff_lines,
+	// proof_required_paths, always_review_paths, worker_placement — every
+	// field init supports, each edited to a non-default value.
+	cmd.SetIn(strings.NewReader("main\nBash(make *)\n\n250\nterraform, deploy\nauth\ntab\n"))
+
+	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	got, err := repoconfig.Load(repoconfig.Path(dir))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.MaxDiffLines == nil || *got.MaxDiffLines != 250 {
+		t.Errorf("MaxDiffLines = %v, want a pointer to 250", got.MaxDiffLines)
+	}
+	if len(got.ProofRequiredPaths) != 2 || got.ProofRequiredPaths[0] != "terraform" || got.ProofRequiredPaths[1] != "deploy" {
+		t.Errorf("ProofRequiredPaths = %v, want [terraform deploy]", got.ProofRequiredPaths)
+	}
+	if len(got.AlwaysReviewPaths) != 1 || got.AlwaysReviewPaths[0] != "auth" {
+		t.Errorf("AlwaysReviewPaths = %v, want [auth]", got.AlwaysReviewPaths)
+	}
+	if got.WorkerPlacement != "tab" {
+		t.Errorf("WorkerPlacement = %q, want tab", got.WorkerPlacement)
+	}
+}
+
+func TestRunInitInteractiveMaxDiffLinesNonNumericKeepsDefault(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker(t, dir, "Makefile")
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	// A non-numeric max_diff_lines answer must not abort init; it keeps the
+	// (unset) default and init still writes the rest.
+	cmd.SetIn(strings.NewReader("\n\n\nnotanumber\n\n\n\n"))
+
+	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+	got, err := repoconfig.Load(repoconfig.Path(dir))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.MaxDiffLines != nil {
+		t.Errorf("MaxDiffLines = %v, want nil (unparseable answer keeps the unset default)", got.MaxDiffLines)
+	}
+	if !strings.Contains(buf.String(), "not a number") {
+		t.Errorf("output = %q, want a note that the answer was not a number", buf.String())
+	}
+}
+
 func TestRunInitRefusesOverwriteWithoutConfirmation(t *testing.T) {
 	dir := t.TempDir()
 	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{BaseBranch: "existing"}); err != nil {
