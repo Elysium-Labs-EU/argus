@@ -302,6 +302,7 @@ Useful flags (see `argus supervise --help` for all):
 - `--timeout 0` — per-worker deadline; `0` waits indefinitely.
 - `--review-model <id>` — model for `--review`.
 - `--review-concurrency <n>` — max concurrent `--review` calls when the gate escalates several workers at once (default 4).
+- `--worker-placement <workspace|tab>` (default `workspace`) — `tab` nests each worker's pane as a tab in your current herdr workspace instead of a new top-level one; needs `HERDR_WORKSPACE_ID` set (i.e. running `argus supervise` from inside a herdr pane).
 - Gate tuning — `--max-diff-lines` (default 400, `0` disables): counts
   insertions+deletions together from the *measured* git diff; over the limit
   escalates regardless of whether every test passed. It's a pure size-based risk

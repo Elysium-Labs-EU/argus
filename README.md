@@ -90,6 +90,7 @@ argus supervise --repo /path/to/project \
   --branches feat-retry,fix-rotation
 
 argus supervise --repo /path/to/project --tasks "risky change" --review  # turn on the LLM review path
+argus supervise --repo /path/to/project --tasks "risky change" --worker-placement tab  # nest each worker's pane as a tab in your current herdr workspace instead of a new one
 argus review  --worktree /path/to/project-feat-retry --base origin/main  # review one diff on demand
 argus rework  --worktree /path/to/project-feat-retry --base origin/main  # re-dispatch on request changes, loop until it clears
 argus ship    --worktree /path/to/project-feat-retry --issue 42          # ship an approved worktree to a PR
