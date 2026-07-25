@@ -39,6 +39,13 @@ var ErrWaitTimeout = errors.New("herdr: agent wait timed out")
 // with a plain pane submission instead.
 var ErrAgentPromptStalled = errors.New("herdr: agent prompt stalled")
 
+// ErrWorkspaceNotFound is what WorkspaceClose's err wraps when herdr reports
+// its "workspace_not_found" code: the workspace is already gone by the time
+// the call lands — herdr closes a workspace itself the moment its last pane
+// closes, so an explicit close issued right after PaneClose on that same
+// pane is racing a state herdr already reached, not a transport failure.
+var ErrWorkspaceNotFound = errors.New("herdr: workspace not found")
+
 // Client issues typed calls to herdr.
 type Client struct {
 	run Runner
@@ -68,6 +75,8 @@ func execRunner(bin string) Runner {
 					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWaitTimeout)
 				case "agent_prompt_stalled":
 					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentPromptStalled)
+				case "workspace_not_found":
+					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWorkspaceNotFound)
 				}
 				return nil, fmt.Errorf("herdr %s: %w: %s", args[0], err, ee.Stderr)
 			}

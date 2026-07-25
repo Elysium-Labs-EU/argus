@@ -150,6 +150,23 @@ func TestExecRunnerMapsAgentPromptStalledToSentinel(t *testing.T) {
 	}
 }
 
+// TestExecRunnerMapsWorkspaceNotFoundToSentinel exercises execRunner's real
+// ExitError/stderr path to confirm a genuine herdr "workspace_not_found"
+// envelope becomes ErrWorkspaceNotFound, which
+// supervisor.ClosePaneAndEmptyWorkspace depends on to treat a workspace
+// herdr already closed on its own (e.g. as a side effect of its last pane
+// closing) as the desired end state rather than a failure.
+func TestExecRunnerMapsWorkspaceNotFoundToSentinel(t *testing.T) {
+	dir := fakeHerdrBinary(t, `{"error":{"code":"workspace_not_found","message":"workspace w1 not found"}}`)
+	t.Setenv("PATH", dir)
+
+	c := New()
+	err := c.WorkspaceClose(context.Background(), "w1")
+	if !errors.Is(err, ErrWorkspaceNotFound) {
+		t.Fatalf("want ErrWorkspaceNotFound, got %v", err)
+	}
+}
+
 // TestExecRunnerPreservesOtherErrorCodes confirms only "agent_not_found" is
 // special-cased: a different herdr error code still surfaces as a real error.
 func TestExecRunnerPreservesOtherErrorCodes(t *testing.T) {

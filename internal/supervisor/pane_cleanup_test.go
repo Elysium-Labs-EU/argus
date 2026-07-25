@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
@@ -32,6 +33,32 @@ func TestClosePaneAndEmptyWorkspaceClosesSoleWorkspace(t *testing.T) {
 	}
 	if calls[2][0] != "workspace" || calls[2][1] != "close" || calls[2][2] != "w1" {
 		t.Errorf("third call should close the now-empty workspace, got %v", calls[2])
+	}
+}
+
+func TestClosePaneAndEmptyWorkspaceNoOpWhenWorkspaceAlreadyClosed(t *testing.T) {
+	// herdr can close a workspace itself the instant its last pane closes;
+	// the explicit close issued right after then finds it already gone.
+	const paneList = `{"result":{"panes":[
+{"pane_id":"w1:p1","workspace_id":"w1"}
+]}}`
+	var calls [][]string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		if args[0] == "pane" && args[1] == "list" {
+			return []byte(paneList), nil
+		}
+		if args[0] == "workspace" && args[1] == "close" {
+			return nil, fmt.Errorf("herdr workspace close: %w", herdr.ErrWorkspaceNotFound)
+		}
+		return []byte(`{"result":{}}`), nil
+	})
+
+	if err := ClosePaneAndEmptyWorkspace(context.Background(), client, "w1:p1", false); err != nil {
+		t.Fatalf("a workspace herdr already closed on its own should not error: %v", err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("want pane list, pane close, workspace close (3 calls) even though the last one 404s, got %d: %v", len(calls), calls)
 	}
 }
 
