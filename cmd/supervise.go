@@ -137,7 +137,7 @@ each pane's directory in --panes mode).`,
 				review: review, reviewModel: reviewModel, reviewConcurrency: reviewConcurrency,
 				policy: policy,
 				allow:  allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
-				workerPlacement: workerPlacement,
+				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
 			})
 		},
 	}
@@ -166,7 +166,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&workspace, "workspace", "", "with --attach: attach to every herdr pane in this workspace id, using each pane's directory as a worktree")
 	cmd.Flags().StringSliceVar(&worktrees, "worktrees", nil, "with --attach: explicit worktree paths to watch (comma-separated)")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate each worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
-	cmd.Flags().StringVar(&workerPlacement, "worker-placement", workerPlacementWorkspace, "where a spawned worker's pane lands: workspace (default, each worker its own top-level herdr workspace) | tab (nest into HERDR_WORKSPACE_ID as a tab, even with --repo passed explicitly) | pane (not yet supported)")
+	cmd.Flags().StringVar(&workerPlacement, "worker-placement", workerPlacementWorkspace, "where a spawned worker's pane lands: workspace (default, each worker its own top-level herdr workspace) | tab (nest into HERDR_WORKSPACE_ID as a tab, even with --repo passed explicitly) | pane (not yet supported). Without this flag, this repo's .argus/config.yml worker_placement wins, then this default")
 	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist, on top of this repo's .argus/config.yml allow list if any (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a one-off run)")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	return cmd
@@ -273,6 +273,23 @@ func resolveSuperviseBase(ctx context.Context, explicit bool, flagValue, repoRoo
 		if detected, err := supervisor.DetectDefaultBase(ctx, repoRoot); err == nil && detected != "" {
 			return "origin/" + detected
 		}
+	}
+	return flagValue
+}
+
+// resolveWorkerPlacement applies --worker-placement > this repo's
+// .argus/config.yml worker_placement > the flag's own default ("workspace"),
+// the same explicit-flag-wins precedence resolveSuperviseBase uses. explicit
+// is cmd.Flags().Changed("worker-placement"). The value is validated once,
+// downstream in parentWorkspace, so a bad config value fails the same way a
+// bad flag value does rather than needing a second check here. rc is a
+// pointer solely to avoid copying the struct at the call site.
+func resolveWorkerPlacement(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.WorkerPlacement != "" {
+		return rc.WorkerPlacement
 	}
 	return flagValue
 }

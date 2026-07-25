@@ -2,10 +2,11 @@
 // declarative contract a repo owner can write once instead of fighting
 // argus's toolchain-neutral defaults with --allow/--base on every
 // invocation (see argus issue #161). argus itself assigns no semantics to
-// any value here beyond the four narrow places that read it back
+// any value here beyond the narrow places that read it back
 // (agentadapter's base allow-list, supervise/rebase/ship's base-branch
-// resolution, the brief_note appended verbatim to a generated brief, and
-// cmd/gatepolicy.go's review-gate precedence) — it never runs a build/test/
+// resolution, the brief_note appended verbatim to a generated brief,
+// cmd/gatepolicy.go's review-gate precedence, and supervise's
+// --worker-placement default) — it never runs a build/test/
 // lint command of its own, so there is nothing else for this schema to grow
 // into without relocating the same toolchain-hardcoding problem from code
 // into config.
@@ -24,8 +25,13 @@ import (
 // --always-review-path on every supervise/rework invocation.
 // MaxDiffLines is a pointer because 0 is a legal value (disables the diff
 // ceiling entirely) and must stay distinguishable from "key not present".
+// WorkerPlacement stays a plain string (not a pointer) because its empty
+// value already means "unset" — supervise treats "" identically to the
+// --worker-placement default "workspace", so there is nothing to
+// distinguish an absent key from.
 type Config struct {
 	BaseBranch         string
+	WorkerPlacement    string
 	BriefNote          string
 	MaxDiffLines       *int
 	Allow              []string

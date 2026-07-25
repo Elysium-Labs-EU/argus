@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -79,6 +80,10 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.BaseBranch = promptLine(reader, out, "base_branch", suggested.BaseBranch)
 		cfg.Allow = promptList(reader, out, "allow", suggested.Allow)
 		cfg.BriefNote = promptLine(reader, out, "brief_note", suggested.BriefNote)
+		cfg.MaxDiffLines = promptOptionalInt(reader, out, "max_diff_lines", suggested.MaxDiffLines)
+		cfg.ProofRequiredPaths = promptList(reader, out, "proof_required_paths", suggested.ProofRequiredPaths)
+		cfg.AlwaysReviewPaths = promptList(reader, out, "always_review_paths", suggested.AlwaysReviewPaths)
+		cfg.WorkerPlacement = promptLine(reader, out, "worker_placement (workspace|tab)", suggested.WorkerPlacement)
 	}
 
 	if err := repoconfig.Save(path, &cfg); err != nil {
@@ -157,6 +162,30 @@ func promptLine(reader *bufio.Reader, out io.Writer, label, def string) string {
 		return def
 	}
 	return line
+}
+
+// promptOptionalInt works like promptLine but for max_diff_lines, whose
+// value is a *int: a bare Enter keeps def (including a nil "unset", which is
+// not the same as 0 — 0 explicitly disables the diff ceiling), and an
+// unparseable answer keeps def rather than aborting the whole init, matching
+// the rest of init's best-effort, edit-the-YAML-later stance.
+func promptOptionalInt(reader *bufio.Reader, out io.Writer, label string, def *int) *int {
+	shown := "unset"
+	if def != nil {
+		shown = strconv.Itoa(*def)
+	}
+	_, _ = fmt.Fprintf(out, "%s [%s]: ", label, shown)
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def
+	}
+	n, err := strconv.Atoi(line)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "  %q is not a number, keeping %s\n", line, shown)
+		return def
+	}
+	return &n
 }
 
 // promptList works like promptLine but for a comma-separated list, the
