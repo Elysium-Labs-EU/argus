@@ -53,7 +53,7 @@ func TestIssuesToTasks(t *testing.T) {
 	if !strings.Contains(tasks[0], "Do NOT git commit or push; argus ships.") {
 		t.Errorf("task 0 missing the fixed ship-pipeline line: %q", tasks[0])
 	}
-	if branches[0] != "fix-issue-142" || branches[1] != "fix-issue-145" {
+	if branches[0] != "r-fix-issue-142" || branches[1] != "r-fix-issue-145" {
 		t.Errorf("branches: %v", branches)
 	}
 }
@@ -118,7 +118,7 @@ func TestJiraIssuesToTasks(t *testing.T) {
 		"PROJ-142": {Title: "daemon down warning", Body: "warn when down"},
 		"PROJ-145": {Title: "log backoff", Body: "back off on EACCES"},
 	}}
-	tasks, branches, err := jiraIssuesToTasks(context.Background(), f, t.TempDir(), []string{"PROJ-142", "PROJ-145"})
+	tasks, branches, err := jiraIssuesToTasks(context.Background(), f, t.TempDir(), "myrepo", []string{"PROJ-142", "PROJ-145"})
 	if err != nil {
 		t.Fatalf("jiraIssuesToTasks: %v", err)
 	}
@@ -128,8 +128,23 @@ func TestJiraIssuesToTasks(t *testing.T) {
 	if !strings.Contains(tasks[0], "PROJ-142") || !strings.Contains(tasks[0], "daemon down warning") || !strings.Contains(tasks[0], "warn when down") {
 		t.Errorf("task 0 missing issue content: %q", tasks[0])
 	}
-	if branches[0] != "fix-proj-142" || branches[1] != "fix-proj-145" {
+	if branches[0] != "myrepo-fix-proj-142" || branches[1] != "myrepo-fix-proj-145" {
 		t.Errorf("branches: %v", branches)
+	}
+}
+
+// TestRepoBranchPrefixFallsBackToDirName pins the case repoBranchPrefix
+// exists for: a local checkout with no origin remote (or one Jira can't be
+// bothered to resolve a forge host for) still gets a stable, unique branch
+// prefix instead of silently reverting to the collision-prone bare "fix-".
+func TestRepoBranchPrefixFallsBackToDirName(t *testing.T) {
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	got := repoBranchPrefix(context.Background(), repo)
+	if want := filepath.Base(repo); got != want {
+		t.Errorf("repoBranchPrefix() = %q, want %q", got, want)
 	}
 }
 
