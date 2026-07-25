@@ -41,8 +41,9 @@ All three keys are optional; a missing file is equivalent to an empty one.
   generated worker brief when the brief comes from `--issues`/`--jira-issues`.
   argus assigns it no meaning beyond that — it is never parsed or enforced,
   so it can't grow the same never-ending toolchain-adapter problem this file
-  exists to avoid. A fixed line ("Do NOT git commit or push; argus ships.")
-  always follows it — that one is argus's own pipeline invariant, not
+  exists to avoid. Fixed lines ("Do NOT git commit or push; argus ships." and
+  diff-counting guidance that mirrors `MeasureDiff`'s own untracked-file
+  handling) always follow it — those are argus's own pipeline invariants, not
   something a repo can opt out of.
 
 ## Why this is safe from a worker
