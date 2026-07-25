@@ -64,7 +64,7 @@ func TestIssuesToTasks(t *testing.T) {
 // present, and is appended before the fixed "don't commit" line.
 func TestIssuesToTasksAppendsRepoBriefNote(t *testing.T) {
 	repo := t.TempDir()
-	if err := repoconfig.Save(repoconfig.Path(repo), repoconfig.Config{
+	if err := repoconfig.Save(repoconfig.Path(repo), &repoconfig.Config{
 		BriefNote: "Keep task frontend:ci green.",
 	}); err != nil {
 		t.Fatalf("seeding repo config: %v", err)

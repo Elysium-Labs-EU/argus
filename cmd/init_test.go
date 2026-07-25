@@ -140,7 +140,7 @@ func TestRunInitInteractivePromptsAcceptEdits(t *testing.T) {
 
 func TestRunInitRefusesOverwriteWithoutConfirmation(t *testing.T) {
 	dir := t.TempDir()
-	if err := repoconfig.Save(repoconfig.Path(dir), repoconfig.Config{BaseBranch: "existing"}); err != nil {
+	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{BaseBranch: "existing"}); err != nil {
 		t.Fatalf("seeding existing config: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestRunInitRefusesOverwriteWithoutConfirmation(t *testing.T) {
 func TestRunInitYesOverwritesExistingConfigWithoutAsking(t *testing.T) {
 	dir := t.TempDir()
 	writeMarker(t, dir, "Makefile")
-	if err := repoconfig.Save(repoconfig.Path(dir), repoconfig.Config{BaseBranch: "stale"}); err != nil {
+	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{BaseBranch: "stale"}); err != nil {
 		t.Fatalf("seeding existing config: %v", err)
 	}
 

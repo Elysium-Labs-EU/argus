@@ -568,7 +568,7 @@ func repoWithOriginHEAD(t *testing.T, defaultBranch string) string {
 func TestResolveSuperviseBaseExplicitFlagWinsOutright(t *testing.T) {
 	repo := repoWithOriginHEAD(t, "trunk")
 	rc := repoconfig.Config{BaseBranch: "develop"}
-	got := resolveSuperviseBase(context.Background(), true, "origin/explicit", repo, rc)
+	got := resolveSuperviseBase(context.Background(), true, "origin/explicit", repo, &rc)
 	if got != "origin/explicit" {
 		t.Errorf("resolveSuperviseBase = %q, want the explicit flag value", got)
 	}
@@ -577,7 +577,7 @@ func TestResolveSuperviseBaseExplicitFlagWinsOutright(t *testing.T) {
 func TestResolveSuperviseBasePrefersRepoConfig(t *testing.T) {
 	repo := repoWithOriginHEAD(t, "trunk")
 	rc := repoconfig.Config{BaseBranch: "develop"}
-	got := resolveSuperviseBase(context.Background(), false, "origin/main", repo, rc)
+	got := resolveSuperviseBase(context.Background(), false, "origin/main", repo, &rc)
 	if got != "origin/develop" {
 		t.Errorf("resolveSuperviseBase = %q, want origin/%s from repo config", got, "develop")
 	}
@@ -585,14 +585,14 @@ func TestResolveSuperviseBasePrefersRepoConfig(t *testing.T) {
 
 func TestResolveSuperviseBaseFallsBackToDetectedOriginHEAD(t *testing.T) {
 	repo := repoWithOriginHEAD(t, "trunk")
-	got := resolveSuperviseBase(context.Background(), false, "origin/main", repo, repoconfig.Config{})
+	got := resolveSuperviseBase(context.Background(), false, "origin/main", repo, &repoconfig.Config{})
 	if got != "origin/trunk" {
 		t.Errorf("resolveSuperviseBase = %q, want origin/%s detected from origin/HEAD", got, "trunk")
 	}
 }
 
 func TestResolveSuperviseBaseFallsBackToFlagDefault(t *testing.T) {
-	got := resolveSuperviseBase(context.Background(), false, "origin/main", "", repoconfig.Config{})
+	got := resolveSuperviseBase(context.Background(), false, "origin/main", "", &repoconfig.Config{})
 	if got != "origin/main" {
 		t.Errorf("resolveSuperviseBase = %q, want the flag's own default when nothing else resolves", got)
 	}

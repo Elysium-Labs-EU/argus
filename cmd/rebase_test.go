@@ -201,7 +201,7 @@ func TestRebaseDryRunOmittedBaseUsesRepoConfig(t *testing.T) {
 	git(wt, "checkout", "-q", "-b", "feat-x", "origin/trunk")
 	git(wt, "commit", "-q", "--allow-empty", "-m", "work")
 
-	if err := repoconfig.Save(repoconfig.Path(wt), repoconfig.Config{BaseBranch: "trunk"}); err != nil {
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{BaseBranch: "trunk"}); err != nil {
 		t.Fatalf("seeding repo config: %v", err)
 	}
 

@@ -197,7 +197,7 @@ func TestRunReworkApprovesFirstRound(t *testing.T) {
 
 	err := runRework(cmd, client, reviewer, reworkLogger(), &reworkOpts{
 		worktree: dir, base: "feat-x", maxRounds: 3, interval: 5 * time.Millisecond,
-		policy: &supervisor.ReviewPolicy{},
+		gate: gateFlags{},
 	})
 	if err != nil {
 		t.Fatalf("runRework: %v", err)
@@ -233,7 +233,7 @@ func TestRunReworkLoopsOnRequestChangesThenApproves(t *testing.T) {
 
 	err := runRework(cmd, client, reviewer, reworkLogger(), &reworkOpts{
 		worktree: dir, base: "feat-x", maxRounds: 3, interval: 5 * time.Millisecond,
-		policy: &supervisor.ReviewPolicy{},
+		gate: gateFlags{},
 	})
 	if err != nil {
 		t.Fatalf("runRework: %v", err)
@@ -265,7 +265,7 @@ func TestRunReworkExhaustsRoundsAndEscalates(t *testing.T) {
 
 	err := runRework(cmd, client, reviewer, reworkLogger(), &reworkOpts{
 		worktree: dir, base: "feat-x", maxRounds: 2, interval: 5 * time.Millisecond,
-		policy: &supervisor.ReviewPolicy{},
+		gate: gateFlags{},
 	})
 	if err != nil {
 		t.Fatalf("runRework: %v", err)
@@ -298,7 +298,7 @@ func TestRunReworkNeedsHumanEscalatesImmediately(t *testing.T) {
 
 	err := runRework(cmd, client, reviewer, reworkLogger(), &reworkOpts{
 		worktree: dir, base: "feat-x", maxRounds: 3, interval: 5 * time.Millisecond,
-		policy: &supervisor.ReviewPolicy{},
+		gate: gateFlags{},
 	})
 	if err != nil {
 		t.Fatalf("runRework: %v", err)
@@ -324,7 +324,7 @@ func TestRunReworkStopsImmediatelyWhenWorkerReportsBlocked(t *testing.T) {
 
 	err := runRework(cmd, client, reviewer, reworkLogger(), &reworkOpts{
 		worktree: dir, base: "feat-x", maxRounds: 3, interval: 5 * time.Millisecond,
-		policy: &supervisor.ReviewPolicy{},
+		gate: gateFlags{},
 	})
 	if err != nil {
 		t.Fatalf("runRework: %v", err)

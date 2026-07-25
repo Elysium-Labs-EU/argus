@@ -267,7 +267,7 @@ func TestRunShipDryRunPrintsPlanWithoutShipping(t *testing.T) {
 // literal "main" default.
 func TestRunShipOmittedBaseUsesRepoConfig(t *testing.T) {
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
-	if err := repoconfig.Save(repoconfig.Path(wt), repoconfig.Config{BaseBranch: "develop"}); err != nil {
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{BaseBranch: "develop"}); err != nil {
 		t.Fatalf("seeding repo config: %v", err)
 	}
 

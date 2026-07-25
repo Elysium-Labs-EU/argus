@@ -37,7 +37,7 @@ stateDiagram-v2
 
 `done` is never worker-reported. Only `ship` sets it, on merge. argus stops waiting once a worker hits a terminal phase: `awaiting_review` or `blocked`.
 
-Then the gate runs. It checks the worker's reported status against a review policy (diff ceiling, shared-path globs, OS-integration globs needing real-world proof), then cross-checks against the diff argus measures from git. A clean match auto-approves. A miss, or a risky surface, escalates: to you, or with `--review`, to a headless `claude -p` review. That review is the only point the LLM re-enters the loop.
+Then the gate runs. It checks the worker's reported status against a review policy (diff ceiling, always-review paths, proof-required paths needing real-world proof), then cross-checks against the diff argus measures from git. A clean match auto-approves. A miss, or a risky surface, escalates: to you, or with `--review`, to a headless `claude -p` review. That review is the only point the LLM re-enters the loop.
 
 The design follows Adam Jacob's idea: move the coordinator out of the model, scale review intensity to risk. argus applies that idea to a supervise-agents workflow.
 
@@ -66,11 +66,16 @@ Run it with `argus worktree prune --branch <name>` for one worktree, or `--merge
 
 ## Repo config: .argus/config.yml
 
-A repo can commit its own `.argus/config.yml` (see `internal/repoconfig`) instead of repeating `--base`/`--allow`/brief boilerplate on every `supervise` invocation. All three keys are optional:
+A repo can commit its own `.argus/config.yml` (see `internal/repoconfig`) instead of repeating `--base`/`--allow`/brief/gate-policy boilerplate on every `supervise`/`rework` invocation. All keys are optional:
 
 * `base_branch` — the branch `supervise`/`rebase`/`ship` diff and PR against, when `--base` isn't passed explicitly.
 * `allow` — extra Bash permission entries appended to every worker's scoped allowlist (on top of argus's own toolchain-neutral defaults).
 * `brief_note` — free text appended verbatim to the end of every generated worker brief, e.g. a pointer to the repo's own AGENTS.md.
+* `max_diff_lines` — review gate: diffs larger than this (insertions+deletions) escalate; `0` disables the ceiling. Mirrors `--max-diff-lines`.
+* `proof_required_paths` — review gate: touched paths needing real-world proof before auto-approve. Mirrors `--proof-required-path`.
+* `always_review_paths` — review gate: behavior-critical touched paths that always escalate, even for a small clean diff. Mirrors `--always-review-path`. This also covers what used to be a separate shared/prod-path escalation list (the old --shared-glob flag): the two behaved identically (unconditional escalation on match) and differed only in the reported reason text, so they were deliberately consolidated into one key rather than kept as duplicate mechanisms. That old flag is gone, not renamed — any invocation still passing it now fails with an unknown-flag error; switch it to `--always-review-path` (or `always_review_paths` in `.argus/config.yml`).
+
+The three gate keys each match a whole path segment/word, or — if the value contains `/` — a path substring; these are not shell wildcards, `*` and `?` have no special meaning (see "The review gate" below). `base_branch` and the three gate keys each have a flag counterpart (`--base`, `--max-diff-lines`, `--proof-required-path`, `--always-review-path`); an explicitly passed flag always wins over `.argus/config.yml`, which wins over argus's own built-in default. `allow` has no such override: `--allow` is additive, appending to this repo's `allow` list rather than replacing it. `brief_note` has no flag at all — it is set only here.
 
 Run `argus init` to generate a first draft: it peeks for `Taskfile.yml`, `Makefile`, `package.json`, or `go.mod` (first match wins) to suggest values, then prompts to confirm or edit each before writing the file. argus itself assigns no other meaning to this file and has no built-in opinion on any repo's toolchain — a wrong guess is just a YAML edit, not a bug.
 
@@ -185,7 +190,7 @@ Pass `--debug` on any command to tee the typed event log to stderr as it is writ
 
 ## The review gate
 
-The gate is the cheap path. It auto-approves a worker only when the worker is actually ready for review, every reported test passed, the diff is within the ceiling, no shared path was touched, and any OS-integration change carries real-world proof. Everything else escalates with a recorded reason.
+The gate is the cheap path. It auto-approves a worker only when the worker is actually ready for review, every reported test passed, the diff is within the ceiling, no always-review path was touched, and any proof-required-path change carries real-world proof. Everything else escalates with a recorded reason.
 
 Three of those checks the worker cannot talk its way past, because argus verifies against ground truth instead of trusting `status.json`:
 
@@ -195,7 +200,7 @@ Three of those checks the worker cannot talk its way past, because argus verifie
 
 The unmeasurable-diff and under-report checks (plus a zero-measured-files check for a claimed terminal phase) are not just escalations — they are hard reasons a `--review` verdict cannot waive. Even if the LLM reviewer comes back "approve", argus still records the change as not approved when one of these fired, because the discrepancy is evidence `status.json` can't be trusted for that change, not a call for the reviewer's holistic judgment.
 
-Tune the gate with `--max-diff-lines`, `--shared-glob`, and `--os-glob` on `supervise`.
+Tune the gate with `--max-diff-lines`, `--proof-required-path`, and `--always-review-path` on `supervise`/`rework`. Each path value matches a whole path segment/word, or — if it contains `/` — a path substring; these are not shell wildcards, `*` and `?` have no special meaning. Set them once in this repo's `.argus/config.yml` (`max_diff_lines`, `proof_required_paths`, `always_review_paths`; see "Repo config" above) instead of repeating the flags every invocation — an explicitly passed flag still wins.
 
 ## Development
 
