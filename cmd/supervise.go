@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -132,8 +133,8 @@ each pane's directory in --panes mode).`,
 		},
 	}
 
-	cmd.Flags().IntSliceVar(&issues, "issues", nil, "issue numbers to fetch from the repo's forge and turn into worker briefs (branch defaults to fix-issue-<n>)")
-	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
+	cmd.Flags().IntSliceVar(&issues, "issues", nil, "issue numbers to fetch from the repo's forge and turn into worker briefs (branch defaults to <repo>-fix-issue-<n>)")
+	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to <repo>-fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
 	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated); drives worker count in the default mode")
 	cmd.Flags().StringVar(&tasksFile, "tasks-file", "", "path to a file with one task per line, appended after --tasks; unlike --tasks this is not CSV-parsed, so commas and quotes in a free-text brief are safe")
 	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>)")
@@ -708,7 +709,7 @@ func issuesToTasks(ctx context.Context, f forge.Forge, owner, name, repoPath str
 		tasks = append(tasks, fmt.Sprintf(
 			"Fix %s/%s issue #%d: %s\n\n%s\n\n%s",
 			owner, name, n, iss.Title, iss.Body, tail))
-		branches = append(branches, fmt.Sprintf("fix-issue-%d", n))
+		branches = append(branches, fmt.Sprintf("%s-fix-issue-%d", name, n))
 	}
 	return tasks, branches, nil
 }
@@ -731,7 +732,22 @@ func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string) (t
 			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN, or write them to a JSON config file at $JIRA_CONFIG_FILE or ~/.argus/jira.json, to fetch --jira-issues",
 		}
 	}
-	return jiraIssuesToTasks(ctx, c, repoPath, keys)
+	return jiraIssuesToTasks(ctx, c, repoPath, repoBranchPrefix(ctx, repoPath), keys)
+}
+
+// repoBranchPrefix names the git repo at repoPath for branch prefixing, so
+// issue-driven spawns across multiple repos in the same org don't collide on
+// a bare "fix-issue-42". It tries the origin remote first (matching the repo
+// name a human would use, e.g. "argus" from Elysium-Labs-EU/argus) and falls
+// back to the checkout's directory name when there is no remote to read —
+// Jira has no owner/repo of its own to resolve this from.
+func repoBranchPrefix(ctx context.Context, repoPath string) string {
+	if remote, err := supervisor.RemoteURL(ctx, repoPath); err == nil {
+		if _, _, name, err := forge.Detect(remote); err == nil && name != "" {
+			return name
+		}
+	}
+	return filepath.Base(repoPath)
 }
 
 // jiraIssuesToTasks renders each Jira issue into a worker brief and a default
@@ -739,7 +755,7 @@ func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string) (t
 // repoPath resolves this repo's optional brief_note the same way
 // issuesToTasks does — Jira is only the issue tracker here, the tasks it
 // produces still run against this same repo checkout.
-func jiraIssuesToTasks(ctx context.Context, c jiraIssueFetcher, repoPath string, keys []string) (tasks, branches []string, err error) {
+func jiraIssuesToTasks(ctx context.Context, c jiraIssueFetcher, repoPath, branchPrefix string, keys []string) (tasks, branches []string, err error) {
 	tail := fixedBriefTail(repoBriefNote(repoPath))
 	for _, key := range keys {
 		iss, ferr := c.FetchIssue(ctx, key)
@@ -749,7 +765,7 @@ func jiraIssuesToTasks(ctx context.Context, c jiraIssueFetcher, repoPath string,
 		tasks = append(tasks, fmt.Sprintf(
 			"Fix Jira issue %s: %s\n\n%s\n\n%s",
 			key, iss.Title, iss.Body, tail))
-		branches = append(branches, fmt.Sprintf("fix-%s", strings.ToLower(key)))
+		branches = append(branches, fmt.Sprintf("%s-fix-%s", branchPrefix, strings.ToLower(key)))
 	}
 	return tasks, branches, nil
 }
