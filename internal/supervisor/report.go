@@ -140,6 +140,14 @@ func reportTokens(cfg *Config, st *workerState, sessionID string) string {
 // logRunSummary records one run-level event: how many workers, how many the gate
 // escalated, and how many argus approved. It is the per-run row `argus stats`
 // aggregates across runs.
+//
+// "Approved" is read back from each worker's persisted verdict.json rather
+// than recomputed from the gate verdict and review decision here: recordApproval
+// (loop.go) is the one place a hard gate reason (e.g. a VerifyTests mismatch)
+// forces approved=false even when the reviewer said "approve", and duplicating
+// that logic here previously ignored HardReasons entirely — a worker rejected
+// by an unwaivable check could still be counted approved as long as the
+// reviewer text said so.
 func logRunSummary(cfg *Config, states []*workerState) {
 	workers, reported, escalated, approved := 0, 0, 0, 0
 	for _, st := range states {
@@ -149,11 +157,11 @@ func logRunSummary(cfg *Config, states []*workerState) {
 		}
 		reported++
 		v := gateVerdict(st, cfg.Policy)
-		if v.AutoApprove || (st.review != nil && st.review.Decision == "approve") {
-			approved++
-		}
 		if !v.AutoApprove {
 			escalated++
+		}
+		if a, found, err := protocol.LoadApproval(st.plan.Worktree); err == nil && found && a.Approved {
+			approved++
 		}
 	}
 	cfg.Log.Emit(&eventlog.Event{

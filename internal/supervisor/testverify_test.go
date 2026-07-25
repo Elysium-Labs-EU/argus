@@ -45,6 +45,43 @@ func TestVerifyTestsSkipsFailAndSkippedClaims(t *testing.T) {
 	}
 }
 
+// TestVerifyTestsRetriesOnceBeforeFlagging is the regression for the
+// under-load flake this check kept mistaking for a real regression: a
+// command that fails on its first sample but passes on retry (the load-flake
+// shape) must not be reported as a mismatch.
+func TestVerifyTestsRetriesOnceBeforeFlagging(t *testing.T) {
+	wt := t.TempDir()
+	marker := filepath.Join(wt, "attempted")
+	tests := []protocol.TestRun{
+		{Cmd: "test -f " + marker + " && exit 0 || { touch " + marker + "; exit 1; }", Target: "unit", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — a fail-then-pass pair is a flake, not a real mismatch", mismatches)
+	}
+}
+
+// TestVerifyTestsFlagsRepeatedFailureWithBothOutputs proves a command that
+// fails on both attempts is still reported (the retry only forgives a single
+// bad sample), and that the mismatch string carries each attempt's captured
+// output — the diagnosis a bare "exit status 2" never gave anyone.
+func TestVerifyTestsFlagsRepeatedFailureWithBothOutputs(t *testing.T) {
+	wt := t.TempDir()
+	tests := []protocol.TestRun{
+		{Cmd: "echo boom-output-here; exit 2", Target: "unit", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 1 {
+		t.Fatalf("mismatches = %v, want 1 entry for a command that fails on both attempts", mismatches)
+	}
+	if !strings.Contains(mismatches[0], "boom-output-here") {
+		t.Errorf("mismatch should carry the failing command's captured output, got %q", mismatches[0])
+	}
+	if !strings.Contains(mismatches[0], "failed twice") {
+		t.Errorf("mismatch should note both attempts failed, got %q", mismatches[0])
+	}
+}
+
 func TestVerifyTestsReportsTimeout(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
