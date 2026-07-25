@@ -1,25 +1,16 @@
-# argus - Deterministic Agent Supervisor
+# argus, a Deterministic Agent Supervisor
 
 [![GitHub](https://img.shields.io/badge/GitHub-argus-blue?logo=github)](https://github.com/Elysium-Labs-EU/argus)
 
-argus runs the mechanical half of multi-pane AI-agent supervision as plain Go instead of inside an LLM. It drives [herdr](https://github.com/ogulcancelik/herdr) (a terminal multiplexer) through its CLI, spawns worker agents in git worktrees, and reads each worker's typed status file rather than scraping terminal scrollback. The LLM re-enters only for the risky minority, the review of a diff that the deterministic gate would not clear on its own.
+argus supervises a fleet of parallel AI coding agents and ships each one's work to a pull request. It runs the mechanical half of that supervision as plain Go rather than inside an LLM. It spawns workers in isolated git worktrees, tracks each one through a typed state machine, and gates every diff against the real `git diff` before it can ship. The LLM re-enters only to review the risky minority that the deterministic gate will not clear on its own.
 
-The point is not just to coordinate. argus is a verifier. The gate checks the real `git diff` (ground truth), not the worker's self-reported status; `ship` refuses to open a pull request without a recorded approving verdict; and argus's own control-plane files never leak into a PR.
+The point is verification, not just coordination. The gate trusts measured ground truth over whatever a worker reports about itself. `ship` refuses to open a PR without a recorded approving verdict. And argus's own control-plane files never leak into the PR.
 
-## Features
-
-* **Coordinator out of the LLM.** Discovering panes, enforcing one worktree per worker, spawning workers, and polling their state are plain code. Tokens are spent on judgment, not bookkeeping.
-* **Typed status, not scrollback.** Each worker writes a single `status.json` after every phase; argus decodes that struct instead of parsing terminal output that a real agent would reflow or overwrite.
-* **The gate verifies against git.** A worker's self-report only auto-approves where it matches the measured diff. An unmeasurable or under-reported diff escalates instead of sliding through — and no `--review` verdict can waive that escalation back to approved.
-* **Verdict-gated shipping.** `ship` opens a PR only when a prior gate or review recorded an approving verdict, so a request-changes actually blocks the PR rather than being advisory.
-* **Clean PRs.** argus unstages its own control-plane files before committing, so `.claude/argus` and scoped permission files never reach the pull request.
-* **A run log you can query.** Every action lands in a typed event log under `~/.argus/runs`; `argus stats` aggregates it into escalation rate, review parse-fail rate, and tokens per task.
-
-## How it works
+## Architecture
 
 argus splits supervision into a deterministic majority and a judgment minority.
 
-The deterministic half discovers or opens herdr panes, creates a worktree per worker, writes a task brief, launches the worker in auto mode with a scoped permission file, then polls its status. A worker reports its phase with `argus worker report <phase>`, piping status JSON (files touched, tests run, diff stats, its plan/todo list) on stdin. Workers never write `status.json` directly. `report` checks the move against a fixed legal-transition table. Only a legal move gets persisted, and only argus stamps the timestamp.
+The deterministic majority is plain Go. argus drives [herdr](https://github.com/ogulcancelik/herdr), a terminal multiplexer for AI agents, through its CLI to open panes. It then creates one git worktree per worker, writes each a task brief, and launches an agent in auto mode with a scoped permission file. Workers never write their status directly. A worker calls `argus worker report <phase>` and pipes typed JSON on stdin (files touched, tests run, diff stats, its plan). argus validates each move against a fixed transition table and stamps it. Nothing is scraped from terminal scrollback.
 
 ```mermaid
 stateDiagram-v2
@@ -35,186 +26,107 @@ stateDiagram-v2
     awaiting_review --> [*]: ship
 ```
 
-`done` is never worker-reported. Only `ship` sets it, on merge. argus stops waiting once a worker hits a terminal phase: `awaiting_review` or `blocked`.
+The judgment minority is the gate. When a worker reaches `awaiting_review`, the gate cross-checks what it reported against the diff argus measures from git. A clean match approves automatically. A mismatch escalates: to you, or with `--review`, to a headless `claude -p` review. That review is the only point where an LLM re-enters the loop. A few checks, like an unmeasurable or under-reported diff, are hard escalations that no review verdict can waive, because the discrepancy is itself evidence that the worker's self report cannot be trusted.
 
-Then the gate runs. It checks the worker's reported status against a review policy (diff ceiling, always-review paths, proof-required paths needing real-world proof), then cross-checks against the diff argus measures from git. A clean match auto-approves. A miss, or a risky surface, escalates: to you, or with `--review`, to a headless `claude -p` review. That review is the only point the LLM re-enters the loop.
-
-The design follows Adam Jacob's idea: move the coordinator out of the model, scale review intensity to risk. argus applies that idea to a supervise-agents workflow.
-
-## After the merge: a worktree's post-ship lifecycle
-
-The state machine above ends at `ship`. But the worktree itself doesn't disappear when the PR opens — it sits on disk until someone cleans it up, and a repo accumulates one dead worktree per finished worker if nobody does. `argus worktree prune` is that cleanup, gated on a separate lifecycle argus tracks per worktree (`internal/protocol/lifecycle.go`), not the worker's own Phase:
+After a worker ships, its worktree is cleaned up with `argus worktree prune`, which advances through its own lifecycle and only removes a worktree once it is safe to.
 
 ```mermaid
 stateDiagram-v2
     [*] --> active
     active --> shipped: ship opens a PR
     shipped --> merged: forge reports the PR merged
-    merged --> pruned: worktree prune cleans it up
+    merged --> pruned: prune cleans it up
 ```
 
-* **active** — no lifecycle record yet, or a worktree `ship` has never touched.
-* **shipped** — `ship` wrote this the moment it opened the pull request.
-* **merged** — `prune` checks the PR's state on the forge (via `resolveMergeState`, cached once merged so it never re-asks) and advances the record here the instant it sees a merge.
-* **pruned** — `prune` cleaned the worktree up. Terminal.
+Prune never forces past a failed check: the PR must be merged, and if the working directory still exists it must have no uncommitted changes, stash entries, or unpushed commits.
 
-Before cleaning anything, `EvaluateCandidate` runs a safety gate: the branch's PR must be merged, and — if the working directory still exists — it must be free of uncommitted changes, stash entries, and unpushed commits. Any one of those failing leaves the worktree untouched, with the specific reason reported (`"uncommitted changes"`, `"stash entries present"`, `"unpushed commits"`, `"PR ... not merged (state=...)"`); prune never forces a clean past a failed check.
+## Supported LLMs
 
-Cleanup itself (`CleanWorktree`) is a recoverable relocation, never a raw `rm`: the worktree directory is moved into an `argus-trash` holding dir under the repo's common git dir, then `git worktree remove --force` clears its registration. If a herdr pane was recorded for that worktree (see `internal/protocol/panes.go`'s pane registry), prune also closes it, and the workspace too if it was left empty.
+Today argus drives Claude Code (the `claude` CLI) as both the worker agent and the `--review` reviewer. It is the one agent wired in.
 
-Run it with `argus worktree prune --branch <name>` for one worktree, or `--merged` to sweep every worktree under the repo; `--dry-run` prints the plan (which worktrees, which check failed or passed) without moving or deleting anything.
+Everything specific to a given agent, namely its launcher command, its permission-file schema, and the transcript layout used to prove a worker really planned, is isolated behind one interface, `AgentAdapter` (`internal/supervisor/agentadapter.go`). The orchestration around it stays agent-agnostic. Adding a second agent means writing a new implementation of that interface plus a flag to select it, not a rewrite. There is no `--agent` flag yet because there is exactly one implementation.
 
-## Repo config: .argus/config.yml
+What you can configure today:
 
-A repo can commit its own `.argus/config.yml` (see `internal/repoconfig`) instead of repeating `--base`/`--allow`/brief/gate-policy boilerplate on every `supervise`/`rework` invocation. All keys are optional:
+* **Review model.** `--review-model <name>` sets the model for the `claude -p` review path. The worker model is `claude`'s own default.
+* **Credentials.** `--credential-env <name>=<ENV_VAR>` points argus at any credential env var, whether an agent key or a forge token. A loopback credential proxy holds the real agent key and hands each worker a throwaway sentinel, so worker processes never see the secret.
 
-* `base_branch` — the branch `supervise`/`rebase`/`ship` diff and PR against, when `--base` isn't passed explicitly.
-* `allow` — extra Bash permission entries appended to every worker's scoped allowlist (on top of argus's own toolchain-neutral defaults).
-* `brief_note` — free text appended verbatim to the end of every generated worker brief, e.g. a pointer to the repo's own AGENTS.md.
-* `max_diff_lines` — review gate: diffs larger than this (insertions+deletions) escalate; `0` disables the ceiling. Mirrors `--max-diff-lines`.
-* `proof_required_paths` — review gate: touched paths needing real-world proof before auto-approve. Mirrors `--proof-required-path`.
-* `always_review_paths` — review gate: behavior-critical touched paths that always escalate, even for a small clean diff. Mirrors `--always-review-path`. This also covers what used to be a separate shared/prod-path escalation list (the old --shared-glob flag): the two behaved identically (unconditional escalation on match) and differed only in the reported reason text, so they were deliberately consolidated into one key rather than kept as duplicate mechanisms. That old flag is gone, not renamed — any invocation still passing it now fails with an unknown-flag error; switch it to `--always-review-path` (or `always_review_paths` in `.argus/config.yml`).
+## Getting started
 
-The three gate keys each match a whole path segment/word, or — if the value contains `/` — a path substring; these are not shell wildcards, `*` and `?` have no special meaning (see "The review gate" below). `base_branch` and the three gate keys each have a flag counterpart (`--base`, `--max-diff-lines`, `--proof-required-path`, `--always-review-path`); an explicitly passed flag always wins over `.argus/config.yml`, which wins over argus's own built-in default. `allow` has no such override: `--allow` is additive, appending to this repo's `allow` list rather than replacing it. `brief_note` has no flag at all — it is set only here.
+**Install**
 
-Run `argus init` to generate a first draft: it peeks for `Taskfile.yml`, `Makefile`, `package.json`, or `go.mod` (first match wins) to suggest values, then prompts to confirm or edit each before writing the file. argus itself assigns no other meaning to this file and has no built-in opinion on any repo's toolchain — a wrong guess is just a YAML edit, not a bug.
-
-## Requirements
-
-* Go 1.26 or newer, to build from source.
-* [herdr](https://github.com/ogulcancelik/herdr) on PATH. argus talks to it only through its CLI.
-* The `claude` CLI on PATH, for `argus review` and `supervise --review`.
-* A forge token for the host the worktree points at (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, `GITLAB_TOKEN` for gitlab.com, `FORGE_TOKEN` for any self-hosted Gitea/Forgejo, ...), for `argus ship`. If the env var isn't set, argus falls back to `gh auth token` on github.com, `glab auth token` on gitlab.com, or `git credential fill` elsewhere (Codeberg/Gitea) — the same non-interactive credential lookup `gh`/`glab` do for their own commands — so a caller never has to export the token into argus's process env itself. Self-hosted GitLab is not yet supported: only the exact host `gitlab.com` gets the GitLab API client — any other host, including a self-hosted GitLab, is treated as Gitea/Forgejo.
-* `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN` — or a JSON config file at `$JIRA_CONFIG_FILE` or `~/.argus/jira.json` (`{"base_url":...,"email":...,"api_token":...}`) — only for `supervise --jira-issues`.
-
-Every env var name above (a forge token, an agent key like `ANTHROPIC_API_KEY`) is just argus's built-in default, not a requirement to use exactly that name. Point argus at a different one with `--credential-env <name>=<ENV_VAR>` (`supervise`/`ship`/`rebase`), e.g. `--credential-env github.com=MY_GH_TOKEN --credential-env anthropic=MY_CLAUDE_KEY`, or persist it once with `argus config set credential.<name> <ENV_VAR>` so you don't have to repeat the flag every invocation. `supervise`'s credential proxy (see below) also fronts any agent key it can resolve this way, not just Anthropic's.
-
-## Install
-
-**Homebrew (macOS/Linux)**
-```bash
-brew install elysium-labs/tap/argus
-```
-Installs via a Homebrew *formula*, not a cask, so there's no Gatekeeper
-quarantine to strip — `brew`'s own install step un-quarantines the binary.
-`brew upgrade argus` picks up new releases once the tap's formula is bumped;
-that bump is manual for now given release cadence (a maintainer copies the
-`argus.rb` release asset into
-[`elysium-labs/homebrew-tap`](https://github.com/Elysium-Labs-EU/homebrew-tap)).
-
-**From a release**
 ```bash
 curl -sSfL https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/scripts/install.sh | sh
 ```
 
-No sudo needed on most machines: the script installs to `~/.local/bin` when that
-directory is already on `PATH`, and only falls back to `/usr/local/bin` (via
-`sudo`, prompting if needed) when it isn't. Set `ARGUS_INSTALL_DIR` to install
-somewhere else instead:
-```bash
-ARGUS_INSTALL_DIR=$HOME/bin sh -c "$(curl -sSfL https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/scripts/install.sh)"
-```
-Set `ARGUS_VERSION` to install a specific release tag instead of the latest one.
+The script installs the latest release binary and needs no sudo on most machines; it installs to `~/.local/bin` when that is on `PATH`, and falls back to `/usr/local/bin` otherwise. Set `ARGUS_INSTALL_DIR` to choose the location, or `ARGUS_VERSION` to pin a release tag.
 
-**From source**
-```bash
-git clone https://github.com/Elysium-Labs-EU/argus
-cd argus
-make build      # produces ./bin/argus
-```
+To build from source instead, `git clone` the repo and run `make build` (needs Go 1.26 or newer). The binary lands at `./bin/argus`.
 
-## Claude Code skill
+**Requirements**
 
-argus ships a Claude Code skill that teaches the agent to drive these commands instead
-of hand-running the supervise loop. When you work inside this repo, the copy at
-`.claude/skills/argus/` is picked up automatically. To use it anywhere else, install the
-distributable copy into your user skills directory:
+* [herdr](https://github.com/ogulcancelik/herdr) and the `claude` CLI on `PATH`.
+* A forge token for `argus ship` (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, `GITLAB_TOKEN`, or `FORGE_TOKEN` for a self hosted Gitea or Forgejo). If none is set, argus falls back to `gh`, `glab`, or `git credential`, the same lookup those tools use for themselves.
 
-```bash
-mkdir -p ~/.claude/skills/argus
-cp skills/argus/SKILL.md ~/.claude/skills/argus/SKILL.md
+**Configure a repo**
+
+Run `argus init` to scaffold `.argus/config.yml`. It guesses toolchain values from your `Makefile`, `Taskfile.yml`, `package.json`, or `go.mod`. Every key is optional and mirrors a CLI flag, so you can set them once here instead of repeating flags on every run:
+
+```yaml
+base_branch: main              # branch to diff and PR against
+allow: []                      # extra Bash permission entries for every worker
+brief_note: ""                 # text appended to every generated worker brief
+max_diff_lines: 0              # gate: diffs larger than this escalate (0 disables the ceiling)
+proof_required_paths: []       # gate: paths needing real world proof before auto approval
+always_review_paths: []        # gate: behavior critical paths that always escalate
 ```
 
-Then, in any repo with `argus` on PATH, ask Claude Code to "supervise the panes with
-argus" and it will drive `supervise`, `review`, and `ship` for you.
-
-## Quick Start
+**Run**
 
 ```bash
 # Spawn two workers, each in its own worktree, and watch them through to review
-argus supervise \
-  --repo /path/to/project \
+argus supervise --repo /path/to/project \
   --tasks "add retry to sink,fix log rotation" \
   --branches feat-retry,fix-rotation
 
-# Turn on the LLM review path for changes the gate escalates
-argus supervise --repo /path/to/project --tasks "risky change" --review
-
-# Free-text briefs (commas, quotes) go in a file instead of --tasks, which is
-# CSV-parsed and breaks on that punctuation: one brief per line.
-argus supervise --repo /path/to/project --tasks-file briefs.txt --branches feat-a,feat-b
-
-# Review one worktree's diff on demand
-argus review --worktree /path/to/project-feat-retry --base origin/main
-
-# A review came back request-changes: re-dispatch the same worker with the
-# findings, loop gate/review until it clears (or --max-rounds is exhausted),
-# and persist the resulting verdict so ship can see it
-argus rework --worktree /path/to/project-feat-retry --base origin/main
-
-# Ship an approved worktree to a pull request
-argus ship --worktree /path/to/project-feat-retry --issue 42
+argus supervise --repo /path/to/project --tasks "risky change" --review  # turn on the LLM review path
+argus review  --worktree /path/to/project-feat-retry --base origin/main  # review one diff on demand
+argus rework  --worktree /path/to/project-feat-retry --base origin/main  # re-dispatch on request changes, loop until it clears
+argus ship    --worktree /path/to/project-feat-retry --issue 42          # ship an approved worktree to a PR
 ```
 
-## Commands
+| Command | What it does |
+|---------|--------------|
+| `argus init` | Scaffold `.argus/config.yml` from a toolchain guess |
+| `argus supervise` | Spawn workers in worktrees, gate their diffs, watch each through to review |
+| `argus review` | One shot `claude -p` review of a worktree's diff against a base ref |
+| `argus rework` | Re-dispatch a worker with a request changes verdict's findings, loop until it clears |
+| `argus ship` | Commit, push, open a PR; refused without an approving verdict unless `--force` |
+| `argus rebase` | Dispatch a worktree's worker to resolve a conflict after a merge and force push |
+| `argus worktree prune` | Clean up a merged worktree (`--branch <name>`, or `--merged` to sweep the repo) |
+| `argus stats` | Aggregate run logs into escalation rate, review parse fail rate, and tokens per task |
 
-| Command | Description |
-|---------|-------------|
-| `argus init` | Write `.argus/config.yml` for this repo, prefilled from a toolchain guess (see [Repo config](#repo-config-argusconfigyml)) |
-| `argus supervise` | Discover or open panes, spawn workers in worktrees, gate their diffs, and watch each through to review |
-| `argus supervise --review` | On a gate escalation, run a headless `claude -p` review instead of only surfacing the decision |
-| `argus supervise --dry-run` | Print the plan and exit without creating worktrees or spawning workers |
-| `argus supervise --tasks-file <path>` | Read one task per line from a file, appended after `--tasks`; not CSV-parsed, so free-text briefs with commas and quotes are safe |
-| `argus supervise --issues <n,...>` | Fetch issue numbers from the repo's forge (GitHub/GitLab/Codeberg/Gitea) and turn each into a worker brief |
-| `argus supervise --jira-issues <KEY,...>` | Fetch Jira Cloud issue keys (e.g. `PROJ-123`) and turn each into a worker brief |
-| `argus review --worktree <path>` | Run a one-shot `claude -p` review of a worktree's diff against a base ref |
-| `argus ship --worktree <path>` | Commit, push, and open a pull request (forge auto-detected), refused without an approving verdict unless `--force` |
-| `argus rebase --worktree <path>` | Dispatch the worktree's own worker to resolve a post-merge conflict and force-push |
-| `argus rework --worktree <path>` | Re-dispatch the worktree's own worker with a request-changes verdict's findings, loop the gate/review until it clears or `--max-rounds` is exhausted, and persist the resulting verdict so `ship` sees it |
-| `argus worktree prune --branch <name>` \| `--merged` | Clean up a worktree whose PR has merged (or sweep every worktree under the repo), gated on merge status plus no uncommitted changes, stash entries, or unpushed commits; `--dry-run` prints the plan without changing anything |
-| `argus stats` | Aggregate the run logs under `~/.argus/runs` into escalation rate, review parse-fail rate, and tokens per task |
-| `argus config set credential.<name> <ENV_VAR>` | Persist which env var carries a credential (a forge host or agent-key name) to `~/.argus/config.toml`, so `--credential-env` doesn't need repeating every invocation |
-| `argus config check` | Check (and with `--write`, add) the Bash allowlist entry the calling agent needs so `argus` itself doesn't prompt for approval on every invocation |
+Pass `--debug` on any command to tee the typed event log to stderr as it runs. It always persists under `~/.argus/runs` either way.
 
-Pass `--debug` on any command to tee the typed event log to stderr as it is written; the log is always persisted under `~/.argus/runs` regardless.
+## Supported tools
 
-## The review gate
+Beyond the worker agent, argus plugs into:
 
-The gate is the cheap path. It auto-approves a worker only when the worker is actually ready for review, every reported test passed, the diff is within the ceiling, no always-review path was touched, and any proof-required-path change carries real-world proof. Everything else escalates with a recorded reason.
-
-Three of those checks the worker cannot talk its way past, because argus verifies against ground truth instead of trusting `status.json`:
-
-* If argus cannot measure the diff, the self-report is unverifiable and the change escalates.
-* If the measured diff materially exceeds what the worker claimed, argus treats it as an under-report and escalates.
-* If the worker's session transcript has no real `TodoWrite`/`TaskCreate` tool call, a `planning` report's `plan` field is an unverified claim and the change escalates. The same evidence also gates the `planning` -> `working` move itself: that transition is rejected outright if the planning report on file never carried a non-empty `plan` array.
-
-The unmeasurable-diff and under-report checks (plus a zero-measured-files check for a claimed terminal phase) are not just escalations — they are hard reasons a `--review` verdict cannot waive. Even if the LLM reviewer comes back "approve", argus still records the change as not approved when one of these fired, because the discrepancy is evidence `status.json` can't be trusted for that change, not a call for the reviewer's holistic judgment.
-
-Tune the gate with `--max-diff-lines`, `--proof-required-path`, and `--always-review-path` on `supervise`/`rework`. Each path value matches a whole path segment/word, or — if it contains `/` — a path substring; these are not shell wildcards, `*` and `?` have no special meaning. Set them once in this repo's `.argus/config.yml` (`max_diff_lines`, `proof_required_paths`, `always_review_paths`; see "Repo config" above) instead of repeating the flags every invocation — an explicitly passed flag still wins.
+* **herdr**, the terminal multiplexer argus drives (through its CLI only) to host worker panes.
+* **Forges**, auto-detected from the git remote, for `ship` and `--issues`: GitHub, GitLab (`gitlab.com`), and Codeberg, Gitea, or Forgejo. A self hosted GitLab host is treated as Gitea or Forgejo.
+* **Jira Cloud.** `argus supervise --jira-issues PROJ-123,...` turns issue keys into worker briefs. Needs `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`, or a `~/.argus/jira.json` config file.
+* **A Claude Code skill.** A bundled skill at `.claude/skills/argus/` teaches Claude Code to drive `supervise`, `review`, and `ship` for you. Copy it to `~/.claude/skills/argus/` to use it in any repo.
 
 ## Development
-
-argus follows the same conventions as its sibling repos. Commands live in `cmd/` as cobra `newXxxCmd` constructors; everything else lives in `internal/` (there is no `pkg/`). All work goes through `make`.
 
 ```bash
 make build   # build ./bin/argus
 make test    # go test -race
-make ci      # test, lint, nilaway, coverage gate, change-scoped risk gate
-make fix     # gofmt and struct field alignment
+make ci      # test, lint, nilaway, coverage gate (75 percent), change-scoped risk gate
 ```
 
-`make ci` runs the full local gate: tests with the race detector, golangci-lint v2, nilaway nil-safety analysis, a coverage floor of 75 percent, and a go-crap change-risk check scoped to the functions you changed against `origin/main`. Run `make help` for the complete target list.
+Commands live in `cmd/` as cobra `newXxxCmd` constructors; everything else lives in `internal/` (there is no `pkg/`). Run `make help` for the full target list.
 
 ## License
 
-Apache License 2.0 - see [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
