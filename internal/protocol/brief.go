@@ -32,6 +32,13 @@ piping the rest of the status as a JSON body on stdin, in exactly this shape:
     }
     JSON
 
+Compute ` + "`diff_stat`" + ` the same way argus itself will: ` + "`git diff --stat HEAD`" + `
+for tracked edits, plus every untracked, non-ignored file (` + "`git ls-files --others --exclude-standard`" + `)
+counted as a touched file with its full line count added to insertions. Plain
+` + "`git diff`" + ` alone is invisible to files you just created — a new source
+file plus its test is the single most common cause of a spurious "under-reported
+diff" escalation, and that escalation is unwaivable.
+
 Do not write ` + "`.claude/argus/status.json`" + ` yourself — argus loads your
 current status, rejects <phase> if it is not a legal move from it, and only
 then stamps the timestamp itself and persists. You do not set (and should not
