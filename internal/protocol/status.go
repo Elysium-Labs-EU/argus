@@ -63,12 +63,17 @@ type Status struct {
 	// unchanged by every `argus worker report` (its JSON body never sets this
 	// field). ship/rebase read it back instead of re-defaulting to the
 	// literal "main" when --base is omitted.
-	Base           string   `json:"base"`
-	Phase          Phase    `json:"phase"`
-	RealWorldProof string   `json:"real_world_proof"`
-	PRURL          string   `json:"pr_url"`
-	BlockedReason  string   `json:"blocked_reason"`
-	FilesTouched   []string `json:"files_touched"`
+	Base           string `json:"base"`
+	Phase          Phase  `json:"phase"`
+	RealWorldProof string `json:"real_world_proof"`
+	PRURL          string `json:"pr_url"`
+	BlockedReason  string `json:"blocked_reason"`
+	// Title is the worker's own conventional-commit-style summary of what it
+	// built (e.g. "feat: add retry backoff to forge client"), used as the PR/
+	// commit title in place of a generic branch+issue default. Empty is legal —
+	// ship then falls back to the fetched issue title.
+	Title        string   `json:"title"`
+	FilesTouched []string `json:"files_touched"`
 	// Plan is the worker's todo list, reported during the planning phase (issue
 	// #103). It is the typed evidence RequiresPlanEvidence checks before
 	// letting a report move planning -> working: a prose "write a todo list

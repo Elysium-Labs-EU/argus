@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -18,18 +19,144 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 )
 
-func TestPrTitleForAndClosesLine(t *testing.T) {
-	if got := prTitleFor("", 144, "fix-x"); got != "fix: fix-x (#144)" {
+func TestDefaultPRTitle(t *testing.T) {
+	if got := defaultPRTitle(144, "fix-x"); got != "fix: fix-x (#144)" {
 		t.Errorf("default+issue title: got %q", got)
 	}
-	if got := prTitleFor("feat: real", 0, "b"); got != "feat: real" {
-		t.Errorf("explicit title: got %q", got)
+	if got := defaultPRTitle(0, "b"); got != "fix: b" {
+		t.Errorf("default without issue: got %q", got)
 	}
 	if got := closesLine(144); !strings.Contains(got, "Closes #144") {
 		t.Errorf("closesLine: got %q", got)
 	}
 	if got := closesLine(0); got != "" {
 		t.Errorf("no issue should have no closes line: got %q", got)
+	}
+}
+
+// withStdinInteractive forces isStdinInteractive's return value for the
+// duration of one test, restoring the original on cleanup — the TTY-prompt
+// branch of enforceTitleLength/resolvePRTitle is otherwise unreachable under
+// `go test`, where go-isatty always reports false.
+func withStdinInteractive(t *testing.T, interactive bool) {
+	t.Helper()
+	original := isStdinInteractive
+	isStdinInteractive = func() bool { return interactive }
+	t.Cleanup(func() { isStdinInteractive = original })
+}
+
+func TestResolvePRTitleExplicitFlagWinsEvenIfTooLong(t *testing.T) {
+	long := strings.Repeat("x", 100)
+	got, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader("")), &bytes.Buffer{},
+		&shipArgs{worktree: t.TempDir(), title: long}, "o", "r", "branch")
+	if err != nil {
+		t.Fatalf("resolvePRTitle: %v", err)
+	}
+	if got != long {
+		t.Errorf("--title should win untouched, even over 72 chars: got %q", got)
+	}
+}
+
+func TestResolvePRTitleUsesWorkerStatusTitle(t *testing.T) {
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: "feat: add retry backoff"}); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeForge{issues: map[int]forge.Issue{7: {Title: "should not be used"}}}
+	got, err := resolvePRTitle(context.Background(), f, bufio.NewReader(strings.NewReader("")), &bytes.Buffer{},
+		&shipArgs{worktree: wt, issue: 7}, "o", "r", "branch")
+	if err != nil {
+		t.Fatalf("resolvePRTitle: %v", err)
+	}
+	if got != "feat: add retry backoff" {
+		t.Errorf("want the worker-reported title, got %q", got)
+	}
+}
+
+func TestResolvePRTitleFallsBackToFetchedIssueTitle(t *testing.T) {
+	wt := t.TempDir() // no status.json written: worker omitted title
+	f := &fakeForge{issues: map[int]forge.Issue{7: {Title: "the real issue title"}}}
+	got, err := resolvePRTitle(context.Background(), f, bufio.NewReader(strings.NewReader("")), &bytes.Buffer{},
+		&shipArgs{worktree: wt, issue: 7}, "o", "r", "branch")
+	if err != nil {
+		t.Fatalf("resolvePRTitle: %v", err)
+	}
+	if got != "the real issue title" {
+		t.Errorf("want the fetched issue title, got %q", got)
+	}
+}
+
+func TestResolvePRTitleFallsBackToDefaultWhenNothingElseAvailable(t *testing.T) {
+	wt := t.TempDir()
+	got, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader("")), &bytes.Buffer{},
+		&shipArgs{worktree: wt, issue: 21}, "o", "r", "fix-x")
+	if err != nil {
+		t.Fatalf("resolvePRTitle: %v", err)
+	}
+	if got != "fix: fix-x (#21)" {
+		t.Errorf("want the branch/issue default, got %q", got)
+	}
+}
+
+func TestResolvePRTitleTooLongHeadlessErrors(t *testing.T) {
+	withStdinInteractive(t, false)
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: strings.Repeat("x", 80)}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader("")), &bytes.Buffer{},
+		&shipArgs{worktree: wt}, "o", "r", "branch")
+	if err == nil {
+		t.Fatal("want an error for a too-long title with no TTY attached")
+	}
+	if !strings.Contains(err.Error(), "80") {
+		t.Errorf("error should name the offending length: %v", err)
+	}
+}
+
+func TestResolvePRTitleTooLongTTYEnterAutoTruncates(t *testing.T) {
+	withStdinInteractive(t, true)
+	wt := t.TempDir()
+	long := strings.Repeat("x", 80)
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: long}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader("\n")), &bytes.Buffer{},
+		&shipArgs{worktree: wt}, "o", "r", "branch")
+	if err != nil {
+		t.Fatalf("resolvePRTitle: %v", err)
+	}
+	if got != long[:prTitleMaxLen] {
+		t.Errorf("want auto-truncated to %d chars, got %q (%d chars)", prTitleMaxLen, got, len(got))
+	}
+}
+
+func TestResolvePRTitleTooLongTTYAcceptsShortenedLine(t *testing.T) {
+	withStdinInteractive(t, true)
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: strings.Repeat("x", 80)}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader("feat: shortened\n")), &bytes.Buffer{},
+		&shipArgs{worktree: wt}, "o", "r", "branch")
+	if err != nil {
+		t.Fatalf("resolvePRTitle: %v", err)
+	}
+	if got != "feat: shortened" {
+		t.Errorf("want the operator's shortened title, got %q", got)
+	}
+}
+
+func TestResolvePRTitleTooLongTTYShortenedStillTooLongErrors(t *testing.T) {
+	withStdinInteractive(t, true)
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: strings.Repeat("x", 80)}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader(strings.Repeat("y", 80)+"\n")), &bytes.Buffer{},
+		&shipArgs{worktree: wt}, "o", "r", "branch")
+	if err == nil {
+		t.Fatal("want an error when the operator's shortened line is still too long")
 	}
 }
 
