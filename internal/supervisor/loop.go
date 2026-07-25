@@ -500,9 +500,16 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		st.measured = ds
 		st.measuredFiles = files
 		st.measuredOK = true
-		if pm, ok := priorMeasured(st.plan.Worktree); ok {
-			st.priorMeasured = pm
-			st.priorMeasuredOK = true
+		// A caller (JudgeOne) may have already populated priorMeasured from a
+		// verdict it snapshotted before invalidating the worktree's own
+		// verdict.json for this round — trust that over a disk read, since the
+		// file this would otherwise read may already be gone (rework's
+		// InvalidateStatus deletes it before every round).
+		if !st.priorMeasuredOK {
+			if pm, ok := priorMeasured(st.plan.Worktree); ok {
+				st.priorMeasured = pm
+				st.priorMeasuredOK = true
+			}
 		}
 	}
 

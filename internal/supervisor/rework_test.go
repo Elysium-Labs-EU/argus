@@ -67,7 +67,7 @@ func TestJudgeOneAutoApprovesCleanWorkAndPersists(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now())
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil)
 	if !result.Gate.AutoApprove {
 		t.Fatalf("want the gate to auto-approve a clean, well-tested change, got reasons %v", result.Gate.Reasons)
 	}
@@ -98,7 +98,7 @@ func TestJudgeOneEscalatesToReviewerAndPersistsApprove(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now())
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil)
 	if result.Gate.AutoApprove {
 		t.Fatal("want the gate to escalate on a failing test")
 	}
@@ -128,7 +128,7 @@ func TestJudgeOneEscalatesToReviewerAndPersistsRequestChanges(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now())
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil)
 	if result.Review == nil || result.Review.Decision != "request-changes" {
 		t.Fatalf("want the reviewer's request-changes verdict, got %+v", result.Review)
 	}
@@ -155,7 +155,7 @@ func TestJudgeOneWithNoReviewerLeavesReviewNil(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now())
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil)
 	if result.Gate.AutoApprove {
 		t.Fatal("want the gate to escalate on a failing test")
 	}
