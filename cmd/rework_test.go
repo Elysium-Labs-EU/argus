@@ -105,6 +105,63 @@ func fakeReworkClient(worktree string, status *protocol.Status) herdr.Client {
 	})
 }
 
+// fakeReworkClientRounds is fakeReworkClient generalized to report a
+// different status on each successive dispatch, keyed by a 1-based round
+// counter — needed to grow the worktree's real diff between rounds and
+// self-report only that round's own delta, the shape that exercises
+// gateVerdict's priorMeasured subtraction (see
+// TestRunReworkSubtractsPriorMeasuredAcrossRounds).
+func fakeReworkClientRounds(worktree string, statusFor func(round int) *protocol.Status) herdr.Client {
+	var mu sync.Mutex
+	var spawned bool
+	var round int
+	dispatch := func() {
+		mu.Lock()
+		round++
+		r := round
+		mu.Unlock()
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = protocol.Write(protocol.StatusPath(worktree), statusFor(r))
+		}()
+	}
+	return herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "worktree":
+			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, reworkTestPaneID), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			mu.Lock()
+			live := spawned
+			mu.Unlock()
+			if !live {
+				return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+			}
+			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":"done"}}}`, reworkTestPaneID), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			mu.Lock()
+			spawned = true
+			mu.Unlock()
+			dispatch()
+			return []byte(`{"result":{}}`), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "prompt":
+			dispatch()
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+}
+
+// writeLinesFile overwrites path with n newline-terminated lines, so
+// MeasureDiff's untracked-file line count (see countLines in measure.go)
+// reports exactly n insertions for it.
+func writeLinesFile(t *testing.T, path string, n int) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(strings.Repeat("line\n", n)), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+}
+
 // reworkStatus is the failing-test status fakeReworkClient's worker "reports"
 // after every dispatch in the tests below: it forces the gate to escalate
 // every round, so the reviewer's own decision (not diff/plan-evidence
@@ -248,6 +305,72 @@ func TestRunReworkLoopsOnRequestChangesThenApproves(t *testing.T) {
 	approval, found, aerr := protocol.LoadApproval(dir)
 	if aerr != nil || !found || !approval.Approved {
 		t.Errorf("want a persisted approved verdict after round 2, found=%v approval=%+v err=%v", found, approval, aerr)
+	}
+}
+
+// TestRunReworkSubtractsPriorMeasuredAcrossRounds is the regression test for
+// InvalidateStatus deleting verdict.json before every rework round, which
+// permanently defeated gateVerdict's under-report subtraction (see
+// priorMeasured in loop.go) from round 2 onward: the worktree's real diff
+// grows from 20 to 55 lines between round 1 and round 2, and round 2's
+// self-report (35) is exactly that round's own delta since round 1's
+// verdict, not the 55-line cumulative total — the same shape as the false
+// under-report this bug produced in production. Without the fix, round 2's
+// gate always sees priorMeasuredOK=false, compares the self-report against
+// the full 55-line cumulative diff instead, and flags an unwaivable
+// "under-reported diff" that keeps the final verdict not-approved even
+// though the reviewer approves.
+func TestRunReworkSubtractsPriorMeasuredAcrossRounds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	f := filepath.Join(dir, "f.txt")
+
+	statusFor := func(round int) *protocol.Status {
+		switch round {
+		case 1:
+			writeLinesFile(t, f, 20)
+			return &protocol.Status{
+				Phase:    protocol.PhaseAwaitingReview,
+				Tests:    []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
+				DiffStat: protocol.DiffStat{Files: 1, Insertions: 20},
+			}
+		default:
+			writeLinesFile(t, f, 55)
+			return &protocol.Status{
+				Phase:    protocol.PhaseAwaitingReview,
+				Tests:    []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
+				DiffStat: protocol.DiffStat{Files: 1, Insertions: 35},
+			}
+		}
+	}
+
+	cmd, buf := testCmd()
+	client := fakeReworkClientRounds(dir, statusFor)
+	reviewer := &sequenceReviewer{results: []supervisor.ReviewResult{
+		{Decision: "request-changes", Summary: "still missing something", Findings: []string{"finding"}},
+		{Decision: "approve", Summary: "delta looks right"},
+	}}
+
+	err := runRework(cmd, client, reviewer, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "feat-x", maxRounds: 3, interval: 5 * time.Millisecond,
+		gate: gateFlags{},
+	})
+	if err != nil {
+		t.Fatalf("runRework: %v", err)
+	}
+	if reviewer.callCount() != 2 {
+		t.Fatalf("want exactly 2 review calls, got %d", reviewer.callCount())
+	}
+	out := buf.String()
+	if strings.Contains(out, "under-reported") {
+		t.Errorf("round 2's self-report matches its own delta since round 1's verdict — must not be flagged as an under-report:\n%s", out)
+	}
+	approval, found, aerr := protocol.LoadApproval(dir)
+	if aerr != nil || !found || !approval.Approved {
+		t.Errorf("want a persisted approved verdict once round 2's delta-only self-report clears the gate, found=%v approval=%+v err=%v", found, approval, aerr)
 	}
 }
 

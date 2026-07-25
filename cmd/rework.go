@@ -215,6 +215,17 @@ type reworkRoundOutcome struct {
 // runRework so this branching (blocked/approved/no-reviewer/needs-human/
 // rounds-exhausted) doesn't inflate runRework's own cyclomatic complexity.
 func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger, client herdr.Client, cfg *supervisor.Config, repoRoot, branch, task string, findings []string, round int, opts *reworkOpts) (reworkRoundOutcome, error) {
+	// Snapshotted before dispatchReworkRound, which invalidates the worktree's
+	// verdict.json before every round (see InvalidateStatus) — reading it any
+	// later would always see it gone, permanently defeating gateVerdict's
+	// under-report subtraction from round 2 onward.
+	var prior *protocol.Approval
+	if approval, found, aerr := protocol.LoadApproval(opts.worktree); aerr != nil {
+		return reworkRoundOutcome{}, aerr
+	} else if found {
+		prior = &approval
+	}
+
 	status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, logger, client, repoRoot, branch, task, findings, round, opts)
 	if derr != nil {
 		return reworkRoundOutcome{}, derr
@@ -225,7 +236,7 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	}
 
 	plan := &supervisor.WorkerPlan{Worker: supervisor.Worker{Task: task, Branch: branch, Worktree: opts.worktree}}
-	result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt)
+	result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt, prior)
 	approved := result.Gate.AutoApprove || (result.Review != nil && result.Review.Decision == "approve")
 	renderReworkRound(out, round, opts.maxRounds, &result, approved)
 

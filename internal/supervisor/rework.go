@@ -57,8 +57,22 @@ type JudgeResult struct {
 // resulting Approval is persisted to the worktree exactly as the main loop's
 // gate does (see recordApproval), so ship sees it — closing the gap where a
 // manual `argus review` verdict was never saved anywhere ship could check.
-func JudgeOne(ctx context.Context, cfg *Config, plan *WorkerPlan, status *protocol.Status, paneID string, dispatchedAt time.Time) JudgeResult {
+//
+// prior is the worktree's verdict as it stood before this round's dispatch, or
+// nil if none existed. It must be the caller's own snapshot, taken before
+// anything that might invalidate the worktree's verdict.json (rework's
+// InvalidateStatus deletes it ahead of every round so a stale terminal status
+// left over from before that round can't be mistaken for this round's own
+// report) — reconcile can no longer be trusted to read it back off disk by the
+// time JudgeOne runs. Passing it explicitly is what lets gateVerdict's
+// under-report check subtract only the delta since that prior verdict instead
+// of the full cumulative diff since base.
+func JudgeOne(ctx context.Context, cfg *Config, plan *WorkerPlan, status *protocol.Status, paneID string, dispatchedAt time.Time, prior *protocol.Approval) JudgeResult {
 	st := &workerState{plan: plan, paneID: paneID, started: dispatchedAt, status: *status, hasFile: true}
+	if prior != nil {
+		st.priorMeasured = prior.MeasuredDiff
+		st.priorMeasuredOK = true
+	}
 	states := []*workerState{st}
 	reconcile(ctx, cfg, states)
 	reviewEscalations(ctx, cfg, states, nil)
