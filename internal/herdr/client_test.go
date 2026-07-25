@@ -108,6 +108,9 @@ func TestWorktreeCreateReturnsRootPane(t *testing.T) {
 	}
 }
 
+// TestWorktreeCreatePassesWorkspaceWhenSet pins down that --workspace and
+// --cwd are never sent together: herdr's own worktree-create usage rejects
+// that combination, so nesting drops --cwd instead (see WorktreeCreate).
 func TestWorktreeCreatePassesWorkspaceWhenSet(t *testing.T) {
 	var gotArgs []string
 	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
@@ -119,9 +122,66 @@ func TestWorktreeCreatePassesWorkspaceWhenSet(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WorktreeCreate: %v", err)
 	}
-	want := []string{"worktree", "create", "--cwd", "/repo", "--branch", "argus-x", "--base", "main", "--path", "/tmp/wt", "--no-focus", "--json", "--workspace", "w1M"}
+	want := []string{"worktree", "create", "--branch", "argus-x", "--base", "main", "--path", "/tmp/wt", "--no-focus", "--json", "--workspace", "w1M"}
 	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
 		t.Errorf("args: got %v want %v", gotArgs, want)
+	}
+	for _, a := range gotArgs {
+		if a == "--cwd" {
+			t.Fatalf("args carry --cwd alongside --workspace, herdr rejects that combo: %v", gotArgs)
+		}
+	}
+}
+
+// TestWorktreeCreateRunsInDirWhenNesting proves the fallback for the dropped
+// --cwd: with a DirRunner wired up, a nesting call runs from spec.Cwd instead.
+func TestWorktreeCreateRunsInDirWhenNesting(t *testing.T) {
+	var gotDir string
+	var gotArgs []string
+	c := Client{
+		run: func(context.Context, ...string) ([]byte, error) {
+			t.Fatal("plain Runner used for a nesting call; want the DirRunner")
+			return nil, nil
+		},
+		runDir: func(_ context.Context, dir string, args ...string) ([]byte, error) {
+			gotDir = dir
+			gotArgs = args
+			return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"},"worktree":{"path":"/tmp/wt"}}}`), nil
+		},
+	}
+	if _, err := c.WorktreeCreate(context.Background(), &WorktreeSpec{
+		Cwd: "/repo", Branch: "argus-x", Base: "main", Path: "/tmp/wt", Workspace: "w1M",
+	}); err != nil {
+		t.Fatalf("WorktreeCreate: %v", err)
+	}
+	if gotDir != "/repo" {
+		t.Errorf("dir: got %q want /repo", gotDir)
+	}
+	for _, a := range gotArgs {
+		if a == "--cwd" {
+			t.Fatalf("dir-run args still carry --cwd: %v", gotArgs)
+		}
+	}
+}
+
+// TestWorktreeCreateNoDirRunnerFallsBackWhenNesting proves a Client built
+// without a DirRunner (e.g. NewWithRunner in most tests) still works for a
+// nesting call — dir is simply not applied, args already omit --cwd.
+func TestWorktreeCreateNoDirRunnerFallsBackWhenNesting(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"},"worktree":{"path":"/tmp/wt"}}}`), nil
+	})
+	if _, err := c.WorktreeCreate(context.Background(), &WorktreeSpec{
+		Cwd: "/repo", Branch: "argus-x", Base: "main", Path: "/tmp/wt", Workspace: "w1M",
+	}); err != nil {
+		t.Fatalf("WorktreeCreate: %v", err)
+	}
+	for _, a := range gotArgs {
+		if a == "--cwd" {
+			t.Fatalf("args carry --cwd alongside --workspace: %v", gotArgs)
+		}
 	}
 }
 

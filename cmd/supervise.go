@@ -46,6 +46,7 @@ func newSuperviseCmd() *cobra.Command {
 		workspace          string
 		worktrees          []string
 		workerRuntime      string
+		workerPlacement    string
 		allow              []string
 		credentialEnv      map[string]string
 	)
@@ -136,6 +137,7 @@ each pane's directory in --panes mode).`,
 				review: review, reviewModel: reviewModel, reviewConcurrency: reviewConcurrency,
 				policy: policy,
 				allow:  allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
+				workerPlacement: workerPlacement,
 			})
 		},
 	}
@@ -164,6 +166,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&workspace, "workspace", "", "with --attach: attach to every herdr pane in this workspace id, using each pane's directory as a worktree")
 	cmd.Flags().StringSliceVar(&worktrees, "worktrees", nil, "with --attach: explicit worktree paths to watch (comma-separated)")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate each worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
+	cmd.Flags().StringVar(&workerPlacement, "worker-placement", workerPlacementWorkspace, "where a spawned worker's pane lands: workspace (default, each worker its own top-level herdr workspace) | tab (nest into HERDR_WORKSPACE_ID as a tab, even with --repo passed explicitly) | pane (not yet supported)")
 	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist, on top of this repo's .argus/config.yml allow list if any (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a one-off run)")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	return cmd
@@ -179,6 +182,7 @@ type superviseOpts struct {
 	base              string
 	launcher          string
 	workerRuntime     string
+	workerPlacement   string
 	policy            *supervisor.ReviewPolicy
 	allow             []string
 	repoAllow         []string
@@ -192,15 +196,61 @@ type superviseOpts struct {
 	repoExplicit      bool
 }
 
+// --worker-placement values. workerPlacementPane is accepted so the flag's
+// error message can name it explicitly rather than lumping it in with a
+// genuinely unknown value — it needs a "worktree open"-equivalent that
+// targets an already-split pane, which herdr does not expose today (see
+// docs on WorktreeSpec).
+const (
+	workerPlacementWorkspace = "workspace"
+	workerPlacementTab       = "tab"
+	workerPlacementPane      = "pane"
+)
+
 // parentWorkspace resolves supervisor.Config.ParentWorkspace: nesting a
-// worker's worktree pane into the operator's own workspace only when --repo
-// was left to default, since an explicit --repo must be passed to herdr as
-// --cwd, and herdr's worktree-create rejects --workspace and --cwd together.
-func parentWorkspace(repoExplicit bool) string {
-	if repoExplicit {
-		return ""
+// worker's worktree pane into the operator's own herdr workspace as a tab
+// instead of opening its own new top-level one.
+//
+// placement "tab" forces nesting outright, even with --repo passed
+// explicitly — WorktreeCreate drops --cwd for a nesting call (see
+// herdr.Client.WorktreeCreate), so the --workspace/--cwd exclusivity that
+// used to force this choice no longer applies. It still requires
+// HERDR_WORKSPACE_ID: with no enclosing workspace there is nothing to nest
+// into, and silently falling back to a new top-level workspace would make an
+// explicit ask silently no-op.
+//
+// placement "workspace" (including the flag's default, "") keeps the
+// original auto-detect behavior: nesting only when --repo was left to
+// default, since that was the one case it was ever reachable in before this
+// flag existed, and changing that default's behavior out from under existing
+// callers is out of scope here.
+func parentWorkspace(placement string, repoExplicit bool) (string, error) {
+	ws := os.Getenv("HERDR_WORKSPACE_ID")
+	switch placement {
+	case workerPlacementTab:
+		if ws == "" {
+			return "", &ui.UserError{
+				Err:  fmt.Errorf("--worker-placement tab requires HERDR_WORKSPACE_ID"),
+				Hint: "run argus supervise from inside a herdr pane, or drop --worker-placement tab",
+			}
+		}
+		return ws, nil
+	case workerPlacementPane:
+		return "", &ui.UserError{
+			Err:  fmt.Errorf("--worker-placement pane is not implemented yet"),
+			Hint: "use --worker-placement tab, or the workspace default; a pane-per-worker mode needs herdr-side support to target an already-split pane",
+		}
+	case workerPlacementWorkspace, "":
+		if repoExplicit {
+			return "", nil
+		}
+		return ws, nil
+	default:
+		return "", &ui.UserError{
+			Err:  fmt.Errorf("unknown --worker-placement %q", placement),
+			Hint: "workspace, tab, or pane",
+		}
 	}
-	return os.Getenv("HERDR_WORKSPACE_ID")
 }
 
 // resolveSuperviseBase applies --base > this repo's .argus/config.yml
@@ -242,28 +292,20 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 	logger, closeLog := openRunLog(cmd, "supervise")
 	defer closeLog()
 
+	parentWS, err := parentWorkspace(o.workerPlacement, o.repoExplicit)
+	if err != nil {
+		return err
+	}
+
 	cfg := &supervisor.Config{
-		Out:      cmd.OutOrStdout(),
-		Now:      time.Now,
-		Client:   client,
-		Log:      logger,
-		Base:     o.base,
-		Home:     home,
-		Launcher: o.launcher,
-		// HERDR_WORKSPACE_ID is herdr's own env var naming the pane argus itself
-		// is running in, when it is running inside a herdr pane at all (e.g.
-		// headless/CI invocations have no such pane and see it unset). Reading
-		// it here nests every worker this invocation spawns as a tab in the
-		// operator's own workspace instead of a disconnected new one, with no
-		// flag required for the common interactive case.
-		//
-		// herdr's own worktree-create usage documents --workspace and --cwd as
-		// mutually exclusive. WorktreeCreate always sends --cwd (the repo a
-		// worker's worktree derives from), so an explicit --repo — which names
-		// that repo directly — must win outright rather than being layered on
-		// top of workspace auto-detection; nesting stays a same-repo-only
-		// convenience for the case where --repo was left to default.
-		ParentWorkspace:   parentWorkspace(o.repoExplicit),
+		Out:               cmd.OutOrStdout(),
+		Now:               time.Now,
+		Client:            client,
+		Log:               logger,
+		Base:              o.base,
+		Home:              home,
+		Launcher:          o.launcher,
+		ParentWorkspace:   parentWS,
 		ScrubEnv:          append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
 		Interval:          o.interval,
 		Timeout:           o.timeout,

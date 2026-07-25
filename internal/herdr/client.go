@@ -20,6 +20,13 @@ import (
 // It is the one effectful seam in this package; tests substitute a fake.
 type Runner func(ctx context.Context, args ...string) ([]byte, error)
 
+// DirRunner is Runner plus a working directory for the child process. Only
+// WorktreeCreate's nested-tab path needs this: herdr's own worktree-create
+// usage rejects --workspace and --cwd together, so nesting a worker's pane
+// into an existing workspace has to tell herdr which repo to use by running
+// the command from inside it instead of via --cwd.
+type DirRunner func(ctx context.Context, dir string, args ...string) ([]byte, error)
+
 // ErrAgentNotFound is what AgentGet's err wraps when herdr reports its
 // "agent_not_found" code: the target pane has no live agent session herdr
 // recognizes (a bare shell prompt), not a transport or decoding failure.
@@ -49,11 +56,16 @@ var ErrWorkspaceNotFound = errors.New("herdr: workspace not found")
 // Client issues typed calls to herdr.
 type Client struct {
 	run Runner
+	// runDir is the DirRunner counterpart to run, used only by WorktreeCreate's
+	// nested-tab path (see DirRunner). Left nil by NewWithRunner: tests that
+	// don't care about the working directory a call ran from get the plain
+	// Runner behavior, since runInDir falls back to run when this is nil.
+	runDir DirRunner
 }
 
 // New returns a Client that shells out to the real herdr binary on PATH.
 func New() Client {
-	return Client{run: execRunner("herdr")}
+	return Client{run: execRunner("herdr"), runDir: execRunnerDir("herdr")}
 }
 
 // NewWithRunner returns a Client backed by a caller-supplied Runner, for tests.
@@ -64,26 +76,51 @@ func NewWithRunner(r Runner) Client {
 func execRunner(bin string) Runner {
 	return func(ctx context.Context, args ...string) ([]byte, error) {
 		//nolint:gosec // bin is the fixed "herdr" binary and args are argus-composed herdr subcommands (pane/worktree ids from herdr itself), not user shell input
-		out, err := exec.CommandContext(ctx, bin, args...).Output()
-		if err != nil {
-			var ee *exec.ExitError
-			if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-				switch errorCode(ee.Stderr) {
-				case "agent_not_found":
-					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentNotFound)
-				case "timeout":
-					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWaitTimeout)
-				case "agent_prompt_stalled":
-					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentPromptStalled)
-				case "workspace_not_found":
-					return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWorkspaceNotFound)
-				}
-				return nil, fmt.Errorf("herdr %s: %w: %s", args[0], err, ee.Stderr)
-			}
-			return nil, fmt.Errorf("herdr %s: %w", args[0], err)
-		}
-		return out, nil
+		return runHerdr(exec.CommandContext(ctx, bin, args...), args)
 	}
+}
+
+// execRunnerDir is execRunner plus a working directory for the child process.
+func execRunnerDir(bin string) DirRunner {
+	return func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		//nolint:gosec // bin is the fixed "herdr" binary and args are argus-composed herdr subcommands (pane/worktree ids from herdr itself), not user shell input
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Dir = dir
+		return runHerdr(cmd, args)
+	}
+}
+
+func runHerdr(cmd *exec.Cmd, args []string) ([]byte, error) {
+	out, err := cmd.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			switch errorCode(ee.Stderr) {
+			case "agent_not_found":
+				return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentNotFound)
+			case "timeout":
+				return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWaitTimeout)
+			case "agent_prompt_stalled":
+				return nil, fmt.Errorf("herdr %s: %w", args[0], ErrAgentPromptStalled)
+			case "workspace_not_found":
+				return nil, fmt.Errorf("herdr %s: %w", args[0], ErrWorkspaceNotFound)
+			}
+			return nil, fmt.Errorf("herdr %s: %w: %s", args[0], err, ee.Stderr)
+		}
+		return nil, fmt.Errorf("herdr %s: %w", args[0], err)
+	}
+	return out, nil
+}
+
+// runInDir runs args from within dir when both dir and c.runDir are available,
+// otherwise falls back to the plain Runner (dir ignored) so every other call
+// through this Client, and any test Client built with only a Runner, is
+// unaffected.
+func (c Client) runInDir(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	if dir == "" || c.runDir == nil {
+		return c.run(ctx, args...)
+	}
+	return c.runDir(ctx, dir, args...)
 }
 
 // errorCode extracts a herdr error envelope's machine-readable code from a
@@ -324,22 +361,33 @@ type Worktree struct {
 // WorktreeCreate asks herdr to create a git worktree and open it, returning the
 // worktree's root pane so the caller can spawn a worker there directly. spec is
 // taken by pointer only to avoid copying; it is not mutated.
+//
+// herdr's own worktree-create usage rejects --workspace and --cwd together, so
+// when spec.Workspace nests the new pane into an existing workspace, --cwd is
+// left off and the herdr invocation itself runs from spec.Cwd instead (see
+// runInDir/DirRunner) — telling herdr which repo to use by ambient working
+// directory, the same way it learns it when invoked from inside one of its
+// own panes.
 func (c Client) WorktreeCreate(ctx context.Context, spec *WorktreeSpec) (Worktree, error) {
-	args := []string{
-		"worktree", "create",
-		"--cwd", spec.Cwd,
+	args := []string{"worktree", "create"}
+	if spec.Workspace == "" {
+		args = append(args, "--cwd", spec.Cwd)
+	}
+	args = append(args,
 		"--branch", spec.Branch,
 		"--base", spec.Base,
 		"--path", spec.Path,
 		"--no-focus", "--json",
-	}
+	)
 	if spec.Label != "" {
 		args = append(args, "--label", spec.Label)
 	}
+	dir := ""
 	if spec.Workspace != "" {
 		args = append(args, "--workspace", spec.Workspace)
+		dir = spec.Cwd
 	}
-	out, err := c.run(ctx, args...)
+	out, err := c.runInDir(ctx, dir, args...)
 	if err != nil {
 		return Worktree{}, err
 	}

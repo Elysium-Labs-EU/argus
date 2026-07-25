@@ -352,22 +352,70 @@ func TestRunSupervisionWorkerRuntimeWithKeySucceeds(t *testing.T) {
 	}
 }
 
-// TestParentWorkspace pins down the fix for the reported bug: herdr's own
-// worktree-create usage documents --workspace and --cwd as mutually
-// exclusive, but argus was passing both together whenever it auto-detected
-// HERDR_WORKSPACE_ID from a calling pane and a repo was also known, so every
-// real (non-dry-run) spawn from inside a herdr pane failed with "usage:
-// herdr worktree create [--workspace ID | --cwd PATH]". An explicit --repo
-// must win outright; auto-detected nesting is a fallback for when --repo was
-// left to default.
-func TestParentWorkspace(t *testing.T) {
+// TestParentWorkspaceDefaultPlacement pins down the original bugfix: with the
+// "workspace" placement default (unchanged current behavior), an explicit
+// --repo must still win outright over HERDR_WORKSPACE_ID auto-detection —
+// nesting there is a fallback for when --repo was left to default, not
+// something an explicit --repo layers on top of.
+func TestParentWorkspaceDefaultPlacement(t *testing.T) {
 	t.Setenv("HERDR_WORKSPACE_ID", "w1M")
 
-	if got := parentWorkspace(true); got != "" {
-		t.Errorf("parentWorkspace(repoExplicit=true) = %q, want empty: explicit --repo must not be layered with --workspace", got)
+	for _, placement := range []string{workerPlacementWorkspace, ""} {
+		if got, err := parentWorkspace(placement, true); err != nil || got != "" {
+			t.Errorf("parentWorkspace(%q, repoExplicit=true) = (%q, %v), want (\"\", nil)", placement, got, err)
+		}
+		if got, err := parentWorkspace(placement, false); err != nil || got != "w1M" {
+			t.Errorf("parentWorkspace(%q, repoExplicit=false) = (%q, %v), want (\"w1M\", nil)", placement, got, err)
+		}
 	}
-	if got := parentWorkspace(false); got != "w1M" {
-		t.Errorf("parentWorkspace(repoExplicit=false) = %q, want %q", got, "w1M")
+}
+
+// TestParentWorkspaceTabPlacementForcesNesting proves --worker-placement tab
+// overrides the --repo-implies-no-nesting rule the default placement keeps:
+// this is the whole point of the flag existing (see parentWorkspace's docs).
+func TestParentWorkspaceTabPlacementForcesNesting(t *testing.T) {
+	t.Setenv("HERDR_WORKSPACE_ID", "w1M")
+
+	got, err := parentWorkspace(workerPlacementTab, true)
+	if err != nil {
+		t.Fatalf("parentWorkspace(tab, repoExplicit=true): %v", err)
+	}
+	if got != "w1M" {
+		t.Errorf("parentWorkspace(tab, repoExplicit=true) = %q, want w1M", got)
+	}
+}
+
+// TestParentWorkspaceTabPlacementRequiresEnclosingWorkspace proves tab mode
+// fails loudly rather than silently falling back to a new top-level
+// workspace when there is nothing to nest into.
+func TestParentWorkspaceTabPlacementRequiresEnclosingWorkspace(t *testing.T) {
+	t.Setenv("HERDR_WORKSPACE_ID", "")
+
+	_, err := parentWorkspace(workerPlacementTab, false)
+	if err == nil {
+		t.Fatal("want an error when --worker-placement tab has no HERDR_WORKSPACE_ID to nest into")
+	}
+	if _, ok := errors.AsType[*ui.UserError](err); !ok {
+		t.Errorf("want a *ui.UserError, got %T: %v", err, err)
+	}
+}
+
+// TestParentWorkspacePanePlacementNotImplemented proves --worker-placement
+// pane fails with a clear message instead of silently behaving like some
+// other mode: pane-per-worker needs herdr-side support that doesn't exist
+// yet (see the flag's help text).
+func TestParentWorkspacePanePlacementNotImplemented(t *testing.T) {
+	if _, err := parentWorkspace(workerPlacementPane, false); err == nil {
+		t.Fatal("want an error for --worker-placement pane")
+	}
+}
+
+// TestParentWorkspaceUnknownPlacementErrors proves an unrecognized
+// --worker-placement value is rejected rather than silently falling back to
+// some default.
+func TestParentWorkspaceUnknownPlacementErrors(t *testing.T) {
+	if _, err := parentWorkspace("bogus", false); err == nil {
+		t.Fatal("want an error for an unknown --worker-placement value")
 	}
 }
 
