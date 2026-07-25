@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
@@ -57,6 +58,42 @@ func TestRenderReportShowsVerdictAndReview(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("report missing %q\n---\n%s", want, out)
 		}
+	}
+}
+
+// TestLogRunSummaryCountsPersistedVerdictNotReviewDecision is the regression
+// for a run summary that said "2/2 approved" right after both workers'
+// persisted verdict.json had approved:false: a hard gate reason (VerifyTests
+// mismatch) forces recordApproval to write approved=false even when the
+// reviewer said "approve" (loop.go's reviewOne), so the summary must read
+// that persisted disposition back rather than recompute its own from
+// st.review.Decision, which knows nothing about HardReasons.
+func TestLogRunSummaryCountsPersistedVerdictNotReviewDecision(t *testing.T) {
+	wt := t.TempDir()
+	if err := protocol.WriteApproval(wt, &protocol.Approval{
+		Approved: false,
+		Source:   "review",
+		Summary:  `reviewer said "approve", but a hard gate check is unwaivable: worker claimed "make ci" passed, but re-running it failed`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	cfg := &Config{Log: eventlog.New(&buf, "supervise", "test-run", nil)}
+	states := []*workerState{{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "worker-a", Worktree: wt}},
+		status:  protocol.Status{Phase: protocol.PhaseAwaitingReview},
+		review:  &ReviewResult{Decision: "approve", Summary: "looked fine to me"},
+	}}
+
+	logRunSummary(cfg, states)
+
+	if strings.Contains(buf.String(), `"outcome":"1/1 approved"`) {
+		t.Errorf("run_summary must not count a worker as approved when its persisted verdict says otherwise, got %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"outcome":"0/1 approved"`) {
+		t.Errorf("run_summary should report 0/1 approved for a rejected-but-reviewed worker, got %s", buf.String())
 	}
 }
 
