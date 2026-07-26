@@ -5,11 +5,9 @@
 // any value here beyond the narrow places that read it back
 // (agentadapter's base allow-list, supervise/rebase/ship's base-branch
 // resolution, the brief_note appended verbatim to a generated brief,
-// cmd/gatepolicy.go's review-gate precedence, and supervise's
-// --worker-placement default) — it never runs a build/test/
-// lint command of its own, so there is nothing else for this schema to grow
-// into without relocating the same toolchain-hardcoding problem from code
-// into config.
+// cmd/gatepolicy.go's review-gate precedence, supervise's
+// --worker-placement default, and ship_lint — the one key that does run a
+// command, controller-side, before ship commits).
 package repoconfig
 
 import (
@@ -28,11 +26,14 @@ import (
 // WorkerPlacement stays a plain string (not a pointer) because its empty
 // value already means "unset" — supervise treats "" identically to the
 // --worker-placement default "workspace", so there is nothing to
-// distinguish an absent key from.
+// distinguish an absent key from. ShipLint is likewise a plain string: an
+// empty value means ship runs no extra command, just its built-in hook
+// detection (see supervisor.EnforceHooks/RunShipLint).
 type Config struct {
 	BaseBranch         string
 	WorkerPlacement    string
 	BriefNote          string
+	ShipLint           string
 	MaxDiffLines       *int
 	Allow              []string
 	ProofRequiredPaths []string
