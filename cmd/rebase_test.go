@@ -45,8 +45,8 @@ func initGitDir(t *testing.T) string {
 // succeeds against branch itself, the TestRunRebaseDryRunForcesPastNoConflict
 // trick) — needed to test --worktree resolution against a specific relative
 // path/cwd combination, which requires the repo living at an exact,
-// predictable location.
-func initGitDirAt(t *testing.T, dir, branch string) {
+// predictable location. Every caller works against the same "feat-x" branch.
+func initGitDirAt(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
@@ -60,7 +60,7 @@ func initGitDirAt(t *testing.T, dir, branch string) {
 	run("init", "-q")
 	run("config", "user.email", "t@t")
 	run("config", "user.name", "t")
-	run("checkout", "-q", "-b", branch)
+	run("checkout", "-q", "-b", "feat-x")
 	run("commit", "-q", "--allow-empty", "-m", "work")
 	run("remote", "add", "origin", dir)
 }
@@ -155,6 +155,143 @@ func TestRebaseDryRunNoConflict(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "no conflict") {
 		t.Errorf("expected a no-conflict message:\n%s", buf.String())
+	}
+}
+
+// setupNoConflictOriginBehind builds a bare origin, pushes a published
+// feat-x branch to it, then adds one more local-only commit on top —
+// "rebase already happened locally but the push never landed", with no
+// textual conflict against base since it's a clean fast-forward.
+func setupNoConflictOriginBehind(t *testing.T) (worktree string) {
+	t.Helper()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare init: %v\n%s", err, out)
+	}
+	seed := t.TempDir()
+	git(seed, "init", "-q")
+	git(seed, "config", "user.email", "t@t")
+	git(seed, "config", "user.name", "t")
+	git(seed, "checkout", "-q", "-b", "main")
+	git(seed, "commit", "-q", "--allow-empty", "-m", "base")
+	git(seed, "remote", "add", "origin", remote)
+	git(seed, "push", "-q", "-u", "origin", "main")
+
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", remote, wt).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+	git(wt, "config", "user.email", "t@t")
+	git(wt, "config", "user.name", "t")
+	git(wt, "checkout", "-q", "-b", "feat-x", "origin/main")
+	git(wt, "commit", "-q", "--allow-empty", "-m", "work")
+	git(wt, "push", "-q", "-u", "origin", "feat-x") // publish it, as if an earlier `argus rebase` run had pushed successfully
+
+	git(wt, "commit", "-q", "--allow-empty", "-m", "rebased locally, push never landed")
+	return wt
+}
+
+// TestRunRebaseNoConflictOriginBehindPushesDirectly confirms a branch that's
+// already rebased locally (no textual conflict — ConflictsWith reports
+// false) but whose origin ref is behind must still get pushed, not be waved
+// off as "nothing to rebase".
+func TestRunRebaseNoConflictOriginBehindPushesDirectly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	wt := setupNoConflictOriginBehind(t)
+
+	localHead, err := exec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+
+	cmd := newRebaseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--worktree", wt, "--base", "main"})
+	if rerr := cmd.Execute(); rerr != nil {
+		t.Fatalf("rebase: %v\noutput:\n%s", rerr, buf.String())
+	}
+	if !strings.Contains(buf.String(), "pushed to origin") {
+		t.Errorf("expected a direct-push success message, got:\n%s", buf.String())
+	}
+
+	remoteHead, err := exec.Command("git", "-C", wt, "ls-remote", "origin", "refs/heads/feat-x").Output()
+	if err != nil {
+		t.Fatalf("ls-remote: %v", err)
+	}
+	if !strings.HasPrefix(string(remoteHead), strings.TrimSpace(string(localHead))) {
+		t.Errorf("origin/feat-x = %q, want it to now equal local HEAD %q", remoteHead, localHead)
+	}
+}
+
+// TestRunRebaseNoConflictOriginBehindDryRunDoesNotPush confirms --dry-run
+// reports the push plan without performing it.
+func TestRunRebaseNoConflictOriginBehindDryRunDoesNotPush(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	wt := setupNoConflictOriginBehind(t)
+
+	before, err := exec.Command("git", "-C", wt, "ls-remote", "origin", "refs/heads/feat-x").Output()
+	if err != nil {
+		t.Fatalf("ls-remote: %v", err)
+	}
+
+	cmd := newRebaseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--worktree", wt, "--base", "main", "--dry-run"})
+	if rerr := cmd.Execute(); rerr != nil {
+		t.Fatalf("rebase --dry-run: %v\noutput:\n%s", rerr, buf.String())
+	}
+	if !strings.Contains(buf.String(), "force-push directly") {
+		t.Errorf("expected the dry-run plan to describe the direct push, got:\n%s", buf.String())
+	}
+
+	after, err := exec.Command("git", "-C", wt, "ls-remote", "origin", "refs/heads/feat-x").Output()
+	if err != nil {
+		t.Fatalf("ls-remote: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("--dry-run must not push: origin/feat-x changed from %q to %q", before, after)
+	}
+}
+
+// TestRunRebaseNoConflictOriginBehindPushRejectedSurfacesError confirms a
+// rejected push (a pre-push hook here, standing in for any non-zero `git
+// push` exit) must surface as a failing argus rebase run, not a silent
+// no-op.
+func TestRunRebaseNoConflictOriginBehindPushRejectedSurfacesError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	wt := setupNoConflictOriginBehind(t)
+
+	hooksDir, err := exec.Command("git", "-C", wt, "rev-parse", "--git-path", "hooks").Output()
+	if err != nil {
+		t.Fatalf("rev-parse --git-path hooks: %v", err)
+	}
+	hookPath := filepath.Join(wt, strings.TrimSpace(string(hooksDir)), "pre-push")
+	if werr := os.WriteFile(hookPath, []byte("#!/bin/sh\necho 'rejected by crap-gate' >&2\nexit 1\n"), 0o755); werr != nil {
+		t.Fatalf("writing pre-push hook: %v", werr)
+	}
+
+	cmd := newRebaseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--worktree", wt, "--base", "main"})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("want a non-zero exit when the pre-push hook rejects the push, got nil")
+	}
+	if !strings.Contains(err.Error(), "rejected by crap-gate") {
+		t.Errorf("error should surface the hook's own rejection message, got %v", err)
 	}
 }
 
@@ -385,10 +522,15 @@ func TestDispatchRebaseWorkerPaneRunError(t *testing.T) {
 // pane and runs the worker, and a status.json the worker writes *after*
 // dispatch is picked up once WaitForStatus polls again. A stale status.json
 // left over from before dispatch is seeded too, to confirm it gets invalidated
-// rather than short-circuiting the wait (argus issue #50).
+// rather than short-circuiting the wait (argus issue #50). worktree is a real
+// git repo with its own origin (pointing at itself) already at local HEAD, so
+// the post-status VerifyPushLanded check this test also exercises sees the
+// push as having landed, the same as a worker whose force-push actually
+// reached origin would.
 func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
 	stale := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now().Add(-time.Hour)}
 	if err := protocol.Write(protocol.StatusPath(worktree), stale); err != nil {
 		t.Fatalf("seeding stale status.json: %v", err)
@@ -414,6 +556,44 @@ func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "dispatched rebase worker") || !strings.Contains(buf.String(), "rebased and ready") {
 		t.Errorf("expected dispatch + outcome messages:\n%s", buf.String())
+	}
+}
+
+// TestDispatchRebaseWorkerReportsSuccessButPushNeverLandedFails confirms
+// that a worker reporting awaiting_review (having only rebased locally —
+// its own force-push never reached origin, e.g. a pre-push hook rejection
+// or a run killed mid-push) makes dispatchRebaseWorker fail loudly instead
+// of printing "rebased and ready", because nothing about the worker's
+// self-reported terminal status distinguishes that from a real success.
+func TestDispatchRebaseWorkerReportsSuccessButPushNeverLandedFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	// A real, separate origin (not self-referencing — ls-remote against a
+	// worktree's own repo would trivially "match" itself) whose feat-x ref is
+	// one commit behind the worktree's local HEAD, simulating a rebase that
+	// was committed locally but whose force-push never landed.
+	worktree := setupNoConflictOriginBehind(t)
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+	var buf bytes.Buffer
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		fresh := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now()}
+		_ = protocol.Write(protocol.StatusPath(worktree), fresh)
+	}()
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("want an error when origin never received the worker's push, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not reach origin") {
+		t.Errorf("error should explain the push never landed, got %v", err)
+	}
+	if strings.Contains(buf.String(), "rebased and ready") {
+		t.Errorf("must not print the success message when the push never landed:\n%s", buf.String())
 	}
 }
 
@@ -516,6 +696,10 @@ func TestDispatchRebaseWorkerNoStatus(t *testing.T) {
 func TestDispatchRebaseWorkerReusesLiveAgent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()
+	// A real repo whose origin (itself) already matches local HEAD, so the
+	// post-status VerifyPushLanded check sees the push as landed. See
+	// TestDispatchRebaseWorkerSuccessTerminal.
+	initGitDirAt(t, worktree)
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 
 	var mu sync.Mutex
@@ -845,14 +1029,16 @@ func TestRebaseSpawnLineUsesAbsoluteWorktree(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			base := t.TempDir()
 			repoDir, cwd, rel := tc.setup(t, base)
-			initGitDirAt(t, repoDir, "feat-x")
+			initGitDirAt(t, repoDir)
 			t.Chdir(cwd)
 
 			cmd := newRebaseCmd()
 			var buf bytes.Buffer
 			cmd.SetOut(&buf)
 			cmd.SetErr(&buf)
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			// 500ms, not 200ms: runRebase's no-conflict path now also
+			// round-trips ls-remote/rev-parse against origin before dispatch.
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 			cmd.SetContext(ctx)
 
@@ -885,13 +1071,14 @@ func TestRebaseSpawnLineUsesAbsoluteWorktree(t *testing.T) {
 func TestRebaseSpawnLineAbsoluteWorktreePassesThroughUnchanged(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	repoDir := filepath.Join(t.TempDir(), "featx")
-	initGitDirAt(t, repoDir, "feat-x")
+	initGitDirAt(t, repoDir)
 
 	cmd := newRebaseCmd()
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// 500ms, not 200ms: see TestRebaseSpawnLineUsesAbsoluteWorktree.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	cmd.SetContext(ctx)
 
@@ -922,14 +1109,15 @@ func TestRebaseSpawnLineWorktreeWithShellMetacharsSingleQuoted(t *testing.T) {
 	base := t.TempDir()
 	const segment = "feat $(whoami)"
 	repoDir := filepath.Join(base, segment)
-	initGitDirAt(t, repoDir, "feat-x")
+	initGitDirAt(t, repoDir)
 	t.Chdir(base)
 
 	cmd := newRebaseCmd()
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// 500ms, not 200ms: see TestRebaseSpawnLineUsesAbsoluteWorktree.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	cmd.SetContext(ctx)
 

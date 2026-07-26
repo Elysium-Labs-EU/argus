@@ -141,10 +141,27 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 	defer closeLog()
 	logger.Action("conflict_check", branch, fmt.Sprintf("conflicts=%v", conflicts), opts.base)
 
-	if !conflicts && !opts.force {
-		_, _ = fmt.Fprintf(out, "%s %s has no conflict with origin/%s — nothing to rebase (use --force to dispatch anyway)\n",
-			ui.LabelSuccess.Render("✓"), branch, opts.base)
-		return nil
+	if !conflicts {
+		upToDate, uerr := originUpToDate(ctx, opts.worktree, branch)
+		if uerr != nil {
+			return uerr
+		}
+		if !upToDate {
+			// HEAD already carries whatever rebase would have produced (that's
+			// what "no conflict" means here) but origin/<branch> hasn't caught
+			// up — no worker judgment is needed, just land the push directly.
+			if opts.dryRun {
+				_, _ = fmt.Fprintf(out, "%s rebase plan (dry run)\n  worktree: %s\n  branch:   %s -> origin/%s\n  conflicts: false\n  action:   origin/%s is behind local HEAD; force-push directly (no worker needed)\n",
+					ui.LabelInfo.Render("i"), opts.worktree, branch, opts.base, branch)
+				return nil
+			}
+			return pushRebasedBranch(ctx, out, opts.worktree, branch)
+		}
+		if !opts.force {
+			_, _ = fmt.Fprintf(out, "%s %s has no conflict with origin/%s — nothing to rebase (use --force to dispatch anyway)\n",
+				ui.LabelSuccess.Render("✓"), branch, opts.base)
+			return nil
+		}
 	}
 
 	// Resolved even in a dry run (read-only git plumbing, no side effect) so a
@@ -162,6 +179,42 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 	}
 
 	return dispatchRebaseWorker(ctx, logger, client, out, repoRoot, branch, opts)
+}
+
+// originUpToDate reports whether origin/branch already equals the worktree's
+// local HEAD. A branch origin has never seen at all is treated as up to date
+// here too: that's not this command's "rebase committed locally but the
+// force-push never landed" scenario, and rebase's mandate is fixing an
+// already-published branch's PR, not silently publishing a new one.
+func originUpToDate(ctx context.Context, worktree, branch string) (bool, error) {
+	remote, err := supervisor.RemoteBranchSHA(ctx, worktree, branch)
+	if err != nil {
+		return false, err
+	}
+	if remote == "" {
+		return true, nil
+	}
+	local, err := supervisor.HeadSHA(ctx, worktree)
+	if err != nil {
+		return false, fmt.Errorf("resolving local HEAD: %w", err)
+	}
+	return remote == local, nil
+}
+
+// pushRebasedBranch force-pushes worktree's local HEAD to origin/branch and
+// confirms it actually landed before reporting success, rather than trusting
+// git's own exit code alone — a pre-push hook rejection surfaces as a
+// non-zero exit here already, but this also catches any push that "succeeds"
+// without the ref actually moving.
+func pushRebasedBranch(ctx context.Context, out io.Writer, worktree, branch string) error {
+	if err := supervisor.ForcePushBranch(ctx, worktree, branch); err != nil {
+		return fmt.Errorf("pushing already-rebased %s to origin: %w", branch, err)
+	}
+	if err := supervisor.VerifyPushLanded(ctx, worktree, branch); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "%s %s pushed to origin (was already rebased locally, no conflict)\n", ui.LabelSuccess.Render("✓"), branch)
+	return nil
 }
 
 // detectRebaseConflict resolves the worktree's current branch, refreshes its view
@@ -230,6 +283,19 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 		return fmt.Errorf("worker wrote no status before the deadline")
 	}
 	logger.Action("rebase", branch, string(status.Phase), status.BlockedReason)
+
+	// A worker reporting awaiting_review/done only means it believes it
+	// resolved and pushed the rebase — its brief tells it to `git push
+	// --force-with-lease`, but nothing about a terminal status.json proves
+	// that push actually reached origin (a pre-push hook rejection the worker
+	// didn't check, or a run killed mid-push). Verify against the remote
+	// directly before ever printing "rebased and ready".
+	if status.Phase == protocol.PhaseAwaitingReview || status.Phase == protocol.PhaseDone {
+		if verr := supervisor.VerifyPushLanded(ctx, opts.worktree, branch); verr != nil {
+			logger.Action("rebase", branch, "push-not-landed", verr.Error())
+			return fmt.Errorf("%s worker reported %s but the force-push did not reach origin: %w", branch, status.Phase, verr)
+		}
+	}
 	renderRebaseOutcome(out, branch, &status)
 	return nil
 }

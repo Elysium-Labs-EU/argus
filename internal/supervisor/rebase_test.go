@@ -497,6 +497,52 @@ func mustRemote(t *testing.T, worktree string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// TestVerifyPushLandedDetectsMismatchThenConfirmsAfterPush confirms a
+// worktree whose local HEAD has advanced (the rebase) but never reached
+// origin must fail VerifyPushLanded, and only pass once ForcePushBranch
+// actually lands it — checking only local state, never origin, is exactly
+// what let a rebase get reported as successful without ever landing.
+func TestVerifyPushLandedDetectsMismatchThenConfirmsAfterPush(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGitRepo(t) // clone checked out on base ("main"), origin/main == local HEAD
+
+	if err := VerifyPushLanded(ctx, wt, base); err != nil {
+		t.Fatalf("VerifyPushLanded should pass right after a clone (origin already matches local HEAD): %v", err)
+	}
+
+	// Advance local HEAD without pushing — the "rebased locally, push never
+	// landed" scenario from the bug report.
+	writeAndCommit(t, wt, "line1\nline2\n", "local-only commit")
+
+	if err := VerifyPushLanded(ctx, wt, base); err == nil {
+		t.Fatal("want VerifyPushLanded to fail once local HEAD has diverged from origin without a push")
+	}
+
+	if err := ForcePushBranch(ctx, wt, base); err != nil {
+		t.Fatalf("ForcePushBranch: %v", err)
+	}
+	if err := VerifyPushLanded(ctx, wt, base); err != nil {
+		t.Errorf("VerifyPushLanded should pass once ForcePushBranch actually landed the commit: %v", err)
+	}
+}
+
+// TestRemoteBranchSHAMissingBranchReturnsEmpty confirms a branch origin has
+// never seen at all is reported as "" rather than an error — a caller needs
+// to tell "not on origin yet" apart from "on origin at a different commit".
+func TestRemoteBranchSHAMissingBranchReturnsEmpty(t *testing.T) {
+	ctx := context.Background()
+	wt, _ := initGitRepo(t)
+	gitDo(t, wt, "checkout", "-q", "-b", "never-pushed")
+
+	sha, err := RemoteBranchSHA(ctx, wt, "never-pushed")
+	if err != nil {
+		t.Fatalf("RemoteBranchSHA: %v", err)
+	}
+	if sha != "" {
+		t.Errorf("want empty SHA for a branch never pushed to origin, got %q", sha)
+	}
+}
+
 func TestRebaseBriefCarriesRebaseSteps(t *testing.T) {
 	b := RebaseBrief("feat-x", "main")
 	for _, want := range []string{"feat-x", "git rebase origin/main", "--force-with-lease", protocol.WriterBrief} {

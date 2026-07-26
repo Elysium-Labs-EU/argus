@@ -150,6 +150,57 @@ func funcNameInContext(hunkContext string) string {
 	return matches[len(matches)-1][1]
 }
 
+// HeadSHA resolves worktree's current HEAD commit.
+func HeadSHA(ctx context.Context, worktree string) (string, error) {
+	return git(ctx, worktree, "rev-parse", "HEAD")
+}
+
+// RemoteBranchSHA returns the commit SHA origin/<branch> currently points to,
+// queried directly from the remote via `git ls-remote` rather than a local
+// remote-tracking ref that only a fetch would refresh. Returns "" if the
+// branch doesn't exist on origin.
+func RemoteBranchSHA(ctx context.Context, worktree, branch string) (string, error) {
+	out, err := git(ctx, worktree, "ls-remote", "origin", "refs/heads/"+branch)
+	if err != nil {
+		return "", fmt.Errorf("querying origin for %s: %w", branch, err)
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", nil
+	}
+	return fields[0], nil
+}
+
+// ForcePushBranch force-pushes worktree's HEAD to origin/<branch>, using
+// --force-with-lease so a remote change that landed after our last view of it
+// is refused rather than silently clobbered.
+func ForcePushBranch(ctx context.Context, worktree, branch string) error {
+	_, err := git(ctx, worktree, "push", "--force-with-lease", "origin", "HEAD:refs/heads/"+branch)
+	return err
+}
+
+// VerifyPushLanded confirms origin/<branch> equals worktree's local HEAD,
+// querying the remote directly rather than trusting a caller's belief that a
+// preceding push succeeded: a rebase worker can report awaiting_review after
+// rebasing locally without its own `git push --force-with-lease` having
+// actually reached origin (a pre-push hook rejection it never checked the
+// exit code of, or a run killed mid-push), and nothing about a terminal
+// status.json distinguishes that from a real success.
+func VerifyPushLanded(ctx context.Context, worktree, branch string) error {
+	local, err := HeadSHA(ctx, worktree)
+	if err != nil {
+		return fmt.Errorf("resolving local HEAD: %w", err)
+	}
+	remote, err := RemoteBranchSHA(ctx, worktree, branch)
+	if err != nil {
+		return err
+	}
+	if remote != local {
+		return fmt.Errorf("origin/%s is at %s, not local HEAD %s — the push did not land", branch, remote, local)
+	}
+	return nil
+}
+
 // RebaseBrief is the task brief argus injects when dispatching a worker to
 // resolve a post-merge conflict. The deterministic work (detecting the conflict,
 // spawning the worker, verifying the result) is argus's; the conflict resolution
