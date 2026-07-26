@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -91,6 +93,7 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 			Reasons:       reasons,
 			Diff:          diff,
 			PriorFindings: priorFindings(worktree),
+			ReviewNote:    repoReviewNote(ctx, worktree),
 		})
 		return rerr
 	})
@@ -102,6 +105,22 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 
 	renderReviewResult(out, res)
 	return nil
+}
+
+// repoReviewNote reads this worktree's repo's optional .argus/config.yml
+// review_note (see internal/repoconfig), best-effort: an unresolvable repo
+// root or unreadable config just means no repo-specific criteria to append,
+// not a hard failure of a manual one-off review.
+func repoReviewNote(ctx context.Context, worktree string) string {
+	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
+	if err != nil {
+		return ""
+	}
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		return ""
+	}
+	return rc.ReviewNote
 }
 
 // priorFindings returns the Reasons from a previously recorded, non-approved

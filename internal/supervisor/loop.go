@@ -67,6 +67,11 @@ type Config struct {
 	Base     string
 	Home     string
 	Launcher string
+	// ReviewNote is the repo's own .argus/config.yml review_note (see
+	// internal/repoconfig), forwarded verbatim to each ReviewRequest so
+	// reviewOne's prompt carries it. Empty means no repo-specific review
+	// criteria, today's behavior.
+	ReviewNote string
 	// ParentWorkspace, when set, is the herdr workspace id every spawned
 	// worker's worktree pane nests into as a tab instead of staying in its own
 	// new top-level workspace (see prepareWorktree's use of herdr.Client.PaneMove).
@@ -654,6 +659,7 @@ func reviewOne(ctx context.Context, cfg *Config, st *workerState, verdict Verdic
 		Reasons:       verdict.Reasons,
 		HardReasons:   verdict.HardReasons,
 		PriorFindings: priorFindings(st.plan.Worktree),
+		ReviewNote:    cfg.ReviewNote,
 	})
 	if err != nil {
 		st.reviewErr = err

@@ -147,6 +147,23 @@ func TestReviewPromptCarriesPriorFindings(t *testing.T) {
 	}
 }
 
+func TestReviewPromptCarriesReviewNote(t *testing.T) {
+	with := reviewPrompt(&ReviewRequest{
+		Task:       "t",
+		Diff:       "d",
+		ReviewNote: "Flag any new dependency.",
+	})
+	for _, want := range []string{"Repo-specific review criteria", "Flag any new dependency."} {
+		if !strings.Contains(with, want) {
+			t.Errorf("prompt missing %q:\n%s", want, with)
+		}
+	}
+	without := reviewPrompt(&ReviewRequest{Task: "t", Diff: "d"})
+	if strings.Contains(without, "Repo-specific review criteria") {
+		t.Errorf("no-ReviewNote prompt should not mention repo-specific criteria")
+	}
+}
+
 func TestNewCLIReviewerAndWithLog(t *testing.T) {
 	r := NewCLIReviewer("sonnet")
 	if r.model != "sonnet" || r.run == nil {
