@@ -17,6 +17,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/jira"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -197,6 +198,11 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	logger, closeLog := openRunLog(cmd, "ship")
 	defer closeLog()
 
+	if gerr := enforceShipGate(ctx, a.worktree); gerr != nil {
+		logger.Fail("ship_gate", target.branch, gerr)
+		return gerr
+	}
+
 	if cerr := supervisor.CommitAll(ctx, a.worktree, target.commitMsg); cerr != nil && !errors.Is(cerr, supervisor.ErrNothingToCommit) {
 		logger.Fail("commit", target.branch, cerr)
 		return cerr
@@ -287,6 +293,29 @@ func postShipJira(ctx context.Context, out io.Writer, logger *eventlog.Logger, a
 func warnJiraPostShip(out io.Writer, logger *eventlog.Logger, key string, err error) {
 	logger.Fail("jira_post_ship", key, err)
 	_, _ = fmt.Fprintf(out, "%s jira post-ship for %s: %v\n", ui.LabelWarning.Render("!"), key, err)
+}
+
+// enforceShipGate runs this repo's hook/lint enforcement before shipChange
+// commits anything: any lefthook/pre-commit-framework config found in the
+// worktree (supervisor.EnforceHooks), then the repo's own optional ship_lint
+// command from .argus/config.yml (supervisor.RunShipLint). It is unconditional
+// — unlike checkApproved, --force does not skip it — because the point is to
+// close the --no-verify bypass even for a human who has decided to ship an
+// unreviewed change; letting --force also skip this would just relocate the
+// bypass rather than close it.
+func enforceShipGate(ctx context.Context, worktree string) error {
+	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
+	if err != nil {
+		return fmt.Errorf("resolving repo root for ship gate: %w", err)
+	}
+	if herr := supervisor.EnforceHooks(ctx, worktree); herr != nil {
+		return herr
+	}
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		return fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)
+	}
+	return supervisor.RunShipLint(ctx, worktree, rc.ShipLint)
 }
 
 // checkApproved refuses to ship a worktree that argus never cleared. supervise

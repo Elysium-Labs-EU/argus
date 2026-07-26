@@ -646,4 +646,96 @@ func TestShipChangeWarnsButSucceedsWhenJiraHookFails(t *testing.T) {
 	}
 }
 
+// TestShipChangeFailsWhenShipLintCommandFails covers the .argus/config.yml
+// ship_lint gate: a failing command must stop shipChange before anything is
+// committed or pushed, not just get reported alongside a PR that already
+// opened.
+func TestShipChangeFailsWhenShipLintCommandFails(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipLint: "exit 1"}); err != nil {
+		t.Fatalf("seeding ship_lint config: %v", err)
+	}
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target)
+	if err == nil {
+		t.Fatal("want error when ship_lint fails")
+	}
+	if !strings.Contains(err.Error(), "ship_lint") {
+		t.Errorf("error should name ship_lint, got: %v", err)
+	}
+	if f.opened != nil {
+		t.Error("no PR should be opened when ship_lint fails")
+	}
+	out, cerr := exec.Command("git", "-C", wt, "log", "--oneline").CombinedOutput()
+	if cerr != nil {
+		t.Fatalf("git log: %v", cerr)
+	}
+	if strings.Contains(string(out), "fix: feat-x") {
+		t.Errorf("no commit should have happened when ship_lint failed: %s", out)
+	}
+}
+
+// TestShipChangeRunsPassingShipLintCommand is the success-path counterpart:
+// a configured ship_lint that exits zero does not block the normal
+// commit/push/open-PR flow.
+func TestShipChangeRunsPassingShipLintCommand(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipLint: "true"}); err != nil {
+		t.Fatalf("seeding ship_lint config: %v", err)
+	}
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	if err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target); err != nil {
+		t.Fatalf("shipChange with a passing ship_lint: %v", err)
+	}
+	if f.opened == nil {
+		t.Fatal("want a PR opened")
+	}
+}
+
+// TestShipChangeFailsWhenConfiguredHookToolMissing covers EnforceHooks wired
+// into shipChange: a lefthook.yml present in the worktree with no lefthook
+// binary on PATH must fail ship rather than silently committing unchecked —
+// a configured-but-unenforced hook is a gap that must be loud at ship time,
+// not discovered later at CI.
+func TestShipChangeFailsWhenConfiguredHookToolMissing(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin")
+	wt, cmd, _ := shipChangeTestSetup(t)
+	if err := os.WriteFile(filepath.Join(wt, "lefthook.yml"), []byte("pre-commit:\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target)
+	if err == nil {
+		t.Fatal("want error: lefthook.yml present but lefthook not on PATH")
+	}
+	if f.opened != nil {
+		t.Error("no PR should be opened when the configured hook tool is missing")
+	}
+}
+
+// TestShipChangeGateRunsEvenWithForce locks the requirement that --force only
+// bypasses the argus-approval check (checkApproved), never the hook/lint
+// gate: forcing a ship past a missing verdict must not also let a broken
+// ship_lint command through, or --force would become a second, wider
+// --no-verify.
+func TestShipChangeGateRunsEvenWithForce(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipLint: "exit 1"}); err != nil {
+		t.Fatalf("seeding ship_lint config: %v", err)
+	}
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main", force: true}, target)
+	if err == nil {
+		t.Fatal("want ship_lint failure to block ship even with --force")
+	}
+}
+
 var _ forge.Forge = (*fakeForge)(nil)

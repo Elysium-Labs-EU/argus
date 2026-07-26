@@ -118,6 +118,37 @@ func TestRepoRootPlainRepoReturnsItsOwnAbsolutePath(t *testing.T) {
 	}
 }
 
+// TestCommitAllRespectsNativePreCommitHook pins the core contract: CommitAll
+// must never pass --no-verify/-n to `git commit`, so a repo's own
+// .git/hooks/pre-commit still runs — and still blocks the commit on a
+// non-zero exit — exactly as it would for a human running `git commit` by
+// hand. If this test starts failing, someone added --no-verify to
+// CommitAll's git invocation.
+func TestCommitAllRespectsNativePreCommitHook(t *testing.T) {
+	wt := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+
+	hook := filepath.Join(wt, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("writing pre-commit hook: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CommitAll(context.Background(), wt, "feat: real change"); err == nil {
+		t.Fatal("want CommitAll to fail when the repo's own pre-commit hook rejects the commit")
+	}
+}
+
 // TestRepoRootLinkedWorktreeReturnsMainRepo confirms the already-covered
 // production path (ship/rebase calling RepoRoot on a linked worker worktree)
 // still resolves to the main repo, not the linked worktree itself.

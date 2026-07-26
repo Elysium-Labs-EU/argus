@@ -84,6 +84,7 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.ProofRequiredPaths = promptList(reader, out, "proof_required_paths", suggested.ProofRequiredPaths)
 		cfg.AlwaysReviewPaths = promptList(reader, out, "always_review_paths", suggested.AlwaysReviewPaths)
 		cfg.WorkerPlacement = promptLine(reader, out, "worker_placement (workspace|tab)", suggested.WorkerPlacement)
+		cfg.ShipLint = promptLine(reader, out, "ship_lint (controller-side gate command run before commit)", suggested.ShipLint)
 	}
 
 	if err := repoconfig.Save(path, &cfg); err != nil {
@@ -98,6 +99,7 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 type toolchainGuess struct {
 	marker    string
 	briefNote string
+	shipLint  string
 	allow     []string
 }
 
@@ -109,21 +111,25 @@ var toolchainGuesses = []toolchainGuess{
 		marker:    "Taskfile.yml",
 		allow:     []string{"Bash(task *)"},
 		briefNote: "Add a focused test and keep task ci green.",
+		shipLint:  "task lint",
 	},
 	{
 		marker:    "Makefile",
 		allow:     []string{"Bash(make *)"},
 		briefNote: "Add a focused test and keep make ci green. Follow the repo STYLE.md.",
+		shipLint:  "make lint",
 	},
 	{
 		marker:    "package.json",
 		allow:     []string{"Bash(npm *)"},
 		briefNote: "Add a focused test and keep npm test green.",
+		shipLint:  "npm run lint",
 	},
 	{
 		marker:    "go.mod",
 		allow:     []string{"Bash(go build *)", "Bash(go test *)", "Bash(go vet *)"},
 		briefNote: "Add a focused test and keep go test ./... green.",
+		shipLint:  "golangci-lint run",
 	},
 }
 
@@ -139,6 +145,7 @@ func detectRepoConfig(ctx context.Context, repoRoot string) repoconfig.Config {
 		if _, err := os.Stat(filepath.Join(repoRoot, g.marker)); err == nil {
 			cfg.Allow = g.allow
 			cfg.BriefNote = g.briefNote
+			cfg.ShipLint = g.shipLint
 			break
 		}
 	}
