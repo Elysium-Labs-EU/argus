@@ -42,3 +42,22 @@ func resolveGatePolicy(f gateFlags, rc *repoconfig.Config) *supervisor.ReviewPol
 	}
 	return p
 }
+
+// resolveVerifyCommand applies an explicit --verify-cmd flag over this repo's
+// .argus/config.yml verify_command over "" (no command configured — the
+// gate's prior behavior), the same explicit-flag-wins precedence
+// resolveGatePolicy and resolveSuperviseBase apply for their own sources.
+// It is not folded into gateFlags/resolveGatePolicy: unlike ReviewPolicy's
+// fields, VerifyCommand is not consumed by the pure Assess/gateVerdict
+// policy check, it is a shell command supervisor.Config threads to
+// RunVerifyCommand. explicit is cmd.Flags().Changed("verify-cmd"). rc is a
+// pointer solely to avoid copying the struct at the call site.
+func resolveVerifyCommand(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.VerifyCommand != "" {
+		return rc.VerifyCommand
+	}
+	return flagValue
+}

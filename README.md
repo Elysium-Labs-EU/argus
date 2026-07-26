@@ -79,6 +79,7 @@ brief_note: ""                 # text appended to every generated worker brief
 max_diff_lines: 0              # gate: diffs larger than this escalate (0 disables the ceiling)
 proof_required_paths: []       # gate: paths needing real world proof before auto approval
 always_review_paths: []        # gate: behavior critical paths that always escalate
+verify_command: ""             # gate: shell command re-run in the worktree before approval (e.g. "make lint"); non-zero exit always escalates
 ```
 
 **Run**

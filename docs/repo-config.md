@@ -1,8 +1,11 @@
 # Repo config: .argus/config.yml
 
-argus hardcodes no build/test toolchain — it never itself runs a build, test,
-or lint command; the only self-verifying gate is `ship`'s required approving
-verdict (see `internal/supervisor/reviewer.go`). The only toolchain-flavored
+argus hardcodes no build/test toolchain — it assumes no default build, test,
+or lint command of its own. `verify_command` below is one such opt-in
+exception: a repo owner sets a specific shell command via the key, and argus
+re-runs exactly that command as part of the gate, alongside `ship`'s
+required approving verdict (see `internal/supervisor/reviewer.go`). The only
+other toolchain-flavored
 assumptions argus ever made were a Go/make-shaped default permission allow
 list and a `"main"` base branch, both hardcoded in Go. `.argus/config.yml` — a
 single optional file in the *main* repo checkout, not inside any worker's
@@ -21,7 +24,7 @@ allow:
 brief_note: "Add a focused test and keep task frontend:ci green. Follow the repo AGENTS.md."
 ```
 
-All three keys are optional; a missing file is equivalent to an empty one.
+All keys are optional; a missing file is equivalent to an empty one.
 
 ## Keys
 
@@ -45,6 +48,17 @@ All three keys are optional; a missing file is equivalent to an empty one.
   diff-counting guidance that mirrors `MeasureDiff`'s own untracked-file
   handling) always follow it — those are argus's own pipeline invariants, not
   something a repo can opt out of.
+- **`verify_command`** — a shell command the gate re-runs inside a worker's
+  worktree once it reaches a terminal phase (e.g. `"make lint"`,
+  `"golangci-lint run"`), closing the gap where a diff earns a clean gate
+  verdict and then fails at `ship`'s `git commit` because the repo's own
+  pre-commit hooks ran a check the gate never reproduced. A non-zero exit
+  (after one retry, to absorb shared-machine flakiness — see
+  `RunVerifyCommand`) is an unwaivable escalation: no reviewer verdict can
+  approve past it, the same treatment a reproduced test-claim mismatch gets.
+  Precedence: an explicit `--verify-cmd` flag, then this key, then unset (no
+  command runs — today's prior behavior). Unset by default; a repo owner
+  opts in.
 
 ## Why this is safe from a worker
 

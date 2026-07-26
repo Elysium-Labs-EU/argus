@@ -6,11 +6,13 @@
 // (agentadapter's base allow-list, supervise/rebase/ship's base-branch
 // resolution, the brief_note appended verbatim to a generated brief, the
 // review_note appended verbatim to the reviewer's prompt, cmd/gatepolicy.go's
-// review-gate precedence, supervise's --worker-placement default, and
-// ship_lint — the one key that does run a command, controller-side, before
-// ship commits) — it otherwise never runs a build/test/lint command of its
-// own, so there is nothing else for this schema to grow into without
-// relocating the same toolchain-hardcoding problem from code into config.
+// review-gate precedence, supervise's --worker-placement default, the gate's
+// own re-run of verify_command in the worktree before a verdict is recorded,
+// and ship_lint — the one key that does run a command, controller-side,
+// before ship commits) — the two exceptions to "argus runs no build/test/
+// lint command of its own" are verify_command and ship_lint themselves,
+// since a repo owner opts into each specific command by setting the key;
+// argus still hardcodes no toolchain guess of what either command should be.
 package repoconfig
 
 import (
@@ -32,12 +34,23 @@ import (
 // distinguish an absent key from. ShipLint is likewise a plain string: an
 // empty value means ship runs no extra command, just its built-in hook
 // detection (see supervisor.EnforceHooks/RunShipLint).
+// VerifyCommand is not part of ReviewPolicy: it is not a pure policy check
+// like the others, it is a shell command the gate executes in the worker's
+// worktree (see supervisor.Config.VerifyCommand) — an empty string means the
+// same "not configured, skip" as an absent key, so it needs no pointer
+// either. VerifyCommand and ShipLint are deliberately distinct checks at
+// different points in the pipeline: VerifyCommand runs in the gate, before a
+// verdict is recorded, so a failure is an unwaivable escalation the reviewer
+// sees; ShipLint (and EnforceHooks) runs controller-side at ship time, right
+// before commit, as the last backstop regardless of how the verdict was
+// reached.
 type Config struct {
 	BaseBranch         string
 	WorkerPlacement    string
 	BriefNote          string
 	ReviewNote         string
 	ShipLint           string
+	VerifyCommand      string
 	MaxDiffLines       *int
 	Allow              []string
 	ProofRequiredPaths []string

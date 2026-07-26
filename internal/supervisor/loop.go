@@ -72,6 +72,13 @@ type Config struct {
 	// reviewOne's prompt carries it. Empty means no repo-specific review
 	// criteria, today's behavior.
 	ReviewNote string
+	// VerifyCommand, when set, is a shell command the gate runs in a
+	// worker's worktree (via RunVerifyCommand) once it reaches a terminal
+	// phase, mirroring the same bar `argus ship` enforces (a repo's own
+	// lint/build/pre-commit) so a clean verdict can't be undone by a hook
+	// failure ship only discovers at `git commit` time. Empty means no
+	// command is configured — the gate's prior behavior, unchanged.
+	VerifyCommand string
 	// ParentWorkspace, when set, is the herdr workspace id every spawned
 	// worker's worktree pane nests into as a tab instead of staying in its own
 	// new top-level workspace (see prepareWorktree's use of herdr.Client.PaneMove).
@@ -549,6 +556,24 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		st.testMismatches = VerifyTests(ctx, st.plan.Worktree, st.status.Tests, testVerifyTimeout)
 	}
 
+	// Re-run this repo's own configured verify command (lint/build/pre-commit
+	// — see Config.VerifyCommand), the same bar `argus ship`'s `git commit`
+	// enforces via the repo's own hooks, so a failure surfaces here instead
+	// of first appearing at ship time. Runs after VerifyTests for the same
+	// reason reviewDiff is captured before it: st.reviewDiff already holds
+	// the pre-verification diff, so a verify command's own worktree side
+	// effects (a regenerated lockfile, coverage output) can't leak into what
+	// the reviewer is shown either.
+	for _, st := range states {
+		if !st.hasFile && st.herdrEscalation == "" {
+			continue
+		}
+		if st.status.Phase != protocol.PhaseAwaitingReview && st.status.Phase != protocol.PhaseDone {
+			continue
+		}
+		st.verifyMismatch = RunVerifyCommand(ctx, st.plan.Worktree, cfg.VerifyCommand)
+	}
+
 	// A worker started with a non-default --launcher never produces a Claude
 	// Code transcript, so HasPlanEvidence would always report "no evidence
 	// found" — not a real signal, just the absence of a convention that
@@ -758,6 +783,11 @@ type workerState struct {
 	// (see reconcile) — nil means either no terminal-phase check ran yet or
 	// every claimed pass reproduced clean.
 	testMismatches []string
+	// verifyMismatch holds the RunVerifyCommand failure reason once the repo's
+	// configured verify command (Config.VerifyCommand) has been re-run against
+	// a terminal-phase worker — empty means either no command is configured,
+	// it has not run yet, or it ran clean.
+	verifyMismatch string
 	// reviewDiff is the diff reviewOne sends the LLM reviewer, fetched by
 	// reconcile before VerifyTests runs so a test command's own side effects
 	// can never leak into what the reviewer is shown. reviewDiffErr set means

@@ -322,6 +322,16 @@ Useful flags (see `argus supervise --help` for all):
   duplicate mechanism. That old flag is gone, not renamed — an invocation
   still passing it now fails with an unknown-flag error; use
   `--always-review-path` instead.
+- `--verify-cmd <shell command>` (default: none — runs nothing, matching
+  argus's prior behavior) — closes the gap where the gate's tests/diff/path
+  checks all pass but the target repo's own pre-commit hooks (lint, build,
+  fieldalignment, ...) fail at `ship`'s `git commit`. Once a worker reaches a
+  terminal phase, the gate re-runs this command in its worktree (one retry
+  on failure, to absorb shared-machine flakiness); a non-zero exit is an
+  unwaivable escalation, the same treatment a reproduced test-claim mismatch
+  gets. Can also be set once via this repo's `.argus/config.yml`
+  `verify_command` key instead of repeating the flag — an explicitly passed
+  flag still wins.
 
 ## 2. React to escalations
 

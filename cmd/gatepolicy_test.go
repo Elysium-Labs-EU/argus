@@ -80,3 +80,26 @@ func TestResolveGatePolicyRepoConfigMaxDiffLinesZeroIsMeaningful(t *testing.T) {
 		t.Errorf("MaxDiffLines = %d, want 0 (explicit disable from repo config)", got.MaxDiffLines)
 	}
 }
+
+func TestResolveVerifyCommandExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{VerifyCommand: "make ci"}
+	got := resolveVerifyCommand(true, "make lint", &rc)
+	if got != "make lint" {
+		t.Errorf("resolveVerifyCommand = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveVerifyCommandPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{VerifyCommand: "make ci"}
+	got := resolveVerifyCommand(false, "", &rc)
+	if got != "make ci" {
+		t.Errorf("resolveVerifyCommand = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveVerifyCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveVerifyCommand(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveVerifyCommand = %q, want empty (no verify command configured anywhere)", got)
+	}
+}

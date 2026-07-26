@@ -65,9 +65,54 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 
 		mismatches = append(mismatches, fmt.Sprintf(
 			"worker claimed %q passed, but re-running it failed twice in a row: %v\n--- attempt 1 output (tail) ---\n%s\n--- attempt 2 output (tail) ---\n%s",
-			t.Cmd, second.err, tail(first.output, maxCapturedOutput), tail(second.output, maxCapturedOutput)))
+			t.Cmd, second.err, tail(first.output), tail(second.output)))
 	}
 	return mismatches
+}
+
+// verifyCommandTimeout bounds one run of a repo's configured verify_command
+// (see repoconfig.Config.VerifyCommand). It is longer than testVerifyTimeout
+// because this command is repo-owner-chosen and may itself chain build+lint+
+// test (e.g. "make ci"), not a single reported test target.
+const verifyCommandTimeout = 10 * time.Minute
+
+// RunVerifyCommand re-runs a repo's own configured verify_command inside
+// worktree: the gate otherwise only reproduces a worker's *claimed* test
+// passes (VerifyTests), never a repo's own lint/build/pre-commit, so a diff
+// could earn a clean verdict and then fail at `argus ship`'s `git commit`
+// when the repo's own pre-commit hook ran the very check that would have
+// caught it. An empty cmdStr means no verify command is configured for this
+// repo, so nothing runs and "" (no mismatch) is returned.
+//
+// Mirrors VerifyTests' one-retry treatment: a shared-machine build/lint step
+// can fail from resource contention as easily as a test run can, and — like
+// a reproduced test failure — this check is unwaivable by any reviewer
+// verdict (see gateVerdict), so a single failing sample is not trusted on
+// its own.
+func RunVerifyCommand(ctx context.Context, worktree, cmdStr string) string {
+	if cmdStr == "" {
+		return ""
+	}
+
+	first := runVerify(ctx, worktree, cmdStr, verifyCommandTimeout)
+	if first.ok {
+		return ""
+	}
+	if first.timedOut {
+		return fmt.Sprintf("verify command %q exceeded %s and was killed", cmdStr, verifyCommandTimeout)
+	}
+
+	second := runVerify(ctx, worktree, cmdStr, verifyCommandTimeout)
+	if second.ok {
+		return ""
+	}
+	if second.timedOut {
+		return fmt.Sprintf("verify command %q exceeded %s and was killed", cmdStr, verifyCommandTimeout)
+	}
+
+	return fmt.Sprintf(
+		"repo's verify command %q failed twice in a row: %v\n--- attempt 1 output (tail) ---\n%s\n--- attempt 2 output (tail) ---\n%s",
+		cmdStr, second.err, tail(first.output), tail(second.output))
 }
 
 // verifyResult is one re-run attempt's outcome: whether it matched the
@@ -96,12 +141,12 @@ func runVerify(ctx context.Context, worktree, cmdStr string, timeout time.Durati
 	return verifyResult{ok: err == nil, timedOut: timedOut, err: err, output: buf.Bytes()}
 }
 
-// tail returns the last max bytes of b, so a truncated capture keeps the end
-// of the output — where a build/test/lint pipeline's actual failure is,
-// rather than its early, usually-uninteresting setup steps.
-func tail(b []byte, max int) string {
-	if len(b) <= max {
+// tail returns the last maxCapturedOutput bytes of b, so a truncated capture
+// keeps the end of the output — where a build/test/lint pipeline's actual
+// failure is, rather than its early, usually-uninteresting setup steps.
+func tail(b []byte) string {
+	if len(b) <= maxCapturedOutput {
 		return string(b)
 	}
-	return "...(truncated)...\n" + string(b[len(b)-max:])
+	return "...(truncated)...\n" + string(b[len(b)-maxCapturedOutput:])
 }
