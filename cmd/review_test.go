@@ -187,7 +187,7 @@ func TestReviewUsesAbsoluteWorktree(t *testing.T) {
 
 			var captured string
 			original := newReviewer
-			newReviewer = func(_ string, _ *eventlog.Logger) supervisor.Reviewer {
+			newReviewer = func(_, _ string, _ *eventlog.Logger) supervisor.Reviewer {
 				return capturingReviewer{got: &captured}
 			}
 			t.Cleanup(func() { newReviewer = original })

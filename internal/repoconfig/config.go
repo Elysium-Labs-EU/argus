@@ -51,6 +51,7 @@ type Config struct {
 	ReviewNote         string
 	ShipLint           string
 	VerifyCommand      string
+	ReviewEffort       string
 	MaxDiffLines       *int
 	Allow              []string
 	ProofRequiredPaths []string

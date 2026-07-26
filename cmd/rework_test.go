@@ -275,6 +275,88 @@ func TestRunReworkApprovesFirstRound(t *testing.T) {
 	}
 }
 
+// TestRunReworkBuildsReviewerFromRepoConfigWhenNil covers rework's lazy
+// reviewer construction: RunE passes a nil reviewer (it can't resolve
+// review_effort's flag/config precedence before .argus/config.yml is loaded
+// inside runRework), so runRework must build one itself once rc is read, and
+// resolveReviewEffort's own precedence (explicit flag > config > default)
+// must still hold at that later construction point.
+func TestRunReworkBuildsReviewerFromRepoConfigWhenNil(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDirWithDiff(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".argus"), 0o755); err != nil {
+		t.Fatalf("mkdir .argus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".argus", "config.yml"), []byte("review_effort: \"high\"\n"), 0o644); err != nil {
+		t.Fatalf("writing config.yml: %v", err)
+	}
+
+	type captured struct{ model, effort string }
+	var got captured
+	original := newReviewer
+	newReviewer = func(model, effort string, _ *eventlog.Logger) supervisor.Reviewer {
+		got = captured{model: model, effort: effort}
+		return &fakeReviewer{res: supervisor.ReviewResult{Decision: "approve", Summary: "ok"}}
+	}
+	t.Cleanup(func() { newReviewer = original })
+
+	cmd, _ := testCmd()
+	client := fakeReworkClient(dir, reworkStatus())
+
+	err := runRework(cmd, client, nil, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "feat-x", maxRounds: 3, interval: 5 * time.Millisecond,
+		reviewModel: "sonnet", gate: gateFlags{},
+	})
+	if err != nil {
+		t.Fatalf("runRework: %v", err)
+	}
+	if got.model != "sonnet" || got.effort != "high" {
+		t.Errorf("newReviewer got model=%q effort=%q, want model=sonnet effort=high (from .argus/config.yml)", got.model, got.effort)
+	}
+}
+
+// TestRunReworkExplicitEffortFlagWinsOverRepoConfig is the same setup as
+// TestRunReworkBuildsReviewerFromRepoConfigWhenNil but with --review-effort
+// passed explicitly, which must win over the repo's config value.
+func TestRunReworkExplicitEffortFlagWinsOverRepoConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDirWithDiff(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".argus"), 0o755); err != nil {
+		t.Fatalf("mkdir .argus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".argus", "config.yml"), []byte("review_effort: \"high\"\n"), 0o644); err != nil {
+		t.Fatalf("writing config.yml: %v", err)
+	}
+
+	var gotEffort string
+	original := newReviewer
+	newReviewer = func(_, effort string, _ *eventlog.Logger) supervisor.Reviewer {
+		gotEffort = effort
+		return &fakeReviewer{res: supervisor.ReviewResult{Decision: "approve", Summary: "ok"}}
+	}
+	t.Cleanup(func() { newReviewer = original })
+
+	cmd, _ := testCmd()
+	client := fakeReworkClient(dir, reworkStatus())
+
+	err := runRework(cmd, client, nil, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "feat-x", maxRounds: 3, interval: 5 * time.Millisecond,
+		reviewEffort: "low", reviewEffortExplicit: true, gate: gateFlags{},
+	})
+	if err != nil {
+		t.Fatalf("runRework: %v", err)
+	}
+	if gotEffort != "low" {
+		t.Errorf("newReviewer got effort=%q, want the explicit flag value \"low\" over the repo config's \"high\"", gotEffort)
+	}
+}
+
 func TestRunReworkLoopsOnRequestChangesThenApproves(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := initGitDirWithDiff(t)

@@ -20,6 +20,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.WorkerPlacement != "" {
 		fmt.Fprintf(&b, "worker_placement: %s\n", quoteYAML(cfg.WorkerPlacement))
 	}
+	if cfg.ReviewEffort != "" {
+		fmt.Fprintf(&b, "review_effort: %s\n", quoteYAML(cfg.ReviewEffort))
+	}
 	if len(cfg.Allow) > 0 {
 		b.WriteString("allow:\n")
 		for _, a := range cfg.Allow {
@@ -94,8 +97,8 @@ func listFieldFor(cfg *Config, key string) *[]string {
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
 // scalars (base_branch, worker_placement, brief_note, review_note,
-// ship_lint, verify_command, max_diff_lines; value optionally quoted), and a
-// top-level list key (`allow`, `proof_required_paths`,
+// ship_lint, verify_command, review_effort, max_diff_lines; value optionally
+// quoted), and a top-level list key (`allow`, `proof_required_paths`,
 // `always_review_paths`) followed by indented `- value` list items. Any
 // other top-level key is ignored (along with any indented block under it),
 // so a future config key this version doesn't know about doesn't break
@@ -149,6 +152,8 @@ func parseYAML(data string) (Config, error) {
 			cfg.ShipLint = value
 		case "verify_command":
 			cfg.VerifyCommand = value
+		case "review_effort":
+			cfg.ReviewEffort = value
 		case "max_diff_lines":
 			n, perr := strconv.Atoi(value)
 			if perr != nil {

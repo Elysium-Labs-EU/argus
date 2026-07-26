@@ -165,14 +165,46 @@ func TestReviewPromptCarriesReviewNote(t *testing.T) {
 }
 
 func TestNewCLIReviewerAndWithLog(t *testing.T) {
-	r := NewCLIReviewer("sonnet")
-	if r.model != "sonnet" || r.run == nil {
-		t.Fatalf("NewCLIReviewer did not wire model/runner: %+v", r)
+	r := NewCLIReviewer("sonnet", "high")
+	if r.model != "sonnet" || r.effort != "high" || r.run == nil {
+		t.Fatalf("NewCLIReviewer did not wire model/effort/runner: %+v", r)
 	}
 	// WithLog returns a copy carrying the logger; the original is unchanged.
 	withLog := r.WithLog(nil)
-	if withLog.model != "sonnet" {
-		t.Errorf("WithLog dropped the model")
+	if withLog.model != "sonnet" || withLog.effort != "high" {
+		t.Errorf("WithLog dropped the model/effort")
+	}
+}
+
+func TestReviewAppendsEffortArgWhenSet(t *testing.T) {
+	var gotArgs []string
+	run := func(_ context.Context, _, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"decision":"approve","summary":"ok","findings":[]}`), nil
+	}
+	r := CLIReviewer{run: run, model: "sonnet", effort: "xhigh"}
+	if _, err := r.Review(context.Background(), &ReviewRequest{Task: "t", Diff: "x"}); err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	want := []string{"-p", "--output-format", "json", "--allowedTools", "Read,Grep,Glob", "--model", "sonnet", "--effort", "xhigh"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestReviewLeavesArgsUnchangedWhenEffortUnset(t *testing.T) {
+	var gotArgs []string
+	run := func(_ context.Context, _, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"decision":"approve","summary":"ok","findings":[]}`), nil
+	}
+	r := CLIReviewer{run: run}
+	if _, err := r.Review(context.Background(), &ReviewRequest{Task: "t", Diff: "x"}); err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	want := []string{"-p", "--output-format", "json", "--allowedTools", "Read,Grep,Glob"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("args = %v, want %v (unset effort must not change today's argv)", gotArgs, want)
 	}
 }
 

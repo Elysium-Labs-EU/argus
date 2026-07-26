@@ -16,11 +16,12 @@ import (
 
 func newReviewCmd() *cobra.Command {
 	var (
-		worktree    string
-		base        string
-		task        string
-		reasons     []string
-		reviewModel string
+		worktree     string
+		base         string
+		task         string
+		reasons      []string
+		reviewModel  string
+		reviewEffort string
 	)
 
 	cmd := &cobra.Command{
@@ -34,7 +35,7 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 			logger, closeLog := openRunLog(cmd, "review")
 			defer closeLog()
 
-			reviewer := newReviewer(reviewModel, logger)
+			reviewer := newReviewer(reviewModel, reviewEffort, logger)
 			return runReview(cmd, worktree, base, task, reasons, reviewer, logger)
 		},
 	}
@@ -44,6 +45,7 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 	cmd.Flags().StringVar(&task, "task", "", "task/issue the change addresses (context for the reviewer)")
 	cmd.Flags().StringSliceVar(&reasons, "reasons", nil, "why this needs review (context for the reviewer)")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
+	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for the review (low, medium, high, xhigh, max; default: claude's default)")
 	return cmd
 }
 
@@ -53,8 +55,8 @@ var reviewCmd = newReviewCmd()
 // var, not a plain call, so a test driving the command through cmd.SetArgs +
 // cmd.Execute (rather than calling runReview directly) can substitute a fake
 // Reviewer without shelling out to the real claude CLI.
-var newReviewer = func(model string, logger *eventlog.Logger) supervisor.Reviewer {
-	return supervisor.NewCLIReviewer(model).WithLog(logger)
+var newReviewer = func(model, effort string, logger *eventlog.Logger) supervisor.Reviewer {
+	return supervisor.NewCLIReviewer(model, effort).WithLog(logger)
 }
 
 // runReview is newReviewCmd's RunE body, pulled out so tests can drive it
