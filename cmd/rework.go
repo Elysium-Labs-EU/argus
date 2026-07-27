@@ -259,10 +259,20 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	} else if found {
 		prior = &approval
 	}
+	// Same snapshot-before-dispatch reasoning as prior above: status.json is
+	// also removed by InvalidateStatus before this round's dispatch, so the
+	// title on file before this round only exists to read right here.
+	priorTitle := ""
+	if s, err := protocol.Load(protocol.StatusPath(opts.worktree)); err == nil {
+		priorTitle = s.Title
+	}
 
 	status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, out, logger, client, repoRoot, branch, task, findings, round, opts)
 	if derr != nil {
 		return reworkRoundOutcome{}, derr
+	}
+	if rerr := restoreTitleAcrossRound(out, opts.worktree, round, opts.maxRounds, priorTitle, &status); rerr != nil {
+		return reworkRoundOutcome{}, rerr
 	}
 	if status.Phase == protocol.PhaseBlocked {
 		_, _ = fmt.Fprintf(out, "\n%s round %d/%d: worker blocked: %s\n", ui.LabelError.Render("✗"), round, opts.maxRounds, status.BlockedReason)
@@ -371,6 +381,31 @@ func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Lo
 	}
 	logger.Action("rework", branch, string(status.Phase), status.BlockedReason)
 	return status, wt.RootPaneID, dispatchedAt, nil
+}
+
+// restoreTitleAcrossRound is the fix for the actual reported bug: dispatchReworkRound's
+// InvalidateStatus deletes status.json before every round's dispatch (same
+// reason runReworkRound snapshots the prior Approval into a local variable
+// before that happens), so by the time the round's own `argus worker report`
+// runs, runWorkerReport's cur.Title carry-forward has nothing to carry —
+// the file it reads is already gone. A rework round's report reasonably
+// describes only what that round fixed, never the whole PR, so it must never
+// be trusted to retitle it; priorTitle (captured in runReworkRound before
+// dispatchReworkRound ran) always wins over whatever the round's own status
+// reports. This has to persist to status.json, not just correct the
+// in-memory copy: ship reads the title back off disk in a separate process
+// invocation, later, with no access to this round's in-memory state.
+func restoreTitleAcrossRound(out io.Writer, worktree string, round, maxRounds int, priorTitle string, status *protocol.Status) error {
+	if priorTitle == "" || status.Title == priorTitle {
+		return nil
+	}
+	_, _ = fmt.Fprintf(out, "%s round %d/%d: keeping original title %q (round's own report described only this round's fix, not the whole PR)\n",
+		ui.LabelInfo.Render("i"), round, maxRounds, priorTitle)
+	status.Title = priorTitle
+	if err := protocol.Write(protocol.StatusPath(worktree), status); err != nil {
+		return fmt.Errorf("restoring original title after rework round %d: %w", round, err)
+	}
+	return nil
 }
 
 func renderReworkPlan(out io.Writer, opts *reworkOpts, branch string, findings []string) {

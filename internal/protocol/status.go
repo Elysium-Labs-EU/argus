@@ -94,7 +94,10 @@ type Status struct {
 	// Title is the worker's own conventional-commit-style summary of what it
 	// built (e.g. "feat: add retry backoff to forge client"), used as the PR/
 	// commit title in place of a generic branch+issue default. Empty is legal —
-	// ship then falls back to the fetched issue title.
+	// ship then falls back to the fetched issue title. runWorkerReport carries
+	// a prior non-empty Title forward when a later report's body doesn't set
+	// one, so a rework round describing only its own narrower fix can't wipe
+	// out the title an earlier report already established.
 	Title        string   `json:"title"`
 	FilesTouched []string `json:"files_touched"`
 	// Question is the worker's structured ask, set alongside BlockedReason when

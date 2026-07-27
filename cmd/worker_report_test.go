@@ -175,6 +175,52 @@ func TestRunWorkerReportPreservesBaseAcrossReports(t *testing.T) {
 	}
 }
 
+// TestRunWorkerReportPreservesTitleWhenReportOmitsIt pins the fix for a
+// rework round's report (which reasonably describes only that round's fix)
+// silently clobbering an earlier, more accurate title: a report with no
+// title of its own must not wipe out one already on file.
+func TestRunWorkerReportPreservesTitleWhenReportOmitsIt(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{Title: "feat: interactive shell-completion installer for argus completion"}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	body := &protocol.Status{Task: "t", Branch: "b"}
+	if err := runWorkerReport(wt, protocol.PhasePlanning, body, fixedNow(time.Now())); err != nil {
+		t.Fatalf("planning report rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Title != seed.Title {
+		t.Errorf("Title = %q after title-less report, want it preserved as %q", got.Title, seed.Title)
+	}
+}
+
+// TestRunWorkerReportOverwritesTitleWhenReportSetsIt pins the other half: a
+// report that does name a new title is a deliberate retitle and must win.
+func TestRunWorkerReportOverwritesTitleWhenReportSetsIt(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{Title: "feat: old title"}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	body := &protocol.Status{Task: "t", Branch: "b", Title: "feat: new title"}
+	if err := runWorkerReport(wt, protocol.PhasePlanning, body, fixedNow(time.Now())); err != nil {
+		t.Fatalf("planning report rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Title != "feat: new title" {
+		t.Errorf("Title = %q, want the report's new title %q", got.Title, "feat: new title")
+	}
+}
+
 // TestRunWorkerReportPreservesAnswerAcrossReports pins the carry-forward
 // behavior for the answer trace: a supervisor's `argus worker answer` writes
 // Question/Answer directly to status.json, outside runWorkerReport, so the

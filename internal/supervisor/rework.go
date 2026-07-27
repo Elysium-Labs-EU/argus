@@ -34,6 +34,10 @@ func ReworkBrief(task, branch string, findings []string, round, maxRounds int) s
 	b.WriteString("\nRe-run the repo's checks (make ci, or make test + make lint) once you believe\n")
 	b.WriteString("every finding is addressed, then set your status phase to \"awaiting_review\"\n")
 	b.WriteString("again. Use \"blocked\" if a finding needs a decision only the supervisor can make.\n\n")
+	b.WriteString("Leave \"title\" empty in this round's report unless you are deliberately\n")
+	b.WriteString("retitling the whole PR — a title describing only this round's fix (e.g. a\n")
+	b.WriteString("small test-isolation nit) would replace the title that already describes the\n")
+	b.WriteString("entire change. Empty carries the existing title forward unchanged.\n\n")
 	b.WriteString(protocol.WriterBrief)
 	return b.String()
 }
