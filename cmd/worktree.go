@@ -115,7 +115,10 @@ func runWorktreePrune(cmd *cobra.Command, a *worktreePruneArgs) error {
 	if err != nil {
 		return err
 	}
-	f := forge.New(host, forge.TokenForHost(host, a.credentialEnv), nil)
+	f, ferr := forge.New(host, forge.TokenForHost(host, a.credentialEnv), nil, forge.KindAuto)
+	if ferr != nil {
+		return ferr
+	}
 
 	logger, closeLog := openRunLog(cmd, "worktree_prune")
 	defer closeLog()

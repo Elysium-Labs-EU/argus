@@ -29,7 +29,10 @@ func fakeHTTP(t *testing.T, wantURLContains, wantAuth, reply string, code int) *
 func TestGiteaOpenPR(t *testing.T) {
 	hc := fakeHTTP(t, "https://codeberg.org/api/v1/repos/o/r/pulls", "token secret",
 		`{"number":7,"html_url":"https://codeberg.org/o/r/pulls/7","state":"open"}`, 201)
-	f := New("codeberg.org", "secret", hc)
+	f, err := New("codeberg.org", "secret", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	pr, err := f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r", Title: "t", Head: "b", Base: "main"})
 	if err != nil {
 		t.Fatalf("OpenPR: %v", err)
@@ -42,7 +45,10 @@ func TestGiteaOpenPR(t *testing.T) {
 func TestGitHubOpenPRUsesBearerAndGitHubAPI(t *testing.T) {
 	hc := fakeHTTP(t, "https://api.github.com/repos/o/r/pulls", "Bearer ght",
 		`{"number":3,"html_url":"https://github.com/o/r/pull/3","state":"open"}`, 201)
-	f := New("github.com", "ght", hc)
+	f, err := New("github.com", "ght", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	if f.Host() != "github.com" {
 		t.Errorf("host: got %q", f.Host())
 	}
@@ -54,7 +60,10 @@ func TestGitHubOpenPRUsesBearerAndGitHubAPI(t *testing.T) {
 
 func TestFetchIssue(t *testing.T) {
 	hc := fakeHTTP(t, "/repos/o/r/issues/42", "", `{"number":42,"title":"Bug","body":"it breaks"}`, 200)
-	f := New("codeberg.org", "", hc)
+	f, err := New("codeberg.org", "", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	iss, err := f.FetchIssue(context.Background(), "o", "r", 42)
 	if err != nil || iss.Title != "Bug" || iss.Body != "it breaks" {
 		t.Fatalf("FetchIssue: %+v err=%v", iss, err)
@@ -75,7 +84,10 @@ func TestGiteaFindPRFiltersClientSideByHeadRef(t *testing.T) {
 	hc := fakeHTTP(t, "https://codeberg.org/api/v1/repos/o/r/pulls?state=all", "token secret",
 		`[{"number":5,"html_url":"https://codeberg.org/o/r/pulls/5","state":"closed","head":{"ref":"other"}},
 		  {"number":7,"html_url":"https://codeberg.org/o/r/pulls/7","state":"closed","merged_at":"2026-01-01T00:00:00Z","head":{"ref":"feat-x"}}]`, 200)
-	f := New("codeberg.org", "secret", hc)
+	f, err := New("codeberg.org", "secret", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	pr, found, err := f.FindPR(context.Background(), "o", "r", "feat-x")
 	if err != nil {
 		t.Fatalf("FindPR: %v", err)
@@ -87,7 +99,10 @@ func TestGiteaFindPRFiltersClientSideByHeadRef(t *testing.T) {
 
 func TestGiteaFindPRNotFound(t *testing.T) {
 	hc := fakeHTTP(t, "", "", `[]`, 200)
-	f := New("codeberg.org", "secret", hc)
+	f, err := New("codeberg.org", "secret", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	_, found, err := f.FindPR(context.Background(), "o", "r", "feat-x")
 	if err != nil {
 		t.Fatalf("FindPR: %v", err)
@@ -100,7 +115,10 @@ func TestGiteaFindPRNotFound(t *testing.T) {
 func TestGitHubFindPRUsesHeadFilterAndTakesFirstResult(t *testing.T) {
 	hc := fakeHTTP(t, "head=o:feat-x", "Bearer ght",
 		`[{"number":3,"html_url":"https://github.com/o/r/pull/3","state":"open"}]`, 200)
-	f := New("github.com", "ght", hc)
+	f, err := New("github.com", "ght", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	pr, found, err := f.FindPR(context.Background(), "o", "r", "feat-x")
 	if err != nil || !found || pr.Number != 3 {
 		t.Fatalf("FindPR: %+v found=%v err=%v", pr, found, err)
@@ -112,10 +130,64 @@ func TestGitHubFindPRUsesHeadFilterAndTakesFirstResult(t *testing.T) {
 
 func TestOpenPRSurfacesAPIMessage(t *testing.T) {
 	hc := fakeHTTP(t, "", "", `{"message":"branch already exists"}`, 409)
-	f := New("codeberg.org", "t", hc)
-	_, err := f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r"})
+	f, err := New("codeberg.org", "t", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r"})
 	if err == nil || !strings.Contains(err.Error(), "branch already exists") {
 		t.Errorf("want surfaced API message, got %v", err)
+	}
+}
+
+// TestNewRefusesAnyHostOutsideTheAutoAllowlist pins the fix for issue #242's
+// rework round 1: a substring check on "gitlab" missed the common self-hosted
+// pattern of a host with no such substring at all (git.company.com,
+// scm.company.io, ...) that is just as likely to be a self-hosted GitLab as a
+// self-hosted Gitea/Forgejo. New's KindAuto path now refuses every host
+// outside its three-host allowlist, named-like-GitLab or not.
+func TestNewRefusesAnyHostOutsideTheAutoAllowlist(t *testing.T) {
+	for _, host := range []string{"gitlab.corp.example.com", "git.company.com", "scm.company.io", "gitea.example.com"} {
+		_, err := New(host, "secret", nil, KindAuto)
+		if err == nil {
+			t.Errorf("New(%q, KindAuto) = nil error, want a refusal (not on the allowlist)", host)
+			continue
+		}
+		if !strings.Contains(err.Error(), "--forge") {
+			t.Errorf("New(%q): error should point at --forge, got %q", host, err.Error())
+		}
+	}
+}
+
+func TestNewAllowlistedHostsAutoRoute(t *testing.T) {
+	for _, host := range []string{"github.com", "gitlab.com", "codeberg.org"} {
+		f, err := New(host, "secret", nil, KindAuto)
+		if err != nil {
+			t.Errorf("New(%q, KindAuto): %v", host, err)
+			continue
+		}
+		if f.Host() != host {
+			t.Errorf("New(%q).Host() = %q", host, f.Host())
+		}
+	}
+}
+
+func TestNewKindOverrideBypassesAllowlistRefusal(t *testing.T) {
+	for _, host := range []string{"gitlab.corp.example.com", "git.company.com"} {
+		f, err := New(host, "secret", nil, KindGitea)
+		if err != nil {
+			t.Errorf("New(%q, KindGitea): %v", host, err)
+			continue
+		}
+		if f.Host() != host {
+			t.Errorf("New(%q, KindGitea).Host() = %q", host, f.Host())
+		}
+	}
+}
+
+func TestNewUnknownKindErrors(t *testing.T) {
+	if _, err := New("codeberg.org", "secret", nil, Kind("bogus")); err == nil {
+		t.Error("want an error for an unrecognized forge kind")
 	}
 }
 

@@ -257,6 +257,63 @@ func TestShipCmdHelpDocumentsGitLab(t *testing.T) {
 	}
 }
 
+// TestRunShipDryRunRefusesAmbiguousSelfHostedGitLabHost pins the fix for
+// issue #242: a --dry-run against a host that looks like self-hosted GitLab
+// must fail with a clear error instead of printing a clean plan that a real
+// ship could never actually honor.
+func TestRunShipDryRunRefusesAmbiguousSelfHostedGitLabHost(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@gitlab.corp.example.com:acme/widget.git"})
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{worktree: wt, base: "main", issue: 21, force: true, dryRun: true})
+	if err == nil {
+		t.Fatal("want an error for a self-hosted-GitLab-shaped host with no --forge override")
+	}
+	if !strings.Contains(err.Error(), "--forge gitlab") {
+		t.Errorf("error should point at the --forge gitlab escape hatch, got %q", err.Error())
+	}
+	if strings.Contains(buf.String(), "ship plan (dry run)") {
+		t.Errorf("dry-run should not print a plan it can't back up: %q", buf.String())
+	}
+}
+
+// TestRunShipDryRunAcceptsExplicitForgeKindForSelfHostedGitLab pins the other
+// half of issue #242: --forge gitlab lets a self-hosted GitLab host through.
+func TestRunShipDryRunAcceptsExplicitForgeKindForSelfHostedGitLab(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@gitlab.corp.example.com:acme/widget.git"})
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{worktree: wt, base: "main", issue: 21, force: true, dryRun: true, forgeKind: "gitlab"})
+	if err != nil {
+		t.Fatalf("dry-run with --forge gitlab should not error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "ship plan (dry run)") {
+		t.Errorf("dry-run output missing plan header: %q", buf.String())
+	}
+}
+
+func TestRunShipRejectsUnknownForgeKind(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
+
+	cmd := newShipCmd()
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{worktree: wt, base: "main", force: true, dryRun: true, forgeKind: "bogus"})
+	if err == nil {
+		t.Fatal("want an error for an unrecognized --forge value")
+	}
+}
+
 func TestRunShipRequiresWorktree(t *testing.T) {
 	cmd := newShipCmd()
 	err := runShip(cmd, &shipArgs{})
@@ -414,11 +471,11 @@ func TestRunShipOmittedBaseUsesRepoConfig(t *testing.T) {
 }
 
 func TestRunShipFailsWithoutForgeToken(t *testing.T) {
-	// example.test isn't github/codeberg/gitlab, so TokenForHost falls back to
-	// EXAMPLE_TEST_TOKEN then FORGE_TOKEN; clear both so ship has no token to use.
-	t.Setenv("EXAMPLE_TEST_TOKEN", "")
-	t.Setenv("FORGE_TOKEN", "")
-	wt := gitRepo(t, []string{"remote", "add", "origin", "git@example.test:acme/widget.git"})
+	// codeberg.org is on New's auto-detect allowlist (see issue #242's rework:
+	// an arbitrary unlisted host now fails forge-shape validation before ever
+	// reaching the token check, which isn't what this test is pinning).
+	t.Setenv("CODEBERG_TOKEN", "")
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
 
 	cmd := newShipCmd()
 	var buf bytes.Buffer

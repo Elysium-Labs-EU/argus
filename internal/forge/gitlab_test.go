@@ -11,7 +11,10 @@ import (
 func TestGitLabOpenPR(t *testing.T) {
 	hc := fakeHTTP(t, "https://gitlab.com/api/v4/projects/o%2Fr/merge_requests", "",
 		`{"iid":9,"web_url":"https://gitlab.com/o/r/-/merge_requests/9","state":"opened"}`, 201)
-	f := New("gitlab.com", "secret", hc)
+	f, err := New("gitlab.com", "secret", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	if f.Host() != "gitlab.com" {
 		t.Errorf("host: got %q", f.Host())
 	}
@@ -34,7 +37,10 @@ func TestGitLabOpenPRUsesPrivateTokenHeader(t *testing.T) {
 		reply := `{"iid":1,"web_url":"https://gitlab.com/o/r/-/merge_requests/1","state":"opened"}`
 		return &http.Response{StatusCode: 201, Body: io.NopCloser(strings.NewReader(reply)), Header: make(http.Header)}, nil
 	})}
-	f := New("gitlab.com", "glpat-secret", hc)
+	f, err := New("gitlab.com", "glpat-secret", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	if _, err := f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r", Title: "t", Head: "b", Base: "main"}); err != nil {
 		t.Fatalf("OpenPR: %v", err)
 	}
@@ -45,7 +51,10 @@ func TestGitLabOpenPRUsesPrivateTokenHeader(t *testing.T) {
 
 func TestGitLabFetchIssue(t *testing.T) {
 	hc := fakeHTTP(t, "/projects/o%2Fr/issues/42", "", `{"iid":42,"title":"Bug","description":"it breaks"}`, 200)
-	f := New("gitlab.com", "", hc)
+	f, err := New("gitlab.com", "", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	iss, err := f.FetchIssue(context.Background(), "o", "r", 42)
 	if err != nil || iss.Title != "Bug" || iss.Body != "it breaks" || iss.Number != 42 {
 		t.Fatalf("FetchIssue: %+v err=%v", iss, err)
@@ -55,7 +64,10 @@ func TestGitLabFetchIssue(t *testing.T) {
 func TestGitLabFindPRUsesSourceBranchFilter(t *testing.T) {
 	hc := fakeHTTP(t, "source_branch=feat-x", "",
 		`[{"iid":9,"web_url":"https://gitlab.com/o/r/-/merge_requests/9","state":"merged","merged_at":"2026-01-01T00:00:00Z"}]`, 200)
-	f := New("gitlab.com", "secret", hc)
+	f, err := New("gitlab.com", "secret", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	pr, found, err := f.FindPR(context.Background(), "o", "r", "feat-x")
 	if err != nil || !found || pr.Number != 9 || !pr.Merged() {
 		t.Fatalf("FindPR: %+v found=%v err=%v", pr, found, err)
@@ -64,7 +76,10 @@ func TestGitLabFindPRUsesSourceBranchFilter(t *testing.T) {
 
 func TestGitLabFindPRNotFound(t *testing.T) {
 	hc := fakeHTTP(t, "", "", `[]`, 200)
-	f := New("gitlab.com", "secret", hc)
+	f, err := New("gitlab.com", "secret", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	_, found, err := f.FindPR(context.Background(), "o", "r", "feat-x")
 	if err != nil {
 		t.Fatalf("FindPR: %v", err)
@@ -74,10 +89,31 @@ func TestGitLabFindPRNotFound(t *testing.T) {
 	}
 }
 
+// TestNewKindGitLabBuildsSelfHostedBase pins the escape hatch for issue #242:
+// a self-hosted GitLab host passed with an explicit KindGitLab gets a GitLab
+// client whose API base is built from that host, not hardcoded to gitlab.com.
+func TestNewKindGitLabBuildsSelfHostedBase(t *testing.T) {
+	hc := fakeHTTP(t, "https://gitlab.corp.example.com/api/v4/projects/o%2Fr/merge_requests", "",
+		`{"iid":1,"web_url":"https://gitlab.corp.example.com/o/r/-/merge_requests/1","state":"opened"}`, 201)
+	f, err := New("gitlab.corp.example.com", "secret", hc, KindGitLab)
+	if err != nil {
+		t.Fatalf("New with KindGitLab: %v", err)
+	}
+	if f.Host() != "gitlab.corp.example.com" {
+		t.Errorf("Host() = %q", f.Host())
+	}
+	if _, err := f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r", Title: "t", Head: "b", Base: "main"}); err != nil {
+		t.Fatalf("OpenPR: %v", err)
+	}
+}
+
 func TestGitLabOpenPRSurfacesAPIMessage(t *testing.T) {
 	hc := fakeHTTP(t, "", "", `{"message":"409 Branch already exists"}`, 409)
-	f := New("gitlab.com", "t", hc)
-	_, err := f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r"})
+	f, err := New("gitlab.com", "t", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r"})
 	if err == nil || !strings.Contains(err.Error(), "409 Branch already exists") {
 		t.Errorf("want surfaced API message, got %v", err)
 	}

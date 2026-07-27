@@ -143,11 +143,20 @@ These are enforced in code, not conventions the worker is merely asked to follow
   nothing external recorded it was still outstanding. **After any `supervise` call
   that errors before spawn, note the retry yourself immediately** — argus will not
   remind you, and there is no log to recover it from later.
-- **GitLab support is gitlab.com only.** Self-hosted GitLab is silently treated as
-  Gitea/Forgejo (`internal/forge/forge.go:67-71`: "self-hosted GitLab needs an
-  explicit future flag, since hostname alone can't disambiguate a self-hosted
-  GitLab from Gitea/Forgejo"). A self-hosted GitLab remote will get the wrong API
-  calls with no error.
+- **Any self-hosted forge needs `--forge gitlab`/`--forge gitea`.** Auto-detection
+  only knows the three hosted forges by their exact host — `github.com`,
+  `gitlab.com`, `codeberg.org` — because a host name is not a reliable signal
+  for which REST shape a self-hosted instance actually speaks (a self-hosted
+  GitLab and a self-hosted Gitea/Forgejo are exactly as likely to be named
+  `git.company.com` as anything mentioning "gitlab"). Any other host now makes
+  `argus ship` refuse with a clear error instead of silently guessing — including
+  under `--dry-run`, which validates the forge shape with no token so a clean
+  dry-run actually proves the real ship's forge call will hit the right API.
+  Pass `argus ship ... --forge gitlab` or `--forge gitea` to say which the host
+  is and ship for real. `supervise`/`worktree prune`'s forge calls have no
+  `--forge` flag yet — they hard-fail on any non-hosted-forge host with no
+  override, including self-hosted Gitea/Forgejo instances that previously
+  worked with no flag at all.
 
 ## Preflight
 
@@ -381,9 +390,10 @@ If the verdict was request-changes, address it and get a fresh, persisted verdic
 
 `ship` refuses without an approving verdict from a prior gate or review — that is the
 point, so a request-changes actually blocks the PR. It opens the PR via the detected
-forge's API (GitHub/GitLab/Codeberg/Gitea — GitLab only for the exact host
-`gitlab.com`, see the known-gaps note above) and unstages argus's own control-plane
-files (`.claude/argus`, scoped permission files) so they never reach the PR.
+forge's API (GitHub/GitLab/Codeberg/Gitea — any self-hosted instance needs `--forge
+gitlab`/`--forge gitea`, see the known-gaps note above) and unstages argus's own
+control-plane files (`.claude/argus`, scoped permission files) so they never reach
+the PR.
 
 ```bash
 argus ship --worktree <path> --issue 42 --dry-run   # confirm first
@@ -523,5 +533,7 @@ binary (checksum-only, no signature verification yet).
 - Don't `--dry-run`-skip on a first real run against an unfamiliar repo.
 - Don't assume a supervise error before spawn is recorded anywhere — if it errors
   before a worker starts, note the retry yourself immediately.
-- Don't assume self-hosted GitLab works — only `gitlab.com` gets the GitLab client;
-  anything else is silently treated as Gitea/Forgejo.
+- Don't assume any self-hosted forge (GitLab, Gitea, or Forgejo) works without
+  `--forge gitlab`/`--forge gitea` — `argus ship` refuses any host outside
+  github.com/gitlab.com/codeberg.org without it, and `supervise`/`worktree prune`
+  have no override yet at all.
