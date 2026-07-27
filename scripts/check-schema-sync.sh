@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # schemas/config.schema.json hand-mirrors the key set internal/repoconfig/
-# yaml.go's parseYAML/listFieldFor switches actually recognize for
-# .argus/config.yml. A key added to one and not the other drifts silently —
-# the same class of unnoticed drift that broke eos/themis's pubkey copies
-# after a rotation touched only one of two hand-duplicated sources — so this
-# gate diffs the two key sets on every run instead of trusting them to stay
-# in sync by hand.
+# yaml.go's parseYAML/listFieldFor switches recognize. Two hand-duplicated
+# sources drift silently if only one is updated, so this gate diffs the
+# key sets on every run instead of trusting them to stay in sync by hand.
 set -euo pipefail
 
 TARGET="${1:-.}"
