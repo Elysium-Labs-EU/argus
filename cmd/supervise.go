@@ -121,6 +121,7 @@ each pane's directory in --panes mode).`,
 					return &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
 				}
 			}
+			applyRepoWorktreeDir(workers, rc.WorktreeDir)
 
 			resolvedBase := resolveSuperviseBase(cmd.Context(), cmd.Flags().Changed("base"), base, repoRoot, &rc)
 			policy := resolveGatePolicy(gateFlags{
@@ -316,6 +317,21 @@ func resolveReviewEffort(explicit bool, flagValue string, rc *repoconfig.Config)
 		return rc.ReviewEffort
 	}
 	return flagValue
+}
+
+// applyRepoWorktreeDir sets WorktreeDir on every worker that doesn't already
+// carry an explicit Worktree, so BuildPlan's default-worktree derivation
+// (internal/supervisor.WorktreePath, only consulted when Worktree is empty)
+// honors this repo's .argus/config.yml worktree_dir instead of always
+// falling back to .claude/worktrees. --attach's workers already set Worktree
+// explicitly (the existing directory being observed), so they pass through
+// unchanged.
+func applyRepoWorktreeDir(workers []supervisor.Worker, worktreeDir string) {
+	for i := range workers {
+		if workers[i].Worktree == "" {
+			workers[i].WorktreeDir = worktreeDir
+		}
+	}
 }
 
 // runSupervision builds the *supervisor.Config for an already-resolved worker

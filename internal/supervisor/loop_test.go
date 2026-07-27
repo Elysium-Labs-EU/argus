@@ -111,6 +111,63 @@ func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 	}
 }
 
+func TestWorktreePathDefaultsToDotClaudeWorktrees(t *testing.T) {
+	got := WorktreePath("/repo-a", "", "feat-x")
+	want := "/repo-a/.claude/worktrees/feat-x"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+func TestWorktreePathRelativeDirJoinsUnderRepoRoot(t *testing.T) {
+	// ".." is the escape hatch for a repo whose own convention is a sibling
+	// directory next to the checkout, named directly after the branch.
+	got := WorktreePath("/repo-a", "..", "feat-x")
+	want := "/feat-x"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+func TestWorktreePathRelativeDirWithSubdirJoinsUnderRepoRoot(t *testing.T) {
+	got := WorktreePath("/repo-a", "../worktrees", "feat-x")
+	want := "/worktrees/feat-x"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+func TestWorktreePathAbsoluteDirIgnoresRepoRoot(t *testing.T) {
+	got := WorktreePath("/repo-a", "/elsewhere/worktrees", "feat-x")
+	want := "/elsewhere/worktrees/feat-x"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+func TestBuildPlanHonorsWorktreeDir(t *testing.T) {
+	plans := BuildPlan([]Worker{
+		{Task: "eos#42", Branch: "feat-x", RepoRoot: "/repo-a", WorktreeDir: ".."},
+	}, nil, nil)
+	want := "/feat-x"
+	if got := plans[0].Worktree; got != want {
+		t.Errorf("worktree: got %q want %q", got, want)
+	}
+}
+
+func TestBuildPlanExplicitWorktreeWinsOverWorktreeDir(t *testing.T) {
+	// --attach's workers set Worktree explicitly (an already-existing
+	// directory being observed); a repo's configured WorktreeDir must not
+	// override that.
+	plans := BuildPlan([]Worker{
+		{Branch: "feat-x", RepoRoot: "/repo-a", Worktree: "/pinned/path", WorktreeDir: ".."},
+	}, nil, nil)
+	want := "/pinned/path"
+	if got := plans[0].Worktree; got != want {
+		t.Errorf("worktree: got %q want %q", got, want)
+	}
+}
+
 func TestBuildPlanLabelExplicitWins(t *testing.T) {
 	plans := BuildPlan([]Worker{
 		{Task: "eos#42", Branch: "feat-x", Label: "my-custom-label", RepoRoot: "/repo-a"},

@@ -45,13 +45,20 @@ import (
 // before commit, as the last backstop regardless of how the verdict was
 // reached.
 type Config struct {
-	BaseBranch         string
-	WorkerPlacement    string
-	BriefNote          string
-	ReviewNote         string
-	ShipLint           string
-	VerifyCommand      string
-	ReviewEffort       string
+	BaseBranch      string
+	WorkerPlacement string
+	BriefNote       string
+	ReviewNote      string
+	ShipLint        string
+	VerifyCommand   string
+	ReviewEffort    string
+	// WorktreeDir overrides where a spawned worker's worktree is created,
+	// same plain-string-means-unset shape as WorkerPlacement. Empty keeps
+	// argus's default (<repo>/.claude/worktrees/<branch>); a relative value
+	// (e.g. "..") is joined under the repo root — the escape hatch for a repo
+	// whose own convention is a sibling directory next to the checkout rather
+	// than a nested one; an absolute value is used as-is.
+	WorktreeDir        string
 	MaxDiffLines       *int
 	Allow              []string
 	ProofRequiredPaths []string
