@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/schemas/config.schema.json",
+  "title": "argus repo configuration",
+  "description": "Configuration schema for .argus/config.yml files. All keys are optional; a missing file is equivalent to a zero config. See internal/repoconfig/config.go.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "base_branch": {
+      "type": "string",
+      "description": "Base branch supervise/rebase/ship resolve worktrees and PRs against. Without this, argus falls back to its own default-branch detection.",
+      "examples": ["main", "develop"]
+    },
+    "worker_placement": {
+      "type": "string",
+      "description": "Where a spawned worker's pane lands. Empty/unset behaves the same as \"workspace\".",
+      "enum": ["workspace", "tab"],
+      "examples": ["workspace", "tab"]
+    },
+    "brief_note": {
+      "type": "string",
+      "description": "Free-text note appended verbatim to every generated worker brief.",
+      "examples": ["Add a focused test and keep make ci green."]
+    },
+    "review_note": {
+      "type": "string",
+      "description": "Free-text note appended verbatim to the reviewer's prompt.",
+      "examples": ["Pay extra attention to internal/supervisor changes."]
+    },
+    "ship_lint": {
+      "type": "string",
+      "description": "Controller-side gate command run before ship commits, in addition to argus's own built-in hook detection. Empty/unset runs no extra command.",
+      "examples": ["make lint", "task lint"]
+    },
+    "verify_command": {
+      "type": "string",
+      "description": "Shell command the gate runs in a worker's worktree before a verdict is recorded. Empty/unset skips this check.",
+      "examples": ["make test", "npm test"]
+    },
+    "review_effort": {
+      "type": "string",
+      "description": "Reasoning effort for --review. Without this, the review command's own default wins.",
+      "enum": ["low", "medium", "high", "xhigh", "max"]
+    },
+    "max_diff_lines": {
+      "type": ["integer", "null"],
+      "description": "Review gate: diffs larger than this (insertions+deletions) escalate. 0 disables the ceiling; unset/null falls back to the gate's own default.",
+      "minimum": 0,
+      "examples": [400, 0]
+    },
+    "allow": {
+      "type": "array",
+      "description": "Extra tool-permission patterns granted to workers, on top of argus's toolchain-neutral defaults.",
+      "items": { "type": "string" },
+      "examples": [["Bash(make *)"]]
+    },
+    "proof_required_paths": {
+      "type": "array",
+      "description": "Path globs whose changes require real_world_proof in a worker's report before the review gate accepts it.",
+      "items": { "type": "string" }
+    },
+    "always_review_paths": {
+      "type": "array",
+      "description": "Path globs that always escalate to human/reviewer attention regardless of diff size.",
+      "items": { "type": "string" }
+    }
+  }
+}

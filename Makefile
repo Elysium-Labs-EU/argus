@@ -1,4 +1,4 @@
-.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus eventlog-gate check-pubkey-sync fix setup ci clean release pre-release changelog changelog-preview
+.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus eventlog-gate check-pubkey-sync check-schema-sync fix setup ci clean release pre-release changelog changelog-preview
 
 # git exports these into every hook's environment so the hook's own git
 # invocations resolve to the repo/worktree that triggered it. If a recipe
@@ -58,6 +58,9 @@ eventlog-gate: ## Fail if any _test.go file calls eventlog.Open directly instead
 check-pubkey-sync: ## Fail if the release-signing pubkey differs between cmd/update.go and scripts/install.sh
 	bash scripts/check-pubkey-sync.sh .
 
+check-schema-sync: ## Fail if schemas/config.schema.json's keys drift from internal/repoconfig/yaml.go's
+	bash scripts/check-schema-sync.sh .
+
 crap: test-coverage-check ## go-crap change-risk gate on changed functions only (vs origin/main)
 	@command -v go-crap >/dev/null 2>&1 || { echo "go-crap not found. Run: make setup"; exit 1; }
 	bash scripts/go-crap-gate.sh .
@@ -80,7 +83,7 @@ setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same
 	@command -v ast-grep >/dev/null 2>&1 || echo "ast-grep not found — install with: brew install ast-grep (or see https://ast-grep.github.io/guide/quick-start.html)"
 	@echo "Setup complete."
 
-ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync ## Run all CI checks locally
+ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync check-schema-sync ## Run all CI checks locally
 	@echo "All CI checks passed!"
 
 release: ## Update changelog, tag and push a release (requires TAG=v1.2.0)
