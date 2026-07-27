@@ -53,6 +53,78 @@ func TestVerifyTestsJoinsCmdAndTarget(t *testing.T) {
 	}
 }
 
+// TestVerifyTestsMakeTargetIgnoresStrayTrailingTokens is the regression for
+// the false-negative in the issue where a worker's self-reported Cmd carried
+// a stray trailing word after the real make target (e.g. "make lint
+// golangci-lint", the worker naming the tool it ran) — make interprets that
+// extra token as a second, nonexistent target and fails with "No rule to
+// make target", even though the real target on its own is clean.
+func TestVerifyTestsMakeTargetIgnoresStrayTrailingTokens(t *testing.T) {
+	wt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt, "Makefile"), []byte("check:\n\t@true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []protocol.TestRun{
+		{Cmd: "make check golangci-lint", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — the stray trailing token must not be replayed as a second make target", mismatches)
+	}
+}
+
+// TestVerifyTestsMakeTargetDropsAppendedTarget covers the Target-field shape
+// of the same failure (e.g. worker reports {Cmd: "make nilcheck", Target:
+// "./..."}): joining would replay "make nilcheck ./...", which make also
+// rejects as an unknown second target, even though "make nilcheck" alone is
+// clean.
+func TestVerifyTestsMakeTargetDropsAppendedTarget(t *testing.T) {
+	wt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt, "Makefile"), []byte("nilcheck:\n\t@true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []protocol.TestRun{
+		{Cmd: "make nilcheck", Target: "./...", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — Target must not be appended to a make invocation", mismatches)
+	}
+}
+
+// TestVerifyTestsSkipsRedundantTargetAlreadyInCmd is the regression for the
+// doubled-path failure: a worker sometimes folds the path into Cmd directly
+// and also repeats it in Target, and a naive join hands the tool the same
+// path twice. shellArgCount fails unless it receives exactly one argument, so
+// this only passes if the redundant Target is not appended a second time.
+func TestVerifyTestsSkipsRedundantTargetAlreadyInCmd(t *testing.T) {
+	wt := t.TempDir()
+	tests := []protocol.TestRun{
+		{Cmd: `f() { [ "$#" -eq 1 ]; }; f marker.txt`, Target: "marker.txt", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — Target already present in Cmd must not be appended again", mismatches)
+	}
+}
+
+// TestVerifyTestsSplitsCommaSeparatedTargetIntoOneRunEach is the regression
+// for the multiple-positional-args failure: a worker's Target sometimes
+// lists several comma-separated files mirroring the brief's file list, which
+// a naive join hands to a tool as one command line with several positional
+// args even though the tool (like the real one this mirrors) only accepts a
+// single path. The check function here fails on anything but exactly one arg.
+func TestVerifyTestsSplitsCommaSeparatedTargetIntoOneRunEach(t *testing.T) {
+	wt := t.TempDir()
+	tests := []protocol.TestRun{
+		{Cmd: `f() { [ "$#" -eq 1 ] || exit 1; }; f`, Target: "a.txt, b.txt", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — each comma-separated target must be replayed as its own single-arg run", mismatches)
+	}
+}
+
 func TestVerifyTestsSkipsFailAndSkippedClaims(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
