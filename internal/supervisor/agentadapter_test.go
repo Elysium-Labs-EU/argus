@@ -71,11 +71,14 @@ func TestClaudeCodeAdapterPlanEvidenceDelegates(t *testing.T) {
 	home := t.TempDir()
 	wt := t.TempDir()
 
-	ok, err := (claudeCodeAdapter{}).PlanEvidence(home, wt)
+	ok, transcripts, err := (claudeCodeAdapter{}).PlanEvidence(home, wt)
 	if err != nil {
 		t.Fatalf("PlanEvidence: %v", err)
 	}
 	if ok {
 		t.Error("PlanEvidence should be false when no transcript exists")
+	}
+	if transcripts != 0 {
+		t.Errorf("transcripts checked = %d, want 0 when no transcript directory exists", transcripts)
 	}
 }

@@ -32,8 +32,9 @@ type AgentAdapter interface {
 
 	// PlanEvidence reports whether any session transcript for worktree
 	// contains a real todo-list tool call — the unfakeable backstop for the
-	// planning phase's self-reported plan (see HasPlanEvidence).
-	PlanEvidence(home, worktree string) (bool, error)
+	// planning phase's self-reported plan (see HasPlanEvidence) — plus how
+	// many transcripts were scanned to reach that verdict.
+	PlanEvidence(home, worktree string) (found bool, transcriptsChecked int, err error)
 }
 
 // defaultAgent is the single AgentAdapter argus uses. Not yet exposed via
@@ -57,7 +58,7 @@ func (claudeCodeAdapter) RenderSettings(worktree string, repoAllow, extraAllow [
 	return filepath.Join(".claude", "settings.local.json"), append(data, '\n'), nil
 }
 
-func (claudeCodeAdapter) PlanEvidence(home, worktree string) (bool, error) {
+func (claudeCodeAdapter) PlanEvidence(home, worktree string) (bool, int, error) {
 	return HasPlanEvidence(home, worktree)
 }
 

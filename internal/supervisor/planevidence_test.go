@@ -1,11 +1,15 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
@@ -33,12 +37,15 @@ func TestHasPlanEvidenceFindsTodoWriteToolCall(t *testing.T) {
 	writePlanTranscript(t, home, "session-1",
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{}}]}}`+"\n")
 
-	ok, err := HasPlanEvidence(home, planEvidenceTestWorktree)
+	ok, transcripts, err := HasPlanEvidence(home, planEvidenceTestWorktree)
 	if err != nil {
 		t.Fatalf("HasPlanEvidence: %v", err)
 	}
 	if !ok {
 		t.Error("HasPlanEvidence = false, want true for a transcript with a real TodoWrite tool call")
+	}
+	if transcripts != 1 {
+		t.Errorf("transcripts checked = %d, want 1", transcripts)
 	}
 }
 
@@ -47,12 +54,15 @@ func TestHasPlanEvidenceFindsTaskCreateToolCall(t *testing.T) {
 	writePlanTranscript(t, home, "session-1",
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskCreate","input":{}}]}}`+"\n")
 
-	ok, err := HasPlanEvidence(home, planEvidenceTestWorktree)
+	ok, transcripts, err := HasPlanEvidence(home, planEvidenceTestWorktree)
 	if err != nil {
 		t.Fatalf("HasPlanEvidence: %v", err)
 	}
 	if !ok {
 		t.Error("HasPlanEvidence = false, want true for a transcript with a real TaskCreate tool call")
+	}
+	if transcripts != 1 {
+		t.Errorf("transcripts checked = %d, want 1", transcripts)
 	}
 }
 
@@ -63,23 +73,29 @@ func TestHasPlanEvidenceFalseWhenNoMatchingToolCall(t *testing.T) {
 	writePlanTranscript(t, home, "session-1",
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}`+"\n")
 
-	ok, err := HasPlanEvidence(home, planEvidenceTestWorktree)
+	ok, transcripts, err := HasPlanEvidence(home, planEvidenceTestWorktree)
 	if err != nil {
 		t.Fatalf("HasPlanEvidence: %v", err)
 	}
 	if ok {
 		t.Error("HasPlanEvidence = true, want false when no transcript line mentions TodoWrite/TaskCreate")
 	}
+	if transcripts != 1 {
+		t.Errorf("transcripts checked = %d, want 1", transcripts)
+	}
 }
 
 func TestHasPlanEvidenceFalseWhenNoTranscriptDirectory(t *testing.T) {
 	home := t.TempDir()
-	ok, err := HasPlanEvidence(home, "/repo/.claude/worktrees/never-ran")
+	ok, transcripts, err := HasPlanEvidence(home, "/repo/.claude/worktrees/never-ran")
 	if err != nil {
 		t.Fatalf("HasPlanEvidence: %v", err)
 	}
 	if ok {
 		t.Error("HasPlanEvidence = true, want false when the project's transcript directory doesn't exist")
+	}
+	if transcripts != 0 {
+		t.Errorf("transcripts checked = %d, want 0 when the transcript directory doesn't exist", transcripts)
 	}
 }
 
@@ -93,12 +109,15 @@ func TestHasPlanEvidenceChecksEveryTranscriptForTheWorktree(t *testing.T) {
 	writePlanTranscript(t, home, "session-2",
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{}}]}}`+"\n")
 
-	ok, err := HasPlanEvidence(home, planEvidenceTestWorktree)
+	ok, transcripts, err := HasPlanEvidence(home, planEvidenceTestWorktree)
 	if err != nil {
 		t.Fatalf("HasPlanEvidence: %v", err)
 	}
 	if !ok {
 		t.Error("HasPlanEvidence = false, want true when any transcript for the worktree has the evidence")
+	}
+	if transcripts != 2 {
+		t.Errorf("transcripts checked = %d, want 2", transcripts)
 	}
 }
 
@@ -228,6 +247,52 @@ func TestReconcileChecksPlanEvidenceForDefaultLauncher(t *testing.T) {
 	}
 	if states[0].hasPlanEvidence {
 		t.Error("hasPlanEvidence should be false — the transcript has no TodoWrite/TaskCreate call")
+	}
+}
+
+// TestReconcileLogsTranscriptCountOnMissingPlanEvidence guards the diagnostic
+// this issue exists for: a "no evidence" verdict alone can't tell a
+// zero-transcript miss (wrong home, worker never started a session) apart
+// from a real grep miss against a transcript that did exist. The run log
+// must carry the transcript count so a recurrence of the soft gate flag can
+// be pattern-matched from the log alone.
+func TestReconcileLogsTranscriptCountOnMissingPlanEvidence(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", projectPathReplacer.Replace(wt))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	noEvidence := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "session-1.jsonl"), []byte(noEvidence), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	var buf bytes.Buffer
+	states := []*workerState{{hasFile: true, plan: &WorkerPlan{Worker: Worker{Task: "t", Worktree: wt}}}}
+	cfg := &Config{Base: "HEAD", Home: home, Log: eventlog.New(&buf, "supervise", "run1", nil)}
+	reconcile(context.Background(), cfg, states)
+
+	var evt struct {
+		Fields  map[string]any `json:"fields"`
+		Action  string         `json:"action"`
+		Outcome string         `json:"outcome"`
+	}
+	found := false
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			t.Fatalf("unmarshal event line %q: %v", line, err)
+		}
+		if evt.Action == "plan_evidence" && evt.Outcome == "not-found" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected a plan_evidence/not-found event, got log:\n%s", buf.String())
+	}
+	if got := evt.Fields["transcripts_checked"]; got != float64(1) {
+		t.Errorf("transcripts_checked = %v, want 1", got)
 	}
 }
 
