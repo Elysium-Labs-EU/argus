@@ -71,8 +71,16 @@ type JudgeResult struct {
 // time JudgeOne runs. Passing it explicitly is what lets gateVerdict's
 // under-report check subtract only the delta since that prior verdict instead
 // of the full cumulative diff since base.
-func JudgeOne(ctx context.Context, cfg *Config, plan *WorkerPlan, status *protocol.Status, paneID string, dispatchedAt time.Time, prior *protocol.Approval) JudgeResult {
-	st := &workerState{plan: plan, paneID: paneID, started: dispatchedAt, status: *status, hasFile: true}
+//
+// priorContentHash is a digest of the worktree's touched-file bytes as they
+// stood before this round's dispatch (see cmd's preRoundContentHash) — the very
+// state the prior verdict already found wanting. gateVerdict compares this round's
+// post-dispatch content hash against it to catch a rework round that reaches a
+// terminal phase having changed literally nothing. It is not read from prior
+// because a non-approved verdict (the only kind rework acts on) never persisted a
+// ContentHash; "" disables the check for that round.
+func JudgeOne(ctx context.Context, cfg *Config, plan *WorkerPlan, status *protocol.Status, paneID string, dispatchedAt time.Time, prior *protocol.Approval, priorContentHash string) JudgeResult {
+	st := &workerState{plan: plan, paneID: paneID, started: dispatchedAt, status: *status, hasFile: true, priorContentHash: priorContentHash}
 	if prior != nil {
 		st.priorMeasured = prior.MeasuredDiff
 		st.priorMeasuredOK = true

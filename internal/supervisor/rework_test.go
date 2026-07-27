@@ -80,7 +80,7 @@ func TestJudgeOneAutoApprovesCleanWorkAndPersists(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil)
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "")
 	if !result.Gate.AutoApprove {
 		t.Fatalf("want the gate to auto-approve a clean, well-tested change, got reasons %v", result.Gate.Reasons)
 	}
@@ -111,7 +111,7 @@ func TestJudgeOneEscalatesToReviewerAndPersistsApprove(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil)
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "")
 	if result.Gate.AutoApprove {
 		t.Fatal("want the gate to escalate on a failing test")
 	}
@@ -141,7 +141,7 @@ func TestJudgeOneEscalatesToReviewerAndPersistsRequestChanges(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil)
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "")
 	if result.Review == nil || result.Review.Decision != "request-changes" {
 		t.Fatalf("want the reviewer's request-changes verdict, got %+v", result.Review)
 	}
@@ -157,6 +157,80 @@ func TestJudgeOneEscalatesToReviewerAndPersistsRequestChanges(t *testing.T) {
 	}
 }
 
+// TestJudgeOneEscalatesReworkThatChangedNothing is the core issue-287 guard: a
+// rework round that reaches a terminal phase with content byte-identical to the
+// state its prior verdict already rejected must never auto-approve, and the
+// reason must be unwaivable. JudgeOne never dispatches a real worker in-test, so
+// the worktree it measures is exactly the pre-round state — passing that state's
+// own hash as priorContentHash reproduces "the round changed nothing."
+func TestJudgeOneEscalatesReworkThatChangedNothing(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	home := reworkTestHome(t, wt)
+	policy := DefaultReviewPolicy()
+	cfg := &Config{Now: time.Now, Base: "HEAD", Home: home, Policy: &policy}
+	plan := &WorkerPlan{Worker: Worker{Task: "rework-noop", Branch: "b", Worktree: wt}}
+	status := protocol.Status{
+		Phase: protocol.PhaseAwaitingReview,
+		Tests: []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}},
+	}
+
+	_, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	preRound, err := ContentHash(wt, files)
+	if err != nil {
+		t.Fatalf("ContentHash: %v", err)
+	}
+
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, preRound)
+	if result.Gate.AutoApprove {
+		t.Fatal("want the gate to escalate a rework round that changed nothing since its rejected state")
+	}
+	if len(result.Gate.HardReasons) == 0 {
+		t.Fatalf("want an unwaivable hard reason for a zero-delta rework round, got reasons %v", result.Gate.Reasons)
+	}
+	var found bool
+	for _, r := range result.Gate.HardReasons {
+		if strings.Contains(r, "changed nothing") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want the zero-delta reason among hard reasons, got %v", result.Gate.HardReasons)
+	}
+	approval, ok, err := protocol.LoadApproval(wt)
+	if err != nil || !ok {
+		t.Fatalf("LoadApproval: found=%v err=%v", ok, err)
+	}
+	if approval.Approved {
+		t.Errorf("want a persisted not-approved verdict for a zero-delta rework round, got %+v", approval)
+	}
+}
+
+// TestJudgeOneAllowsReworkThatChangedContent is the false-positive guard for the
+// check above: a rework round whose pre-round hash differs from its post-round
+// content (any real edit) must clear the zero-delta gate — only a genuine no-op
+// escalates, not every rework round.
+func TestJudgeOneAllowsReworkThatChangedContent(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	home := reworkTestHome(t, wt)
+	policy := DefaultReviewPolicy()
+	cfg := &Config{Now: time.Now, Base: "HEAD", Home: home, Policy: &policy}
+	plan := &WorkerPlan{Worker: Worker{Task: "rework-real", Branch: "b", Worktree: wt}}
+	status := protocol.Status{
+		Phase: protocol.PhaseAwaitingReview,
+		Tests: []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}},
+	}
+
+	// A pre-round hash no post-round measurement can match: the round
+	// demonstrably changed the worktree since this state.
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "0000000000000000000000000000000000000000000000000000000000000000")
+	if !result.Gate.AutoApprove {
+		t.Fatalf("want a rework round with changed content to auto-approve, got reasons %v", result.Gate.Reasons)
+	}
+}
+
 func TestJudgeOneWithNoReviewerLeavesReviewNil(t *testing.T) {
 	wt := gitWorktreeWithDiff(t)
 	home := reworkTestHome(t, wt)
@@ -168,7 +242,7 @@ func TestJudgeOneWithNoReviewerLeavesReviewNil(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil)
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "")
 	if result.Gate.AutoApprove {
 		t.Fatal("want the gate to escalate on a failing test")
 	}

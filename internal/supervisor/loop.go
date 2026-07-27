@@ -564,6 +564,16 @@ func measureReconcileDiffs(ctx context.Context, cfg *Config, states []*workerSta
 		st.measured = ds
 		st.measuredFiles = files
 		st.measuredOK = true
+		// Only a rework round supplies a pre-round hash to compare against, so
+		// hashing every worker's touched files in the main loop would be pure
+		// wasted I/O — compute the post-round hash only where gateVerdict's
+		// zero-delta check can actually fire. A hash error leaves it "", which
+		// disables that one check rather than blocking the round.
+		if st.priorContentHash != "" {
+			if h, herr := ContentHash(st.plan.Worktree, files); herr == nil {
+				st.contentHash = h
+			}
+		}
 		// A caller (JudgeOne) may have already populated priorMeasured from a
 		// verdict it snapshotted before invalidating the worktree's own
 		// verdict.json for this round — trust that over a disk read, since the
@@ -868,10 +878,19 @@ type workerState struct {
 	// herdrErr dedupes a repeated herdr pane-list failure the same way
 	// pollStatus's lastErr dedupes a repeated status-file read failure.
 	herdrErr string
-	plan     *WorkerPlan
-	review   *ReviewResult
-	status   protocol.Status
-	measured protocol.DiffStat
+	// contentHash / priorContentHash carry a rework round's own delta test:
+	// contentHash digests the round's post-dispatch touched-file bytes (set by
+	// measureReconcileDiffs only when priorContentHash is populated, since
+	// nothing else consumes it), priorContentHash the same digest of the
+	// pre-round state the prior verdict already rejected. Equal terminal hashes
+	// mean the round addressed nothing — see gateVerdict. Both empty outside a
+	// rework round (JudgeOne is the only populator), which disables the check.
+	contentHash      string
+	priorContentHash string
+	plan             *WorkerPlan
+	review           *ReviewResult
+	status           protocol.Status
+	measured         protocol.DiffStat
 	// priorMeasured is the worktree's last recorded verdict measurement, if
 	// any (see the package-level priorMeasured func); gateVerdict subtracts
 	// it from measured so a later round is judged on its own delta.

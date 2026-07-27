@@ -197,6 +197,20 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 			v.Reasons = append(v.Reasons, reason)
 			v.HardReasons = append(v.HardReasons, reason)
 		}
+		// A rework round only exists because a prior verdict was NOT approved, so
+		// something is expected to change. Reaching a terminal phase byte-identical
+		// to the state already found wanting (same touched files, same content)
+		// means it addressed none of its findings — exactly the self-report/reality
+		// mismatch the zero-files check catches for a fresh dispatch, and just as
+		// unwaivable. priorContentHash is set only on a rework round (see JudgeOne),
+		// so this never fires in the main supervise loop where files legitimately
+		// stay unchanged between polls of a single worker.
+		if terminal && st.priorContentHash != "" && st.contentHash == st.priorContentHash {
+			v.AutoApprove = false
+			reason := fmt.Sprintf("rework round reports phase %q but changed nothing since the state already found wanting — findings not addressed", eff.Phase)
+			v.Reasons = append(v.Reasons, reason)
+			v.HardReasons = append(v.HardReasons, reason)
+		}
 	}
 
 	// The unfakeable backstop for the planning phase's self-reported Plan
