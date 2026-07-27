@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -647,5 +648,97 @@ func TestReworkOptsDispatchTargetCopiesFields(t *testing.T) {
 	}
 	if target.credentialEnv["github.com"] != "MY_TOKEN" {
 		t.Errorf("dispatchTarget() dropped credentialEnv: %+v", target)
+	}
+}
+
+// TestReworkFindingsFlagIsVerbatimAndRepeatable is the regression for the
+// reported bug: --findings used to be CSV-parsed, so a single finding's own
+// commas split it into fragments and an embedded double quote failed the parse
+// outright. As a repeatable non-CSV flag each value must reach the plan whole.
+func TestReworkFindingsFlagIsVerbatimAndRepeatable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	const withCommas = `deletes status.json entirely before the round's worker report runs, breaking the carry-forward`
+	const withQuote = `the snippet t.Setenv("HOME", ...) reproduces it`
+
+	cmd := newReworkCmd()
+	var buf bytes.Buffer
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{"--worktree", dir, "--dry-run", "--findings", withCommas, "--findings", withQuote})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("rework --dry-run: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "    - "+withCommas+"\n") {
+		t.Errorf("comma-containing finding was split or altered:\n%s", out)
+	}
+	if !strings.Contains(out, "    - "+withQuote+"\n") {
+		t.Errorf("quote-containing finding was dropped or altered:\n%s", out)
+	}
+}
+
+// TestReworkFindingsFileAppends covers --findings-file: its lines are appended
+// after --findings, each taken verbatim (newline-split only, never CSV), so a
+// line's own commas stay intact.
+func TestReworkFindingsFileAppends(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	file := filepath.Join(t.TempDir(), "findings.txt")
+	if err := os.WriteFile(file, []byte("root cause, spanning a clause\n\nsecond finding\n"), 0o644); err != nil {
+		t.Fatalf("writing findings file: %v", err)
+	}
+
+	cmd := newReworkCmd()
+	var buf bytes.Buffer
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{"--worktree", dir, "--dry-run", "--findings", "flag finding", "--findings-file", file})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("rework --dry-run: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"    - flag finding\n", "    - root cause, spanning a clause\n", "    - second finding\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing finding %q in plan:\n%s", want, out)
+		}
+	}
+	// A blank line in the file must not become an empty finding.
+	if strings.Contains(out, "    - \n") {
+		t.Errorf("blank line leaked as an empty finding:\n%s", out)
+	}
+}
+
+func TestAppendFindingsFile(t *testing.T) {
+	base := []string{"flag one"}
+
+	got, err := appendFindingsFile(base, "")
+	if err != nil || len(got) != 1 || got[0] != "flag one" {
+		t.Errorf("empty path must be a no-op, got %v err=%v", got, err)
+	}
+
+	dir := t.TempDir()
+	full := filepath.Join(dir, "ok.txt")
+	if werr := os.WriteFile(full, []byte("a, with comma\r\nb\n"), 0o644); werr != nil {
+		t.Fatalf("writing file: %v", werr)
+	}
+	got, err = appendFindingsFile(base, full)
+	if err != nil {
+		t.Fatalf("appendFindingsFile: %v", err)
+	}
+	if want := []string{"flag one", "a, with comma", "b"}; !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	empty := filepath.Join(dir, "empty.txt")
+	if werr := os.WriteFile(empty, []byte("\n\n"), 0o644); werr != nil {
+		t.Fatalf("writing empty file: %v", werr)
+	}
+	if _, err := appendFindingsFile(base, empty); err == nil {
+		t.Error("want an error for a file with no non-empty lines")
+	}
+
+	if _, err := appendFindingsFile(base, filepath.Join(dir, "missing.txt")); err == nil {
+		t.Error("want an error for a missing file")
 	}
 }
