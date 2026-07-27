@@ -552,29 +552,9 @@ func runUpdate(ctx context.Context, out io.Writer, exePath, currentVersion strin
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	binTmp := filepath.Join(tmpDir, "argus")
-	err = ui.WithSpinner(fmt.Sprintf("Downloading %s...", latestVer), func() error {
-		return downloadFile(ctx, asset.DownloadURL, binTmp)
-	})
+	binTmp, err := downloadAndVerifyUpdate(ctx, out, rel, asset, checksums, tmpDir)
 	if err != nil {
-		return fmt.Errorf("downloading update: %w", err)
-	}
-
-	checksumsTmp := filepath.Join(tmpDir, "sha256sums.txt")
-	if dlErr := downloadFile(ctx, checksums.DownloadURL, checksumsTmp); dlErr != nil {
-		return fmt.Errorf("downloading checksums: %w", dlErr)
-	}
-	checksumsData, err := os.ReadFile(checksumsTmp) //nolint:gosec // fixed name in an argus-owned temp dir
-	if err != nil {
-		return fmt.Errorf("reading checksums: %w", err)
-	}
-	if verifyErr := verifyChecksum(binTmp, string(checksumsData), asset.Name); verifyErr != nil {
-		return &ui.UserError{Err: verifyErr}
-	}
-	_, _ = fmt.Fprintf(out, "%s checksum verified\n", ui.LabelSuccess.Render("✓"))
-
-	if sigErr := verifyReleaseSignature(ctx, out, rel, checksumsData, tmpDir); sigErr != nil {
-		return sigErr
+		return err
 	}
 
 	backupPath := exePath + ".backup"
@@ -590,6 +570,38 @@ func runUpdate(ctx context.Context, out io.Writer, exePath, currentVersion strin
 
 	_, _ = fmt.Fprintf(out, "%s updated %s -> %s\n", ui.LabelSuccess.Render("✓"), currentVersion, latestVer)
 	return nil
+}
+
+// downloadAndVerifyUpdate downloads the release binary and its checksums
+// file, verifies the checksum, and verifies the release signature — split
+// out so this one download-and-verify sequence doesn't inflate runUpdate's
+// own branching.
+func downloadAndVerifyUpdate(ctx context.Context, out io.Writer, rel Release, asset, checksums Asset, tmpDir string) (string, error) {
+	binTmp := filepath.Join(tmpDir, "argus")
+	err := ui.WithSpinner(fmt.Sprintf("Downloading %s...", rel.TagName), func() error {
+		return downloadFile(ctx, asset.DownloadURL, binTmp)
+	})
+	if err != nil {
+		return "", fmt.Errorf("downloading update: %w", err)
+	}
+
+	checksumsTmp := filepath.Join(tmpDir, "sha256sums.txt")
+	if dlErr := downloadFile(ctx, checksums.DownloadURL, checksumsTmp); dlErr != nil {
+		return "", fmt.Errorf("downloading checksums: %w", dlErr)
+	}
+	checksumsData, err := os.ReadFile(checksumsTmp) //nolint:gosec // fixed name in an argus-owned temp dir
+	if err != nil {
+		return "", fmt.Errorf("reading checksums: %w", err)
+	}
+	if verifyErr := verifyChecksum(binTmp, string(checksumsData), asset.Name); verifyErr != nil {
+		return "", &ui.UserError{Err: verifyErr}
+	}
+	_, _ = fmt.Fprintf(out, "%s checksum verified\n", ui.LabelSuccess.Render("✓"))
+
+	if sigErr := verifyReleaseSignature(ctx, out, rel, checksumsData, tmpDir); sigErr != nil {
+		return "", sigErr
+	}
+	return binTmp, nil
 }
 
 func newUpdateCmd() *cobra.Command {
