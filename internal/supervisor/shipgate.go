@@ -1,10 +1,10 @@
 package supervisor
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,17 +99,46 @@ func runGateCommand(ctx context.Context, worktree, name string, args ...string) 
 
 	cmd := exec.CommandContext(runCtx, name, args...) //nolint:gosec // name/args are argus-selected (hookManagers) or an operator's own repo-config command, not attacker input
 	cmd.Dir = worktree
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	err := cmd.Run()
+	out, err := runCombinedOutput(cmd)
 	if err == nil {
 		return nil
 	}
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("exceeded %s and was killed", shipGateTimeout)
 	}
-	return fmt.Errorf("%w\n%s", err, tail(buf.Bytes()))
+	return fmt.Errorf("%w\n%s", err, tail(out))
+}
+
+// runCombinedOutput runs cmd with stdout and stderr merged onto one real
+// regular file, rather than a bytes.Buffer: os/exec already dedupes
+// Stdout==Stderr onto a single dup'd fd either way (documented behavior),
+// but that fd is an anonymous pipe when the Writer isn't an *os.File. A pipe
+// and a regular file are indistinguishable to anything checking isatty(),
+// but not to a child that fstats its fd and branches on the file type
+// (S_IFIFO vs S_IFREG) — closer to what a real shell `cmd >file 2>&1`
+// hands the child than a Go-side pipe is.
+func runCombinedOutput(cmd *exec.Cmd) ([]byte, error) {
+	f, err := os.CreateTemp("", "argus-gate-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating combined-output tempfile: %w", err)
+	}
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}()
+
+	cmd.Stdout = f
+	cmd.Stderr = f
+	runErr := cmd.Run()
+
+	if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
+		return nil, fmt.Errorf("seeking combined-output tempfile: %w", seekErr)
+	}
+	out, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("reading combined-output tempfile: %w", err)
+	}
+	return out, runErr
 }
 
 // firstExisting returns the first of names present in dir, or "" if none are.

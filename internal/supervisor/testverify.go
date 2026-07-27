@@ -1,7 +1,6 @@
 package supervisor
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -132,13 +131,10 @@ func runVerify(ctx context.Context, worktree, cmdStr string, timeout time.Durati
 
 	cmd := exec.CommandContext(runCtx, "sh", "-c", cmdStr) //nolint:gosec // re-running the worker's own reported test command, in its own worktree
 	cmd.Dir = worktree
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	err := cmd.Run()
+	out, err := runCombinedOutput(cmd)
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 
-	return verifyResult{ok: err == nil, timedOut: timedOut, err: err, output: buf.Bytes()}
+	return verifyResult{ok: err == nil, timedOut: timedOut, err: err, output: out}
 }
 
 // tail returns the last maxCapturedOutput bytes of b, so a truncated capture
