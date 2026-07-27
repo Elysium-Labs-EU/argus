@@ -97,6 +97,91 @@ func TestLogRunSummaryCountsPersistedVerdictNotReviewDecision(t *testing.T) {
 	}
 }
 
+// TestRenderReportShowsApprovalProvenance pins the signal issue #285 asks for:
+// the report must tell an operator, per worker, which of the three sources
+// cleared it — so an auto- or reviewer-approved diff is never re-read by hand,
+// and only a surfaced-awaiting-human one is. The provenance is read from each
+// worktree's persisted verdict.json (recordApproval's output), the only place a
+// reviewer decision and a hard-reason override are already folded in.
+func TestRenderReportShowsApprovalProvenance(t *testing.T) {
+	gateWT := t.TempDir()
+	reviewWT := t.TempDir()
+	humanWT := t.TempDir()
+	writeVerdict := func(wt string, approved bool, source string) {
+		t.Helper()
+		if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: approved, Source: source}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeVerdict(gateWT, true, "gate")
+	writeVerdict(reviewWT, true, "review")
+	writeVerdict(humanWT, false, "review") // reviewer request-changes → needs a human
+
+	var buf bytes.Buffer
+	cfg := &Config{
+		Out:    &buf,
+		Now:    func() time.Time { return time.Date(2026, 7, 18, 0, 5, 0, 0, time.UTC) },
+		Client: herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) { return []byte(`{"result":{"panes":[]}}`), nil }),
+		Home:   t.TempDir(),
+		Log:    eventlog.New(&bytes.Buffer{}, "supervise", "test-run", nil),
+	}
+	start := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	awaiting := func(task, wt string) *workerState {
+		return &workerState{
+			plan: &WorkerPlan{Worker: Worker{Task: task, Worktree: wt}}, hasFile: true, started: start,
+			status: protocol.Status{Phase: protocol.PhaseAwaitingReview},
+		}
+	}
+	states := []*workerState{
+		awaiting("gate-a", gateWT),
+		awaiting("review-b", reviewWT),
+		awaiting("human-c", humanWT),
+	}
+
+	renderReport(context.Background(), cfg, states)
+	out := buf.String()
+
+	for _, want := range []string{
+		"gate-auto-approved — verified by the gate, no human read needed",
+		"reviewer-approved — verified by the review, no human read needed",
+		"surfaced-awaiting-human — hand-read this diff and decide",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing provenance %q\n---\n%s", want, out)
+		}
+	}
+}
+
+// TestLogRunSummaryEmitsProvenanceCounts pins that the run_summary event splits
+// approvals by source and counts workers still awaiting a human, so `argus
+// stats` (and any operator reading the run log) can trust the aggregate the same
+// way the per-worker report lets them trust each diff.
+func TestLogRunSummaryEmitsProvenanceCounts(t *testing.T) {
+	gateWT := t.TempDir()
+	humanWT := t.TempDir()
+	if err := protocol.WriteApproval(gateWT, &protocol.Approval{Approved: true, Source: "gate"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := protocol.WriteApproval(humanWT, &protocol.Approval{Approved: false, Source: "gate"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	cfg := &Config{Log: eventlog.New(&buf, "supervise", "test-run", nil)}
+	states := []*workerState{
+		{hasFile: true, plan: &WorkerPlan{Worker: Worker{Task: "gate-a", Worktree: gateWT}}, status: protocol.Status{Phase: protocol.PhaseAwaitingReview}},
+		{hasFile: true, plan: &WorkerPlan{Worker: Worker{Task: "human-b", Worktree: humanWT}}, status: protocol.Status{Phase: protocol.PhaseBlocked}},
+	}
+	logRunSummary(cfg, states, 1, 0)
+
+	out := buf.String()
+	for _, want := range []string{`"gate_approved":1`, `"reviewer_approved":0`, `"awaiting_human":1`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("run_summary missing %q: %s", want, out)
+		}
+	}
+}
+
 // TestRenderReportDistinguishesQuestionFromGenericBlocked pins the per-worker
 // display split: a blocked worker carrying a structured Question shows its
 // text and options, while one with only a freeform BlockedReason shows that

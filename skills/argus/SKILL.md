@@ -363,19 +363,38 @@ Argus always measures the diff from git rather than trusting `status.json` — a
 unmeasurable diff, a material under-report, or zero files changed despite a claimed
 terminal phase always escalates, and `--review` cannot approve past any of the
 three: a "approve" verdict on a hard reason is still recorded as
-not-approved. **What is not guaranteed:** a re-review after rework doesn't
-automatically re-check whether a *specific* prior finding was actually addressed
-(it's a fresh holistic pass each time). Read the diff yourself regardless — it's
-still the reviewer's job to judge the code itself, not just clear the hard checks:
+not-approved.
+
+**Verify once — read only the diffs argus surfaces for a human.** The supervise
+report labels every worker with the source that cleared it, on an `approval:` line:
+
+- `gate-auto-approved` — the deterministic gate cleared it on plain facts (right
+  phase, tests passed, diff within the ceiling, no always-review/proof-required
+  path, plan evidence present). Zero LLM cost, already verified. **Do not re-read it.**
+- `reviewer-approved` — the gate escalated and the `--review` pass approved it.
+  Already verified twice. **Do not re-read it.**
+- `surfaced-awaiting-human` — no approving verdict: the gate escalated with no
+  reviewer, the reviewer returned request-changes, an unwaivable hard reason fired,
+  or the worker is `blocked`. **This is the only kind you hand-read.**
+
+Re-reading an already-approved diff is the largest avoidable cost in a supervise
+run — one full extra diff read per issue, scaling with issue count — and it
+re-verifies exactly what the gate (and `--review`) already cleared. So hand-read
+only `surfaced-awaiting-human` and `blocked` workers:
 
 ```bash
 git -C <worktree> diff origin/main
 ```
 
-Approve read-only/build/test/own-worktree changes. Hold and ask the user for anything
-touching shared or production state, force-pushes to shared branches, or deletes
-outside a tempdir. For OS-integration changes (systemd, launchd, install scripts),
-demand real-world proof, not mocked unit tests plus a dry-run.
+For those, approve read-only/build/test/own-worktree changes. Hold and ask the user
+for anything touching shared or production state, force-pushes to shared branches, or
+deletes outside a tempdir. For OS-integration changes (systemd, launchd, install
+scripts), demand real-world proof, not mocked unit tests plus a dry-run.
+
+The one exception to "don't re-read an approved diff": after `argus rework` reports
+approved, a re-review is a fresh holistic pass and does **not** confirm a *specific*
+prior finding was fixed (see the gap above). If a prior verdict named a precise
+defect, spot-check that exact location — not the whole diff — once `rework` clears.
 
 You can run a one-shot review of any worktree on demand — but treat it as read-only
 eyeballing, not a shippable verdict (see the gap above: it does not persist):

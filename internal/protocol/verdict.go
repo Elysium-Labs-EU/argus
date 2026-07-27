@@ -34,6 +34,52 @@ type Approval struct {
 	Approved     bool     `json:"approved"`
 }
 
+// Provenance names who cleared a worker's change and — the operational payload —
+// whether the operator still needs to hand-read its diff before ship. It exists
+// to retire the redundant third pass: a supervise run already verifies each diff
+// up to twice (the deterministic gate, then an LLM review only for what the gate
+// escalated), yet an operator who can't tell an auto-approved worker from one
+// merely surfaced for a decision re-reads every diff by hand. Making the source
+// explicit lets the safe habit shrink to "hand-read only what asks for a human."
+type Provenance string
+
+const (
+	// ProvenanceGateApproved: the deterministic gate cleared it on plain facts,
+	// zero LLM cost — already verified, no human read needed.
+	ProvenanceGateApproved Provenance = "gate-auto-approved"
+	// ProvenanceReviewerApproved: the gate escalated and the LLM reviewer
+	// approved — already verified twice, no human read needed.
+	ProvenanceReviewerApproved Provenance = "reviewer-approved"
+	// ProvenanceAwaitingHuman: no approving verdict — the gate surfaced this for
+	// a human decision (escalated with no reviewer, a request-changes, an
+	// unwaivable hard reason, or a blocked worker). This is the only kind an
+	// operator must hand-read.
+	ProvenanceAwaitingHuman Provenance = "surfaced-awaiting-human"
+)
+
+// Provenance derives who cleared this verdict from Source+Approved rather than
+// storing a separate field, so a verdict.json written before this existed still
+// classifies correctly. A rejected verdict is surfaced-awaiting-human regardless
+// of source: reviewOne records reviewer request-changes and unwaivable hard-reason
+// overrides both with Approved=false, and either way a human must look.
+func (a *Approval) Provenance() Provenance {
+	if !a.Approved {
+		return ProvenanceAwaitingHuman
+	}
+	if a.Source == "review" {
+		return ProvenanceReviewerApproved
+	}
+	return ProvenanceGateApproved
+}
+
+// NeedsHumanRead reports whether the operator should hand-read this worker's diff
+// before ship. Only a surfaced-awaiting-human worker does; a gate- or
+// reviewer-approved one has already been verified and re-reading it is the
+// avoidable spend this signal exists to cut.
+func (p Provenance) NeedsHumanRead() bool {
+	return p == ProvenanceAwaitingHuman
+}
+
 // VerdictPath is where a worker's Approval lives inside its worktree. It sits
 // under .claude/argus so ship (and CommitAll's excludes) can find it, and so it
 // never lands in the PR.
