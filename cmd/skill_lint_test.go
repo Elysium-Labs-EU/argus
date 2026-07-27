@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// This file guards against issue #85: SKILL.md (skills/argus/SKILL.md, and its
+// This file guards against SKILL.md (skills/argus/SKILL.md, and its
 // installed mirror at .claude/skills/argus/SKILL.md) has twice drifted out of
 // sync with the CLI it documents — once claiming a Codeberg-only story after
 // the repo went multi-forge, once citing a flag default that no longer held.
@@ -127,7 +127,7 @@ func sortedCmdNames(m map[string]*cobra.Command) []string {
 // TestSkillMDMatchesCLI extracts every --flag SKILL.md mentions in a code
 // block or inline code span and checks it against the real flags of the
 // argus subcommand the surrounding text is about — plus any default value
-// SKILL.md states for it (see issue #85).
+// SKILL.md states for it.
 func TestSkillMDMatchesCLI(t *testing.T) {
 	raw, err := os.ReadFile(skillMDPath)
 	if err != nil {
@@ -253,7 +253,7 @@ func supportedForgeHosts(t *testing.T, src string) map[string]string {
 // TestSkillMDDescribesAllSupportedForges cross-checks the forge hostnames
 // internal/forge/detect.go actually handles against SKILL.md's prose, so the
 // doc can't quietly narrow back down to "Codeberg" the way it did before
-// argus went multi-forge (issue #85).
+// argus went multi-forge.
 func TestSkillMDDescribesAllSupportedForges(t *testing.T) {
 	src, err := os.ReadFile(forgeDetectSrc)
 	if err != nil {

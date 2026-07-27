@@ -184,8 +184,8 @@ func TestUsesDefaultLauncher(t *testing.T) {
 	}
 }
 
-// TestReconcileSkipsPlanEvidenceForNonDefaultLauncher is the regression test
-// for issue #145: a worker spawned with a non-Claude-Code --launcher can
+// TestReconcileSkipsPlanEvidenceForNonDefaultLauncher is a regression test: a
+// worker spawned with a non-Claude-Code --launcher can
 // never produce a ~/.claude/projects transcript, so reconcile must not judge
 // it against one — even when a transcript happens to exist (e.g. left over
 // from an unrelated Claude Code session in the same worktree) and it carries

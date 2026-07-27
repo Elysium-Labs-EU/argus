@@ -23,7 +23,7 @@ var projectPathReplacer = strings.NewReplacer("/", "-", ".", "-")
 
 // HasPlanEvidence reports whether any session transcript for worktree's Claude
 // Code project contains a real TodoWrite/TaskCreate tool call — the unfakeable
-// backstop for the planning phase's self-reported Plan field (issue #103),
+// backstop for the planning phase's self-reported Plan field,
 // mirroring how MeasureDiff refuses to trust a worker's self-reported diff
 // stat by measuring the real git diff instead. A worktree can span more than
 // one worker session (e.g. an initial implementation run and a later

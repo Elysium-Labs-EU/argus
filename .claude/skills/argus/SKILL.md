@@ -60,7 +60,7 @@ These are enforced in code, not conventions the worker is merely asked to follow
   of what the worker claims. All three land in `Verdict.HardReasons`
   (`internal/supervisor/review.go`): even a `--review` verdict of "approve" on
   one of these is recorded as *not approved* (`reviewEscalations` in
-  `internal/supervisor/loop.go` overrides it) — a fix for issue #105, where a
+  `internal/supervisor/loop.go` overrides it) — fixing a case where a
   real under-report ("claimed 215 lines, git measured 461") once got waved
   through anyway because the escalation was only a factor in the reviewer's
   holistic judgment, not a hard stop.
@@ -69,7 +69,7 @@ These are enforced in code, not conventions the worker is merely asked to follow
      escalates.
   3. **Zero measured files changed despite a claimed terminal phase
      (`awaiting_review`/`done`) escalates** — `internal/supervisor/review.go:129-133`,
-     added by PR #17 closing issue #15: a headless (non-herdr) `supervise` spawn let
+     added after a headless (non-herdr) `supervise` spawn let
      a fresh worktree pick up a *stale, unrelated Claude session's* `status.json`,
      and the gate auto-approved it as "6/6 tests passed" with a real, freshly-written
      `verdict.json` — for zero actual code changes. This check catches that exact
@@ -362,7 +362,7 @@ content-based triggers.
 Argus always measures the diff from git rather than trusting `status.json` — an
 unmeasurable diff, a material under-report, or zero files changed despite a claimed
 terminal phase always escalates, and `--review` cannot approve past any of the
-three (issue #105): a "approve" verdict on a hard reason is still recorded as
+three: a "approve" verdict on a hard reason is still recorded as
 not-approved. **What is not guaranteed:** a re-review after rework doesn't
 automatically re-check whether a *specific* prior finding was actually addressed
 (it's a fresh holistic pass each time). Read the diff yourself regardless — it's
@@ -517,12 +517,12 @@ binary (checksum-only, no signature verification yet).
   token cost argus exists to remove. [[supervise-agents]] is the no-argus fallback only.
 - Don't run `supervise`'s spawn mode outside a real herdr pane — a headless spawn has
   been observed to leak a stale, unrelated session's state into a fresh worktree and
-  get auto-approved (issue #15). The zero-files-changed gate check catches this
+  get auto-approved. The zero-files-changed gate check catches this
   symptom, but the spawn-side root cause isn't fixed — verify with `git diff`
   yourself if you ever must run headless.
 - Don't approve a ship off a worker's summary — argus gates on the measured diff; you
   read it too. A hard reason (unmeasurable diff, material under-report, zero files
-  changed) can no longer be waived by `--review` (issue #105), but that doesn't
+  changed) can no longer be waived by `--review`, but that doesn't
   make the reviewer's judgment on the code itself infallible, and a rework
   re-review still doesn't re-check prior findings specifically.
 - Don't treat a standalone `argus review` verdict as something `ship` will see — it

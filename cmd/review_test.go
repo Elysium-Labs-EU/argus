@@ -141,12 +141,12 @@ func initReviewGitRepoAt(t *testing.T, dir string) {
 	}
 }
 
-// TestReviewUsesAbsoluteWorktree is the direct regression test for argus
-// issue #98: a relative --worktree fed through the real cobra command (not
-// just runReview called directly) must reach both DiffFor's git -C call and
-// the ReviewRequest handed to the reviewer as an absolute path, in every
-// common relative form an operator might pass. Mirrors
-// TestRebaseSpawnLineUsesAbsoluteWorktree (cmd/rebase_test.go, issue #96).
+// TestReviewUsesAbsoluteWorktree is a direct regression test: a relative
+// --worktree fed through the real cobra command (not just runReview called
+// directly) must reach both DiffFor's git -C call and the ReviewRequest
+// handed to the reviewer as an absolute path, in every common relative form
+// an operator might pass. Mirrors TestRebaseSpawnLineUsesAbsoluteWorktree
+// (cmd/rebase_test.go).
 func TestReviewUsesAbsoluteWorktree(t *testing.T) {
 	cases := []struct {
 		setup func(t *testing.T, base string) (repoDir, cwd, rel string)

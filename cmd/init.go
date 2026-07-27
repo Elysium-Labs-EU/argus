@@ -33,10 +33,10 @@ prints the suggestion, and asks you to confirm or edit each value before
 writing .argus/config.yml (see internal/repoconfig). This is pure convenience:
 argus itself has no built-in opinion on any repo's toolchain and never will —
 guessing wrong, or a toolchain this version doesn't recognize, is not a bug to
-file, just edit the YAML by hand (see argus issue #161). The forge key is the
-one setting init can't guess at all: a self-hosted host is exactly the
-ambiguity ship/supervise/worktree prune's own --forge flag exists to resolve,
-so it's only ever set via --forge here or the interactive prompt.`,
+file, just edit the YAML by hand. The forge key is the one setting init
+can't guess at all: a self-hosted host is exactly the ambiguity
+ship/supervise/worktree prune's own --forge flag exists to resolve, so
+it's only ever set via --forge here or the interactive prompt.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runInit(cmd, &initArgs{repo: repo, yes: yes, forgeKind: forgeKind})
 		},

@@ -97,9 +97,8 @@ type rebaseOpts struct {
 // branch (see livenessTimeout above): generous enough that a slow shell
 // rc-file startup, a loaded machine, or a busy agent turn doesn't
 // false-positive, but bounded so a pane whose spawn line silently failed
-// (argus issue #96) or whose re-tasking prompt was silently dropped (argus
-// issue #135) is reported in tens of seconds instead of hanging
-// WaitForStatus's open-ended wait forever.
+// or whose re-tasking prompt was silently dropped is reported in tens of
+// seconds instead of hanging WaitForStatus's open-ended wait forever.
 const (
 	defaultLivenessTimeout  = 30 * time.Second
 	defaultLivenessInterval = 500 * time.Millisecond
@@ -114,8 +113,8 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 	}
 	// A worktree given relative to argus's own cwd — not the target pane's —
 	// breaks the `cd <worktree> && <launcher> ...` line dispatchIntoPane types
-	// into the pane once herdr reuses a pane already rooted somewhere else
-	// (argus issue #96): the relative cd fails, the && chain never launches the
+	// into the pane once herdr reuses a pane already rooted somewhere else:
+	// the relative cd fails, the && chain never launches the
 	// agent, and the pane sits idle forever. Resolved once here, before any
 	// downstream use (WorktreeOpen, InvalidateStatus, WriteBrief, WaitForStatus,
 	// the spawn line), so every one of them agrees on the same absolute path —
@@ -242,7 +241,7 @@ func detectRebaseConflict(ctx context.Context, worktree, base string) (branch st
 func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client herdr.Client, out io.Writer, repoRoot, branch string, opts *rebaseOpts) error {
 	// Captured before anything else touches the worktree, so WaitForStatus
 	// rejects a status.json left over from before this dispatch (see
-	// InvalidateStatus and issue #50) even if invalidation below races with a
+	// InvalidateStatus) even if invalidation below races with a
 	// stray write.
 	dispatchedAt := time.Now()
 
@@ -372,7 +371,7 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	// This spawn branch needs its own liveness check distinct from AgentPrompt's
 	// above: PaneRun just typed a shell command line into the pane blind — it
 	// succeeds whether or not the `cd` at the front of it actually worked
-	// (argus issue #96: a relative --worktree reused into a pane already
+	// (a relative --worktree reused into a pane already
 	// rooted there breaks the `cd ... && <launcher>` chain, so the launcher
 	// never runs and no agent ever comes up). Confirming liveness here,
 	// bounded, catches that before it becomes an open-ended hang in

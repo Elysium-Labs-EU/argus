@@ -68,7 +68,7 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 	// See supervisor.ResolveWorktree: a --worktree given relative to argus's
 	// own cwd must be resolved before it reaches DiffFor's git -C call or the
 	// ReviewRequest handed to the reviewer, so every downstream use agrees on
-	// the same absolute path (argus issue #98).
+	// the same absolute path.
 	resolved, err := supervisor.ResolveWorktree(worktree)
 	if err != nil {
 		return err

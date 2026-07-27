@@ -85,7 +85,7 @@ type permissionBlock struct {
 //
 // repoAllow is the repo's own .argus/config.yml allow list (see
 // internal/repoconfig) — it replaces the build/test-tool entries argus used
-// to hardcode for every repo regardless of toolchain (issue #161); an empty
+// to hardcode for every repo regardless of toolchain; an empty
 // repoAllow (no config file, or none present) means no build/test tooling is
 // pre-cleared for anyone, not just non-Go repos, since argus itself has no
 // opinion on any repo's toolchain. extraAllow appends operator-supplied CLI

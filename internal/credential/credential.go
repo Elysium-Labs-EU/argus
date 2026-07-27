@@ -5,7 +5,7 @@
 // environment variable actually carries it, checking an operator override
 // before argus's own built-in default names. argus's job is the resolution
 // mechanism, not an opinion about which env var name an operator happens to
-// use for a given service (see issue #64).
+// use for a given service.
 package credential
 
 import "os"
@@ -36,8 +36,8 @@ func Lookup(vars []string) string {
 
 // Merge combines two credential-name -> env-var-name override maps, with cli
 // taking precedence over persisted: the CLI flag is the more explicit,
-// one-off source, the persisted config file the operator's standing default
-// (see the priority order in issue #64's design). Either argument may be nil.
+// one-off source, the persisted config file the operator's standing default.
+// Either argument may be nil.
 func Merge(cli, persisted map[string]string) map[string]string {
 	out := make(map[string]string, len(cli)+len(persisted))
 	for k, v := range persisted {

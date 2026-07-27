@@ -22,8 +22,8 @@ import (
 // reports a non-empty, non-zero-files diff against the branch's own tip —
 // required for a round to actually reach Approved=true: the gate's hard,
 // unwaivable "zero files changed despite a claimed terminal phase" check
-// (issue #105) would otherwise override even a reviewer "approve" back to
-// not-approved, regardless of what the reviewer says.
+// would otherwise override even a reviewer "approve" back to not-approved,
+// regardless of what the reviewer says.
 func initGitDirWithDiff(t *testing.T) string {
 	t.Helper()
 	dir := initGitDir(t)

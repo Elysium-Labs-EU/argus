@@ -234,7 +234,7 @@ supervisor can make.
 // awaiting_review, written before this rebase was ever requested) leaves that
 // leftover file for WaitForStatus's poller to read — and since the poller's
 // first tick is immediate, it can report success before the newly spawned
-// worker has done anything at all (argus issue #50). A missing file is not an
+// worker has done anything at all. A missing file is not an
 // error.
 func InvalidateStatus(worktree string) error {
 	for _, path := range []string{protocol.StatusPath(worktree), protocol.VerdictPath(worktree)} {
@@ -250,9 +250,9 @@ func InvalidateStatus(worktree string) error {
 // on some filesystems/runners rounds to coarser resolution. A genuine
 // post-dispatch write can therefore read back a few milliseconds to low
 // single-digit seconds "before" since even though the write happened after
-// it (argus issue #94, which flaked make ci for the v0.1.0-rc.17 release: the
-// same commit passed and failed WaitForStatus's mtime check on identical CI
-// hardware minutes apart). Widening the boundary by this much is still safe
+// it (this previously flaked make ci: the same commit passed and failed
+// WaitForStatus's mtime check on identical CI hardware minutes apart).
+// Widening the boundary by this much is still safe
 // against what isStale actually guards against — a leftover file from before
 // this dispatch — because InvalidateStatus removes that file immediately
 // before dispatch; a leftover would need a genuinely concurrent write, not
@@ -264,13 +264,13 @@ const staleTolerance = 2 * time.Second
 // timestamp the worker self-reported inside it. InvalidateStatus os.Removes
 // status.json before a worker is dispatched, so any file present afterward
 // was necessarily (re)written by this dispatch — its mtime is ground truth,
-// immune to a worker writing a wrong clock value into the JSON body (argus
-// issue #90; the worker-reported UpdatedAt was trusted for this decision
+// immune to a worker writing a wrong clock value into the JSON body (the
+// worker-reported UpdatedAt was trusted for this decision
 // before, letting a garbage timestamp make a real, current status look
 // pre-dispatch forever). The comparison gives mtime a grace window below
 // since (see staleTolerance) rather than an exact boundary, because some
 // filesystems record mtime at coarser resolution than time.Now(), and a real
-// post-dispatch write can round down to just under since (argus issue #94).
+// post-dispatch write can round down to just under since.
 // A file that can't be stat'd is treated as not stale; the caller's own
 // handling of the read error decides that case.
 func isStale(path string, since time.Time) bool {

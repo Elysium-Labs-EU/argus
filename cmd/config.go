@@ -11,9 +11,9 @@ import (
 
 // newConfigCmd is argus's persisted-config surface: today just credential
 // name -> env var overrides (see internal/config and internal/credential),
-// written only by `config set`, never hand-authored (see issue #64's design:
-// the config schema's discoverability problem goes away when the only writer
-// validates as it goes).
+// written only by `config set`, never hand-authored — the config schema's
+// discoverability problem goes away when the only writer validates as it
+// goes.
 func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",

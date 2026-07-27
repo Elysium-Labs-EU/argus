@@ -3,7 +3,7 @@ package protocol
 // WriterBrief is the instruction block argus injects into every worker pane's
 // task brief. It is the writer half of this package's contract: it tells the
 // worker to report exactly the Status shape that Load decodes through the
-// guarded `argus worker report` subcommand (issue #92), after every phase
+// guarded `argus worker report` subcommand, after every phase
 // transition. Keeping the writer spec in the same package as the reader and the
 // transition table (see transition.go) is what stops the three from drifting —
 // if the struct or the legal-transition table changes, this text is right next

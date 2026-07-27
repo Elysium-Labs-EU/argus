@@ -194,7 +194,7 @@ func TestGateDoesNotUnderReportCheckForNonTerminalPhase(t *testing.T) {
 }
 
 // TestGateOversizedDiffIsNotAHardReason documents the other half of the
-// hard/soft split (issue #105): a diff that merely exceeds the size ceiling is
+// hard/soft split: a diff that merely exceeds the size ceiling is
 // a judgment call --review can still approve past, so it must land only in
 // Reasons, never HardReasons.
 func TestGateOversizedDiffIsNotAHardReason(t *testing.T) {
@@ -223,7 +223,7 @@ func TestGateOversizedDiffIsNotAHardReason(t *testing.T) {
 }
 
 func TestGateEscalatesWhenMeasuredDiffIsEmptyDespiteClaimedCompletion(t *testing.T) {
-	// Regression for issue #15: a worker (or a stale/fabricated status.json left
+	// Regression test: a worker (or a stale/fabricated status.json left
 	// behind by a launcher spawn that never really ran) reports a terminal phase
 	// with passing tests and a plausible-looking self-reported diff, but git shows
 	// zero files actually changed against base. This must never auto-approve.

@@ -278,9 +278,11 @@ func ResolveLauncherPath(launcher string) string {
 // whose cwd differs, or is reused against a worktree already rooted
 // elsewhere; resolving once, immediately after the flag's own empty-string
 // check, means every downstream call agrees on the same absolute path. This
-// is the 4th independent report of that exact bug (issues #29, #68, #96,
-// #98) — a 5th caller should reach for this helper instead of adding another
-// inline filepath.Abs.
+// exact bug — a caller resolving a relative path against the wrong cwd — has
+// recurred multiple times, each time independently reported and fixed in a
+// different caller that rolled its own inline filepath.Abs instead of
+// reaching for this helper; any new caller should use ResolveWorktree instead
+// of repeating that mistake.
 //
 // path == "" resolves to argus's own cwd (filepath.Abs's own behavior) rather
 // than erroring: every caller already has its own "no worktree given"
@@ -453,7 +455,7 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 // superviseStates runs the observe→judge→report tail shared by a fresh spawn
 // (Run) and an attach to already-running workers (Attach): each worker is
 // watched, measured, and gated/reviewed independently the moment IT reaches a
-// terminal phase — not after the whole batch does (issue #116) — so a worker
+// terminal phase — not after the whole batch does — so a worker
 // that finishes early is judged early instead of waiting on its slowest
 // sibling. Only the final report is a full-batch barrier.
 func superviseStates(ctx context.Context, cfg *Config, states []*workerState) error {
@@ -469,7 +471,7 @@ const defaultReviewConcurrency = 4
 // judgeEach drives one goroutine per worker through watch→reconcile→gate/review,
 // so N workers' judgments proceed independently instead of every worker
 // waiting for the batch's slowest one to reach a terminal phase before any of
-// them is gated (issue #116). reconcile and reviewEscalations are called with
+// them is gated. reconcile and reviewEscalations are called with
 // a single-element slice per worker — their own batch-shaped loops are what
 // existing tests already exercise; running one per goroutine gets the same
 // per-worker checks without waiting on siblings.
@@ -911,7 +913,7 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 
 		// Captured before the worktree is touched, so pollStatus rejects any
 		// status.json/verdict.json already sitting in the worktree directory
-		// (see InvalidateStatus and issue #50/#75) even if invalidation below
+		// (see InvalidateStatus) even if invalidation below
 		// races with a stray write.
 		dispatchedAt := cfg.Now()
 
@@ -984,7 +986,7 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 		wt.RootPaneID = moved.PaneID
 	}
 	// A worktree directory can carry a leftover status.json/verdict.json from an
-	// unrelated prior task (issue #75) — e.g. directory reuse in worktree
+	// unrelated prior task — e.g. directory reuse in worktree
 	// creation. Without this, the watch loop's first poll can read that stale
 	// terminal-phase file and report the worker approved before it has done
 	// anything at all. dispatchedAt (captured before this call) is the
@@ -999,8 +1001,7 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	// name convention, so the "origin/" prefix is stripped here, once. A
 	// worker's own `argus worker report` never sets this field and carries
 	// it forward unchanged (see runWorkerReport), so ship can read back what
-	// base was actually used instead of re-defaulting to the literal "main"
-	// (closes issue #160 as a side effect of #161).
+	// base was actually used instead of re-defaulting to the literal "main".
 	baseBranch := strings.TrimPrefix(cfg.Base, "origin/")
 	if err := protocol.Write(protocol.StatusPath(p.Worktree), &protocol.Status{Base: baseBranch}); err != nil {
 		return herdr.Worktree{}, fmt.Errorf("recording base branch for %s: %w", p.Task, err)
@@ -1051,7 +1052,7 @@ func resolvePaneID(p *WorkerPlan, wt herdr.Worktree) (string, error) {
 }
 
 // ensureFreshPane confirms paneID has no live agent session before argus types
-// a launch command into it. This is the root-cause fix for issue #15: PaneRun's
+// a launch command into it. This is the root-cause fix: PaneRun's
 // own doc comment already says it "is the wrong call for a pane that already
 // has a live agent session running... the agent's own input box would receive
 // the literal shell text as a chat message instead of a command a shell
@@ -1062,13 +1063,13 @@ func resolvePaneID(p *WorkerPlan, wt herdr.Worktree) (string, error) {
 // chat message into its own, unrelated conversation. That old session then
 // carries on with its own prior task and can write its own plausible-looking
 // status.json/verdict.json into the new worktree, indistinguishable at a
-// glance from a worker that actually ran there — exactly the symptom #15
-// reported ("verbatim content from an unrelated, real session from the day
-// before"). AgentGet is the only way to know pane occupancy in advance, so it
-// must run unconditionally on every spawn, not just when a caller-supplied
+// glance from a worker that actually ran there — exactly the failure a real
+// incident showed ("verbatim content from an unrelated, real session from the
+// day before"). AgentGet is the only way to know pane occupancy in advance, so
+// it must run unconditionally on every spawn, not just when a caller-supplied
 // pane makes the hazard obvious.
 //
-// PR #17 (closing #15) added a gate that escalates a *terminal-phase* worker
+// An earlier fix added a gate that escalates a *terminal-phase* worker
 // reporting zero measured file changes — a useful backstop, but it only fires
 // after the fact, only for terminal phases, and not at all if the stolen
 // session happens to leave some incidental file change behind. Refusing to
@@ -1087,7 +1088,7 @@ func ensureFreshPane(ctx context.Context, client herdr.Client, paneID, task stri
 		return fmt.Errorf(
 			"pane %s already has a live agent session (session %s, cwd %s) — refusing to spawn %s there: "+
 				"typing the launch command in would deliver it as a chat message into that unrelated "+
-				"session instead of starting a fresh one (issue #15); if that cwd points into a worktree "+
+				"session instead of starting a fresh one; if that cwd points into a worktree "+
 				"you already removed, close the pane and retry",
 			paneID, agent.AgentSession.Value, cwd, task,
 		)
@@ -1363,14 +1364,15 @@ func pollStatus(ctx context.Context, client herdr.Client, interval, timeout time
 			switch {
 			case err == nil && !st.dispatchedAt.IsZero() && isStale(path, st.dispatchedAt):
 				// A status.json whose file mtime is strictly before
-				// dispatchedAt predates this dispatch — a stale leftover
-				// (issue #75), not this worker's report. Judged by mtime, not
+				// dispatchedAt predates this dispatch — a stale leftover,
+				// not this worker's report. Judged by mtime, not
 				// the worker's self-reported
-				// UpdatedAt (issue #90), since InvalidateStatus removes the file
+				// UpdatedAt, since a worker's clock can lie or lag and
+				// InvalidateStatus removes the file
 				// before dispatch so any file present afterward was necessarily
 				// written by this dispatch regardless of what clock value the
 				// worker put inside it. Treated the same as no file at all
-				// (mirrors WaitForStatus, issue #50). dispatchedAt is zero for an
+				// (mirrors WaitForStatus). dispatchedAt is zero for an
 				// attach, where no dispatch happened and any existing status is
 				// legitimately this worker's own.
 				if !loggedStale {

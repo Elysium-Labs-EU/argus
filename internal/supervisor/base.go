@@ -30,8 +30,8 @@ func DetectDefaultBase(ctx context.Context, repoRoot string) (string, error) {
 // ResolveBase determines the bare base branch name a worktree-scoped command
 // (ship, rebase) should use, in order: an operator-supplied --base flag
 // (flagExplicit), the base persisted by supervise in the worktree's own
-// status.json (see protocol.Status.Base — set at worktree-creation time,
-// closing issue #160), this repo's .argus/config.yml base_branch (see
+// status.json (see protocol.Status.Base — set at worktree-creation time),
+// this repo's .argus/config.yml base_branch (see
 // internal/repoconfig, for a worktree supervise never touched), the repo's
 // detected origin/HEAD, and finally the literal "main". Every source but the
 // flag is best-effort: a lookup failure just falls through to the next one.

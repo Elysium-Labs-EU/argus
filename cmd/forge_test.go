@@ -75,7 +75,7 @@ func TestFixedBriefTailInstructsRunningRepoLint(t *testing.T) {
 	}
 }
 
-// TestIssuesToTasksAppendsRepoBriefNote pins issue #161: the old hardcoded
+// TestIssuesToTasksAppendsRepoBriefNote pins the fix that the old hardcoded
 // "Add a focused test and keep make ci green. Follow the repo STYLE.md." is
 // gone; a repo's own .argus/config.yml brief_note takes its place when
 // present, and is appended before the fixed "don't commit" line.
@@ -100,8 +100,8 @@ func TestIssuesToTasksAppendsRepoBriefNote(t *testing.T) {
 }
 
 // TestIssuesToTasksNoRepoConfigOmitsToolchainText pins the other half of
-// issue #161: with no .argus/config.yml, argus asserts no toolchain opinion
-// of its own — only the fixed line survives, not the old "make ci"/"STYLE.md"
+// that fix: with no .argus/config.yml, argus asserts no toolchain opinion of
+// its own — only the fixed line survives, not the old "make ci"/"STYLE.md"
 // defaults.
 func TestIssuesToTasksNoRepoConfigOmitsToolchainText(t *testing.T) {
 	f := &fakeForge{issues: map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}}}

@@ -140,8 +140,8 @@ func TestOpenPRSurfacesAPIMessage(t *testing.T) {
 	}
 }
 
-// TestNewRefusesAnyHostOutsideTheAutoAllowlist pins the fix for issue #242's
-// rework round 1: a substring check on "gitlab" missed the common self-hosted
+// TestNewRefusesAnyHostOutsideTheAutoAllowlist pins the fix for a rework
+// round: a substring check on "gitlab" missed the common self-hosted
 // pattern of a host with no such substring at all (git.company.com,
 // scm.company.io, ...) that is just as likely to be a self-hosted GitLab as a
 // self-hosted Gitea/Forgejo. New's KindAuto path now refuses every host

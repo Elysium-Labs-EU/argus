@@ -257,10 +257,10 @@ func TestShipCmdHelpDocumentsGitLab(t *testing.T) {
 	}
 }
 
-// TestRunShipDryRunRefusesAmbiguousSelfHostedGitLabHost pins the fix for
-// issue #242: a --dry-run against a host that looks like self-hosted GitLab
-// must fail with a clear error instead of printing a clean plan that a real
-// ship could never actually honor.
+// TestRunShipDryRunRefusesAmbiguousSelfHostedGitLabHost pins the fix that a
+// --dry-run against a host that looks like self-hosted GitLab must fail with
+// a clear error instead of printing a clean plan that a real ship could
+// never actually honor.
 func TestRunShipDryRunRefusesAmbiguousSelfHostedGitLabHost(t *testing.T) {
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@gitlab.corp.example.com:acme/widget.git"})
 
@@ -283,7 +283,7 @@ func TestRunShipDryRunRefusesAmbiguousSelfHostedGitLabHost(t *testing.T) {
 }
 
 // TestRunShipDryRunAcceptsExplicitForgeKindForSelfHostedGitLab pins the other
-// half of issue #242: --forge gitlab lets a self-hosted GitLab host through.
+// half of that fix: --forge gitlab lets a self-hosted GitLab host through.
 func TestRunShipDryRunAcceptsExplicitForgeKindForSelfHostedGitLab(t *testing.T) {
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@gitlab.corp.example.com:acme/widget.git"})
 
@@ -343,13 +343,12 @@ func initShipGitRepoAt(t *testing.T, dir string) {
 	run("remote", "add", "origin", "git@github.com:acme/widget.git")
 }
 
-// TestShipUsesAbsoluteWorktree is the direct regression test for argus issue
-// #98: a relative --worktree fed through the real cobra command (not just
-// runShip called directly) must reach currentBranch — the first supervisor
-// call runShip makes — as an absolute path, in every common relative form an
-// operator might pass. --force and --dry-run keep the test from needing a
-// real forge token or push. Mirrors TestRebaseSpawnLineUsesAbsoluteWorktree
-// (cmd/rebase_test.go, issue #96).
+// TestShipUsesAbsoluteWorktree is a regression test: a relative --worktree
+// fed through the real cobra command (not just runShip called directly) must
+// reach currentBranch — the first supervisor call runShip makes — as an
+// absolute path, in every common relative form an operator might pass.
+// --force and --dry-run keep the test from needing a real forge token or
+// push. Mirrors TestRebaseSpawnLineUsesAbsoluteWorktree (cmd/rebase_test.go).
 func TestShipUsesAbsoluteWorktree(t *testing.T) {
 	cases := []struct {
 		setup func(t *testing.T, base string) (repoDir, cwd, rel string)
@@ -445,10 +444,10 @@ func TestRunShipDryRunPrintsPlanWithoutShipping(t *testing.T) {
 	}
 }
 
-// TestRunShipOmittedBaseUsesRepoConfig pins issue #161/#160: with baseIsDefault
-// set (the real CLI path when --base is left unset), runShip resolves this
-// repo's .argus/config.yml base_branch instead of trusting the flag's
-// literal "main" default.
+// TestRunShipOmittedBaseUsesRepoConfig pins the omitted-base-falls-back-to-
+// repo-config behavior: with baseIsDefault set (the real CLI path when
+// --base is left unset), runShip resolves this repo's .argus/config.yml
+// base_branch instead of trusting the flag's literal "main" default.
 func TestRunShipOmittedBaseUsesRepoConfig(t *testing.T) {
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
 	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{BaseBranch: "develop"}); err != nil {
@@ -520,9 +519,9 @@ func TestRunShipExplicitForgeFlagOverridesRepoConfig(t *testing.T) {
 }
 
 func TestRunShipFailsWithoutForgeToken(t *testing.T) {
-	// codeberg.org is on New's auto-detect allowlist (see issue #242's rework:
-	// an arbitrary unlisted host now fails forge-shape validation before ever
-	// reaching the token check, which isn't what this test is pinning).
+	// codeberg.org is on New's auto-detect allowlist. An arbitrary unlisted
+	// host now fails forge-shape validation before ever reaching the token
+	// check, which isn't what this test is pinning.
 	t.Setenv("CODEBERG_TOKEN", "")
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
 
@@ -584,7 +583,7 @@ func TestShipChangeCommitsPushesAndOpensPR(t *testing.T) {
 	}
 
 	// A lifecycle record lets `argus worktree prune` find this PR later
-	// without re-deriving it from the branch name (see issue #101).
+	// without re-deriving it from the branch name.
 	lc, found, lerr := protocol.LoadLifecycle(wt)
 	if lerr != nil || !found {
 		t.Fatalf("LoadLifecycle: found=%v err=%v", found, lerr)

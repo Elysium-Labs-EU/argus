@@ -139,7 +139,7 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	// See supervisor.ResolveWorktree: a --worktree given relative to argus's
 	// own cwd must be resolved before it reaches CurrentBranch/CommitAll/Push
 	// or protocol.Load/LoadApproval, so every downstream call agrees on the
-	// same absolute path (argus issue #98).
+	// same absolute path.
 	resolved, err := supervisor.ResolveWorktree(a.worktree)
 	if err != nil {
 		return err

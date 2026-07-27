@@ -179,8 +179,9 @@ func TestBuildPlanLabelExplicitWins(t *testing.T) {
 
 func TestBuildPlanLabelDefaultsFromTask(t *testing.T) {
 	// A worker whose branch is slugged/truncated should still get a
-	// human-readable label — folding in the task text is the whole point of
-	// issue #140 (argus-worker-N carried zero information).
+	// human-readable label — folding in the task text is the whole point,
+	// since a generic "argus-worker-N" branch name alone carries zero
+	// information about what the worker is doing.
 	plans := BuildPlan([]Worker{
 		{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: "/repo-a"},
 	}, nil, nil)
@@ -356,8 +357,9 @@ func TestPrepareWorktreePassesLabelNotBranch(t *testing.T) {
 	repo := t.TempDir()
 	rr := &recordingRunner{}
 	cfg := &Config{Client: herdr.NewWithRunner(rr.run), Base: "main"}
-	// Task differs from Branch so a label equal to Branch (the pre-#140
-	// behavior) is distinguishable from a label derived off Task.
+	// Task differs from Branch so a label equal to Branch (the old default
+	// before task text was folded in) is distinguishable from a label derived
+	// off Task.
 	plans := BuildPlan([]Worker{{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: repo}}, nil, nil)
 
 	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); err != nil {
@@ -378,10 +380,10 @@ func TestPrepareWorktreePassesLabelNotBranch(t *testing.T) {
 	}
 }
 
-// TestPrepareWorktreeNestsViaPaneMove pins down the actual nesting mechanism
-// (issue #216's --worker-placement tab, reworked after a real-herdr repro
-// showed WorktreeCreate's own --workspace param never nests — see its doc
-// comment): with cfg.ParentWorkspace set, prepareWorktree must call
+// TestPrepareWorktreeNestsViaPaneMove pins down the actual nesting mechanism:
+// a follow-up PaneMove call, not WorktreeCreate's own --workspace param,
+// which a real-herdr repro showed never actually nests the pane (see its doc
+// comment). With cfg.ParentWorkspace set, prepareWorktree must call
 // herdr.Client.PaneMove on the pane WorktreeCreate opened, and the returned
 // Worktree must carry PaneMove's new pane id, not WorktreeCreate's original
 // one — every downstream use (pane registry, resolvePaneID) needs the pane
@@ -449,11 +451,11 @@ func TestPrepareWorktreeFailsClosedWhenNestingFails(t *testing.T) {
 	}
 }
 
-// TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent covers argus issue #107: PR
-// #17 (closing issue #15) only gated the symptom — a terminal-phase worker
-// reporting zero measured file changes — after the fact. It never addressed
-// the mechanism #15 actually described: a headless spawn attaching to a
-// stale, unrelated session's state. PaneRun's own doc comment already
+// TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent guards against a headless
+// spawn silently attaching to a stale, unrelated session's state. An earlier
+// fix only gated the symptom — a terminal-phase worker reporting zero
+// measured file changes — after the fact, and never addressed the underlying
+// mechanism. PaneRun's own doc comment already
 // explains why that can happen — it delivers its command line as a literal
 // chat message if the target pane already has a live agent sitting in it —
 // so execute must check AgentGet and refuse rather than call PaneRun blind.
@@ -465,8 +467,9 @@ func TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent(t *testing.T) {
 			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
 		}
 		if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
-			// Simulate the exact #15 hazard: the pane execute is about to type
-			// into already has a live, unrelated session running in it.
+			// Simulate the hazard being guarded against: the pane execute is
+			// about to type into already has a live, unrelated session running
+			// in it.
 			return []byte(`{"result":{"agent":{"pane_id":"w9:p1","cwd":"/tmp/relocated-worktree","agent":"claude","agent_session":{"agent":"claude","value":"stale-session-uuid"}}}}`), nil
 		}
 		if len(args) >= 2 && args[0] == "pane" && args[1] == "run" {
@@ -534,7 +537,7 @@ func TestExecuteWrapsSpawnLineViaRuntimeAdapterWhenConfigured(t *testing.T) {
 
 func TestResolveSpawnLineLeavesLauncherUnresolvedForRuntimeAdapter(t *testing.T) {
 	// The fake launcher binary sits on PATH so that, if resolveSpawnLine
-	// wrongly resolves it (issue #56), the wrong absolute host path leaks
+	// wrongly resolves it, the wrong absolute host path leaks
 	// into the line handed to the container adapter.
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
@@ -695,9 +698,10 @@ func TestReviewEscalationsAutoApprovesCleanAndReviewsEscalated(t *testing.T) {
 	}
 }
 
-// TestReviewEscalationsHardReasonSurvivesReviewerApprove is the regression for
-// issue #105: a worker whose real diff dwarfs its self-report is exactly the
-// case a reviewer's "approve" must not be able to talk past, because the
+// TestReviewEscalationsHardReasonSurvivesReviewerApprove guards a hard-reason
+// escalation from being overturned by a reviewer's "approve": a worker whose
+// real diff dwarfs its self-report is exactly the case a reviewer must not be
+// able to talk past, because the
 // discrepancy is evidence status.json can't be trusted for this change, not a
 // stylistic judgment call. Wire a fake reviewer that always approves and assert
 // the persisted verdict is still not-approved.
@@ -808,9 +812,9 @@ func TestReworkRoundNotBlockedByStaleCumulativeUnderReport(t *testing.T) {
 }
 
 func TestReviewEscalationsThreadsPriorFindingsFromVerdict(t *testing.T) {
-	// argus issue #108: a prior request-changes verdict on this worktree must
-	// reach the next review's prompt, so the reviewer re-checks the specific
-	// defect instead of a fresh holistic pass that can miss it again.
+	// A prior request-changes verdict on this worktree must reach the next
+	// review's prompt, so the reviewer re-checks the specific defect instead
+	// of a fresh holistic pass that can miss it again.
 	wt := gitWorktreeWithDiff(t)
 	if err := protocol.WriteApproval(wt, &protocol.Approval{
 		Approved: false,
@@ -878,9 +882,9 @@ func (b *recordingBroker) Revoke(agent string) int {
 	return 1
 }
 
-// TestRecordApprovalRevokesCredentialBroker is the regression for argus issue
-// #184: a judged worker's sentinel must be revoked the moment its verdict is
-// recorded, whether that verdict approves or rejects — the gate has ruled
+// TestRecordApprovalRevokesCredentialBroker guards against a judged worker's
+// sentinel being left un-revoked: it must be revoked the moment its verdict
+// is recorded, whether that verdict approves or rejects — the gate has ruled
 // either way, and nothing else in this process learns a worker's fate is
 // decided. A nil Broker (the no-proxy default) must not panic.
 func TestRecordApprovalRevokesCredentialBroker(t *testing.T) {
@@ -1043,8 +1047,8 @@ func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 	}
 }
 
-// TestPollStatusIgnoresStatusFromBeforeDispatch covers argus issue #75: a
-// worktree can carry a stale terminal-phase status.json from an unrelated
+// TestPollStatusIgnoresStatusFromBeforeDispatch guards against a
+// worktree carrying a stale terminal-phase status.json from an unrelated
 // prior task even after InvalidateStatus runs (e.g. a race, or invalidation
 // failing silently in some other caller). pollStatus's own dispatchedAt
 // comparison, based on the file's real mtime rather than its self-reported
@@ -1084,13 +1088,13 @@ func TestPollStatusIgnoresStatusFromBeforeDispatch(t *testing.T) {
 	}
 }
 
-// TestPollStatusAcceptsStatusWithLyingUpdatedAt covers argus issue #90: the
-// staleness guard above must judge freshness by the status file's own mtime,
-// not by the worker's self-reported UpdatedAt field. A worker that writes a
-// garbage/template UpdatedAt (e.g. copied from an example in its brief) that
-// reads as before dispatchedAt must still have its real, post-dispatch write
-// picked up — the #80 hang was exactly this: the guard trusted the lying
-// UpdatedAt and discarded every poll forever.
+// TestPollStatusAcceptsStatusWithLyingUpdatedAt guards against the staleness
+// check above trusting the worker's self-reported UpdatedAt field instead of
+// the status file's own mtime. A worker that writes a garbage/template
+// UpdatedAt (e.g. copied from an example in its brief) that reads as before
+// dispatchedAt must still have its real, post-dispatch write picked up —
+// trusting the lying UpdatedAt instead caused a real hang, where the guard
+// discarded every poll forever and pollStatus never returned.
 func TestPollStatusAcceptsStatusWithLyingUpdatedAt(t *testing.T) {
 	wt := t.TempDir()
 	dispatchedAt := time.Now()
@@ -1269,12 +1273,12 @@ func TestWaitForWakeFloorsRepeatCallsWhenAlreadyMatching(t *testing.T) {
 	}
 }
 
-// TestExecuteInvalidatesStaleStatusBeforeSpawn covers argus issue #75: a
-// worktree directory can carry a leftover status.json/verdict.json from an
+// TestExecuteInvalidatesStaleStatusBeforeSpawn guards against a worktree
+// directory carrying a leftover status.json/verdict.json from an
 // unrelated prior task even though the branch itself is freshly created
 // (e.g. directory reuse in worktree creation). execute must remove both
 // before the worker's pane is spawned, mirroring InvalidateStatus's existing
-// use in cmd/rebase.go (issue #50).
+// use in cmd/rebase.go.
 func TestExecuteInvalidatesStaleStatusBeforeSpawn(t *testing.T) {
 	repo := t.TempDir()
 	wt := filepath.Join(repo, ".claude", "worktrees", "feat-x")
@@ -1312,9 +1316,9 @@ func TestExecuteInvalidatesStaleStatusBeforeSpawn(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 
-	// The stale content itself (issue #75) must be gone — but execute now
-	// writes its own fresh status.json right back, recording the base branch
-	// (issue #161/#160), so the file existing again is expected; only its
+	// The stale content itself must be gone — but execute now
+	// writes its own fresh status.json right back, recording the base branch,
+	// so the file existing again is expected; only its
 	// content must no longer be the unrelated prior task's.
 	got, err := protocol.Load(protocol.StatusPath(wt))
 	if err != nil {
@@ -1436,7 +1440,7 @@ func fakePaneListAndPromptRunner(paneID string, agentStatus func() string, promp
 	}
 }
 
-// TestCheckHerdrStuckNudgesDoneBeforeEscalating covers argus issue #244: a
+// TestCheckHerdrStuckNudgesDoneBeforeEscalating verifies that a
 // worker whose pane herdr reports "done" gets exactly one AgentPrompt
 // reminder to run `argus worker report` before the gate escalates to a
 // human — the mismatch is entirely mechanical, so a re-prompt gets first
@@ -1505,8 +1509,7 @@ func TestCheckHerdrStuckNudgeFailureEscalatesImmediately(t *testing.T) {
 
 // TestCheckHerdrStuckBlockedNeverNudges: a "blocked" pane is waiting on an
 // unanswered permission prompt, which no text nudge resolves, so it must
-// escalate immediately (matching pre-#244 behavior) without ever calling
-// AgentPrompt.
+// escalate immediately without ever calling AgentPrompt.
 func TestCheckHerdrStuckBlockedNeverNudges(t *testing.T) {
 	var promptCalls int
 	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "blocked" }, nil, &promptCalls))

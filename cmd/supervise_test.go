@@ -596,8 +596,8 @@ func TestSpawnWorkersTasksFileAppendsToTasks(t *testing.T) {
 	}
 }
 
-// TestSpawnWorkersRelativeRepoResolvesAbsolute guards against a bug (argus
-// issue #68) where an explicit `--repo .` (or any relative --repo) flowed
+// TestSpawnWorkersRelativeRepoResolvesAbsolute guards against a bug where an
+// explicit `--repo .` (or any relative --repo) flowed
 // through to the worker's RepoRoot unresolved. internal/supervisor/loop.go
 // then joins RepoRoot with ".claude/worktrees/<branch>" to build the
 // worktree path — filepath.Join collapses a leading "." so the resulting
