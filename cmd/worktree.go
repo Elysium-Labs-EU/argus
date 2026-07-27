@@ -11,6 +11,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -35,6 +36,7 @@ func newWorktreePruneCmd() *cobra.Command {
 	var (
 		repo          string
 		branch        string
+		forgeKind     string
 		merged        bool
 		dryRun        bool
 		credentialEnv map[string]string
@@ -60,6 +62,7 @@ worktree under the repo.`,
 			}
 			return runWorktreePrune(cmd, &worktreePruneArgs{
 				repo: repo, branch: branch, merged: merged, dryRun: dryRun, credentialEnv: overrides,
+				forgeKind: forgeKind, forgeKindExplicit: cmd.Flags().Changed("forge"),
 			})
 		},
 	}
@@ -69,6 +72,7 @@ worktree under the repo.`,
 	cmd.Flags().BoolVar(&merged, "merged", false, "sweep every worktree under the repo, not just one branch")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan (which worktrees, which check failed/passed) without deleting anything")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
+	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
 	return cmd
 }
 
@@ -77,7 +81,12 @@ worktree under the repo.`,
 type worktreePruneArgs struct {
 	credentialEnv  map[string]string
 	repo, branch   string
+	forgeKind      string
 	merged, dryRun bool
+	// forgeKindExplicit is true only when --forge was actually passed,
+	// mirroring shipArgs.forgeKindExplicit's explicit-flag-wins precedence
+	// over this repo's .argus/config.yml forge key.
+	forgeKindExplicit bool
 }
 
 // runWorktreePrune is newWorktreePruneCmd's RunE body, extracted so the
@@ -115,7 +124,15 @@ func runWorktreePrune(cmd *cobra.Command, a *worktreePruneArgs) error {
 	if err != nil {
 		return err
 	}
-	f, ferr := forge.New(host, forge.TokenForHost(host, a.credentialEnv), nil, forge.KindAuto)
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		return fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)
+	}
+	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, rc.Forge))
+	if err != nil {
+		return err
+	}
+	f, ferr := forge.New(host, forge.TokenForHost(host, a.credentialEnv), nil, kind)
 	if ferr != nil {
 		return ferr
 	}

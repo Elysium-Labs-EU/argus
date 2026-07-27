@@ -26,6 +26,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.WorkerPlacement != "" {
 		fmt.Fprintf(&b, "worker_placement: %s\n", quoteYAML(cfg.WorkerPlacement))
 	}
+	if cfg.Forge != "" {
+		fmt.Fprintf(&b, "forge: %s\n", quoteYAML(cfg.Forge))
+	}
 	if cfg.WorktreeDir != "" {
 		fmt.Fprintf(&b, "worktree_dir: %s\n", quoteYAML(cfg.WorktreeDir))
 	}
@@ -105,7 +108,7 @@ func listFieldFor(cfg *Config, key string) *[]string {
 
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
-// scalars (base_branch, worker_placement, worktree_dir, brief_note,
+// scalars (base_branch, worker_placement, forge, worktree_dir, brief_note,
 // review_note, ship_lint, verify_command, review_effort, max_diff_lines;
 // value optionally quoted), and a top-level list key (`allow`, `proof_required_paths`,
 // `always_review_paths`) followed by indented `- value` list items. Any
@@ -153,6 +156,8 @@ func parseYAML(data string) (Config, error) {
 			cfg.BaseBranch = value
 		case "worker_placement":
 			cfg.WorkerPlacement = value
+		case "forge":
+			cfg.Forge = value
 		case "worktree_dir":
 			cfg.WorktreeDir = value
 		case "brief_note":

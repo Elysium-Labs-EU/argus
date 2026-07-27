@@ -140,6 +140,22 @@ func TestSaveLoadRoundTripWorkerPlacement(t *testing.T) {
 	}
 }
 
+func TestSaveLoadRoundTripForge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	want := Config{Forge: "gitlab"}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
 func TestSaveLoadRoundTripWorktreeDir(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".argus", "config.yml")

@@ -52,6 +52,15 @@ type Config struct {
 	ShipLint        string
 	VerifyCommand   string
 	ReviewEffort    string
+	// Forge names the API shape ("gitlab" or "gitea") for a repo whose host
+	// isn't one of forge.New's three auto-detected hosts (github.com,
+	// gitlab.com, codeberg.org) — the same ambiguity ship/supervise/worktree
+	// prune's own --forge flag resolves per invocation, set once here since a
+	// repo's forge is a static fact, not something that varies invocation to
+	// invocation. Empty behaves like forge.KindAuto: the hosted-forge
+	// allowlist still applies, and any other host still refuses without an
+	// explicit --forge. An explicit --forge flag always overrides this.
+	Forge string
 	// WorktreeDir overrides where a spawned worker's worktree is created,
 	// same plain-string-means-unset shape as WorkerPlacement. Empty keeps
 	// argus's default (<repo>/.claude/worktrees/<branch>); a relative value
