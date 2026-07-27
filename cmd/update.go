@@ -568,6 +568,8 @@ func runUpdate(ctx context.Context, out io.Writer, exePath, currentVersion strin
 		return fmt.Errorf("installing new binary: %w", replaceErr)
 	}
 
+	refreshInstalledCompletions(ctx, out, exePath)
+
 	_, _ = fmt.Fprintf(out, "%s updated %s -> %s\n", ui.LabelSuccess.Render("✓"), currentVersion, latestVer)
 	return nil
 }
