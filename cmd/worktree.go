@@ -89,6 +89,74 @@ type worktreePruneArgs struct {
 	forgeKindExplicit bool
 }
 
+// pruneTargets is what resolvePruneTargets resolves before runWorktreePrune
+// hands off to prunePlan: the repo/forge identity and the candidate worktree
+// list, independent of --dry-run.
+type pruneTargets struct {
+	client   forge.Forge
+	repoRoot string
+	owner    string
+	name     string
+	entries  []supervisor.WorktreeEntry
+}
+
+// resolvePruneTargets runs runWorktreePrune's resolution steps — repo root,
+// candidate worktrees, repo/forge identity — so runWorktreePrune itself only
+// has to branch on the outcome. Split out because this is the bulk of
+// runWorktreePrune's own decision points; isolating them here keeps both
+// functions independently testable and each under the CRAP gate.
+func resolvePruneTargets(ctx context.Context, a *worktreePruneArgs) (*pruneTargets, error) {
+	resolvedRepo, err := supervisor.ResolveWorktree(a.repo)
+	if err != nil {
+		return nil, err
+	}
+	repoRoot, err := supervisor.RepoRoot(ctx, resolvedRepo)
+	if err != nil {
+		return nil, fmt.Errorf("resolving repo root for %s: %w", resolvedRepo, err)
+	}
+
+	entries, err := supervisor.ListLinkedWorktrees(ctx, repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	if a.branch != "" {
+		entries = filterByBranch(entries, a.branch)
+		if len(entries) == 0 {
+			return nil, &ui.UserError{Err: fmt.Errorf("no worktree found for branch %q under %s", a.branch, repoRoot)}
+		}
+	}
+
+	owner, name, client, err := resolvePruneForgeClient(ctx, repoRoot, a)
+	if err != nil {
+		return nil, err
+	}
+	return &pruneTargets{repoRoot: repoRoot, owner: owner, name: name, entries: entries, client: client}, nil
+}
+
+// resolvePruneForgeClient resolves the repo/forge identity for repoRoot and
+// builds the forge.Forge client prunePlan needs to check PR merge state.
+// Split out of resolvePruneTargets so each half of the resolution stays small
+// and independently testable.
+func resolvePruneForgeClient(ctx context.Context, repoRoot string, a *worktreePruneArgs) (owner, name string, client forge.Forge, err error) {
+	host, owner, name, err := resolveRepo(ctx, "", repoRoot)
+	if err != nil {
+		return "", "", nil, err
+	}
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		return "", "", nil, fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)
+	}
+	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, rc.Forge))
+	if err != nil {
+		return "", "", nil, err
+	}
+	client, err = forge.New(host, forge.TokenForHost(host, a.credentialEnv), nil, kind)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return owner, name, client, nil
+}
+
 // runWorktreePrune is newWorktreePruneCmd's RunE body, extracted so the
 // decision logic is independently testable.
 func runWorktreePrune(cmd *cobra.Command, a *worktreePruneArgs) error {
@@ -100,47 +168,15 @@ func runWorktreePrune(cmd *cobra.Command, a *worktreePruneArgs) error {
 	}
 
 	ctx := cmd.Context()
-	resolvedRepo, err := supervisor.ResolveWorktree(a.repo)
+	targets, err := resolvePruneTargets(ctx, a)
 	if err != nil {
 		return err
-	}
-	repoRoot, err := supervisor.RepoRoot(ctx, resolvedRepo)
-	if err != nil {
-		return fmt.Errorf("resolving repo root for %s: %w", resolvedRepo, err)
-	}
-
-	entries, err := supervisor.ListLinkedWorktrees(ctx, repoRoot)
-	if err != nil {
-		return err
-	}
-	if a.branch != "" {
-		entries = filterByBranch(entries, a.branch)
-		if len(entries) == 0 {
-			return &ui.UserError{Err: fmt.Errorf("no worktree found for branch %q under %s", a.branch, repoRoot)}
-		}
-	}
-
-	host, owner, name, err := resolveRepo(ctx, "", repoRoot)
-	if err != nil {
-		return err
-	}
-	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
-	if err != nil {
-		return fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)
-	}
-	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, rc.Forge))
-	if err != nil {
-		return err
-	}
-	f, ferr := forge.New(host, forge.TokenForHost(host, a.credentialEnv), nil, kind)
-	if ferr != nil {
-		return ferr
 	}
 
 	logger, closeLog := openRunLog(cmd, "worktree_prune")
 	defer closeLog()
 
-	prunePlan(cmd, ctx, logger, f, herdr.New(), owner, name, repoRoot, entries, a.dryRun)
+	prunePlan(cmd, ctx, logger, targets.client, herdr.New(), targets.owner, targets.name, targets.repoRoot, targets.entries, a.dryRun)
 	return nil
 }
 
