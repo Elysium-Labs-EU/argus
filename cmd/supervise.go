@@ -795,7 +795,11 @@ func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[
 			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN), or run `gh auth login` / `glab auth login`",
 		}
 	}
-	return forge.New(host, token, nil), owner, name, nil
+	f, err = forge.New(host, token, nil, forge.KindAuto)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return f, owner, name, nil
 }
 
 // issuesToTasks renders each issue into a worker brief and a default branch

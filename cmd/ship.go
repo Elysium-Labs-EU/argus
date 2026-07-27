@@ -35,6 +35,7 @@ func newShipCmd() *cobra.Command {
 		jiraIssue      string
 		jiraTransition string
 		jiraAssignee   string
+		forgeKind      string
 	)
 
 	cmd := &cobra.Command{
@@ -44,10 +45,11 @@ func newShipCmd() *cobra.Command {
 and opens a pull request. It is Milestone C of argus: the deterministic final step
 once a change has been reviewed. The forge (Codeberg/Gitea, GitHub, or GitLab) is
 detected from the worktree's origin remote and the matching token is read from the
-environment (CODEBERG_TOKEN, GITHUB_TOKEN, GITLAB_TOKEN, ...). Only the exact host
-gitlab.com gets the GitLab API client; self-hosted GitLab is not yet supported and
-is treated as Gitea/Forgejo. Repo owner/name and branch are derived from the
-worktree unless overridden.`,
+environment (CODEBERG_TOKEN, GITHUB_TOKEN, GITLAB_TOKEN, ...). Auto-detection only
+covers the exact hosts github.com, gitlab.com, and codeberg.org; a self-hosted
+GitLab, Gitea, or Forgejo instance needs an explicit --forge gitlab or --forge
+gitea, since a host name alone can't say which REST shape it speaks. Repo
+owner/name and branch are derived from the worktree unless overridden.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			overrides, err := resolveCredentialOverrides(credentialEnv)
 			if err != nil {
@@ -57,6 +59,7 @@ worktree unless overridden.`,
 				worktree: worktree, base: base, baseIsDefault: !cmd.Flags().Changed("base"), title: title, repo: repo,
 				issue: issue, force: force, dryRun: dryRun, credentialEnv: overrides,
 				jiraIssue: jiraIssue, jiraTransition: jiraTransition, jiraAssignee: jiraAssignee,
+				forgeKind: forgeKind,
 			})
 		},
 	}
@@ -72,6 +75,7 @@ worktree unless overridden.`,
 	cmd.Flags().StringVar(&jiraIssue, "jira-issue", "", "Jira issue key (e.g. PROJ-123) to update once the PR is open; unset by default, which skips the Jira post-ship hook entirely. Requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
 	cmd.Flags().StringVar(&jiraTransition, "jira-transition", "", "with --jira-issue: transition name or ID to move the issue to (e.g. \"In Review\"); no transition is made if unset")
 	cmd.Flags().StringVar(&jiraAssignee, "jira-assignee", "", "with --jira-issue: Jira accountID to assign the issue to; not reassigned if unset")
+	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host)")
 	return cmd
 }
 
@@ -88,6 +92,7 @@ type shipArgs struct {
 	jiraIssue      string
 	jiraTransition string
 	jiraAssignee   string
+	forgeKind      string
 	issue          int
 	force          bool
 	dryRun         bool
@@ -148,6 +153,16 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	if err != nil {
 		return err
 	}
+	kind, err := parseForgeKind(a.forgeKind)
+	if err != nil {
+		return err
+	}
+	// Validated with no token so this also runs (and can fail) under --dry-run:
+	// a clean dry-run plan previously proved nothing about whether the real API
+	// call would even hit the right forge shape for the host.
+	if _, verr := forge.New(host, "", nil, kind); verr != nil {
+		return verr
+	}
 
 	reader := bufio.NewReader(cmd.InOrStdin())
 	out := cmd.OutOrStdout()
@@ -172,7 +187,10 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN), or run `gh auth login` / `glab auth login`",
 		}
 	}
-	f := forge.New(host, token, nil)
+	f, ferr := forge.New(host, token, nil, kind)
+	if ferr != nil {
+		return ferr
+	}
 	prTitle, terr := resolvePRTitle(ctx, f, reader, out, a, owner, name, branch)
 	if terr != nil {
 		return terr
@@ -383,6 +401,18 @@ func resolveRepo(ctx context.Context, override, worktree string) (host, owner, n
 		owner, name = o, n
 	}
 	return host, owner, name, nil
+}
+
+// parseForgeKind turns --forge's raw flag value into a forge.Kind, rejecting
+// anything but the values forge.New itself understands so a typo surfaces
+// immediately instead of silently falling back to auto-detection.
+func parseForgeKind(raw string) (forge.Kind, error) {
+	switch forge.Kind(raw) {
+	case forge.KindAuto, forge.KindGitLab, forge.KindGitea:
+		return forge.Kind(raw), nil
+	default:
+		return "", &ui.UserError{Err: fmt.Errorf("--forge must be %q or %q, got %q", forge.KindGitLab, forge.KindGitea, raw)}
+	}
 }
 
 func splitOwnerRepo(s string) (owner, name string, ok bool) {

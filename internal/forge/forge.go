@@ -1,10 +1,13 @@
 // Package forge is argus's abstraction over the git host it ships to. argus was
 // born Codeberg-only; this package lets it open pull requests and read issues on
-// GitHub and GitLab too, selected by the host in the worktree's git remote.
-// Gitea/Forgejo (Codeberg) and GitHub differ only in a few details (base URL,
-// auth scheme, Accept header) over an otherwise identical REST surface, so one
-// parameterized client serves both. GitLab's shape (PRIVATE-TOKEN auth, merge
-// requests instead of pulls) differs enough to warrant its own client.
+// GitHub and GitLab too, selected by the host in the worktree's git remote for
+// the three hosted forges (github.com, gitlab.com, codeberg.org) and by an
+// explicit Kind override for anything self-hosted, where hostname alone can't
+// say which REST shape it speaks. Gitea/Forgejo (Codeberg) and GitHub differ
+// only in a few details (base URL, auth scheme, Accept header) over an
+// otherwise identical REST surface, so one parameterized client serves both.
+// GitLab's shape (PRIVATE-TOKEN auth, merge requests instead of pulls) differs
+// enough to warrant its own client.
 package forge
 
 import (
@@ -66,29 +69,68 @@ type Forge interface {
 	Host() string
 }
 
-// New returns a Forge for host, authenticated with token. github.com maps to the
-// GitHub API; gitlab.com maps to the GitLab API; every other host is treated as
-// Gitea/Forgejo (Codeberg and any self-hosted instance), whose API lives at
-// https://<host>/api/v1. hc may be nil for a default client with a timeout.
-func New(host, token string, hc *http.Client) Forge {
+// Kind explicitly selects a forge's API shape for a host outside New's
+// hosted-forge allowlist: a self-hosted GitLab instance and a self-hosted
+// Gitea/Forgejo instance are indistinguishable by host name alone, but their
+// REST surfaces (merge_requests vs pulls, PRIVATE-TOKEN vs token auth) are
+// not interchangeable. KindAuto defers to New's allowlist-based detection.
+type Kind string
+
+const (
+	KindAuto   Kind = ""
+	KindGitLab Kind = "gitlab"
+	KindGitea  Kind = "gitea"
+)
+
+// New returns a Forge for host, authenticated with token. hc may be nil for a
+// default client with a timeout.
+//
+// With kind == KindAuto, only the three hosted forges argus knows the exact
+// API shape of without being told — github.com, gitlab.com, codeberg.org —
+// auto-route. Every other host, self-hosted or not, is refused: a host name
+// is not a reliable signal for which REST shape (Gitea/Forgejo's or GitLab's)
+// a self-hosted instance actually speaks — "git.company.com" and
+// "code.company.com" are exactly as likely to be either as something with
+// "gitlab" in the name is — and guessing wrong sends the wrong shaped API
+// request instead of a clean error. Pass kind == KindGitLab or KindGitea to
+// say which shape a non-hosted host actually is and bypass that refusal.
+func New(host, token string, hc *http.Client, kind Kind) (Forge, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 20 * time.Second}
 	}
-	if host == "github.com" {
+	switch kind {
+	case KindGitLab:
+		return &gitlab{host: host, base: "https://" + host + "/api/v4", http: hc, token: token}, nil
+	case KindGitea:
+		return newGiteaShaped(host, hc, token), nil
+	case KindAuto:
+		// fall through to the allowlist below
+	default:
+		return nil, fmt.Errorf("unknown forge kind %q: want %q or %q", kind, KindGitLab, KindGitea)
+	}
+	switch host {
+	case "github.com":
 		return &rest{
 			host: host, base: "https://api.github.com",
 			authScheme: "Bearer", accept: "application/vnd.github+json",
 			http: hc, token: token,
-		}
+		}, nil
+	case "gitlab.com":
+		return &gitlab{host: host, base: "https://gitlab.com/api/v4", http: hc, token: token}, nil
+	case "codeberg.org":
+		return newGiteaShaped(host, hc, token), nil
+	default:
+		return nil, fmt.Errorf(
+			"host %q is not one of the auto-detected forges (github.com, gitlab.com, codeberg.org); "+
+				"argus cannot tell a self-hosted GitLab and a self-hosted Gitea/Forgejo apart by hostname "+
+				"alone, and guessing wrong sends the wrong shaped API request instead of a clean error — "+
+				"pass --forge gitlab or --forge gitea to say which this host is", host)
 	}
-	// Exact match only: self-hosted GitLab needs an explicit future flag, since
-	// hostname alone can't disambiguate a self-hosted GitLab from Gitea/Forgejo.
-	if host == "gitlab.com" {
-		return &gitlab{
-			host: host, base: "https://gitlab.com/api/v4",
-			http: hc, token: token,
-		}
-	}
+}
+
+// newGiteaShaped builds the shared REST client for Gitea/Forgejo, whose API
+// lives at https://<host>/api/v1.
+func newGiteaShaped(host string, hc *http.Client, token string) Forge {
 	return &rest{
 		host: host, base: "https://" + host + "/api/v1",
 		authScheme: "token", accept: "application/json",
