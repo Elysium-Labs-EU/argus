@@ -4,10 +4,13 @@
 // invocation (see argus issue #161). argus itself assigns no semantics to
 // any value here beyond the narrow places that read it back
 // (agentadapter's base allow-list, supervise/rebase/ship's base-branch
-// resolution, the brief_note appended verbatim to a generated brief,
-// cmd/gatepolicy.go's review-gate precedence, supervise's
-// --worker-placement default, and ship_lint — the one key that does run a
-// command, controller-side, before ship commits).
+// resolution, the brief_note appended verbatim to a generated brief, the
+// review_note appended verbatim to the reviewer's prompt, cmd/gatepolicy.go's
+// review-gate precedence, supervise's --worker-placement default, and
+// ship_lint — the one key that does run a command, controller-side, before
+// ship commits) — it otherwise never runs a build/test/lint command of its
+// own, so there is nothing else for this schema to grow into without
+// relocating the same toolchain-hardcoding problem from code into config.
 package repoconfig
 
 import (
@@ -33,6 +36,7 @@ type Config struct {
 	BaseBranch         string
 	WorkerPlacement    string
 	BriefNote          string
+	ReviewNote         string
 	ShipLint           string
 	MaxDiffLines       *int
 	Allow              []string

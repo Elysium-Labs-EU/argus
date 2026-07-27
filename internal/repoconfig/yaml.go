@@ -29,6 +29,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.BriefNote != "" {
 		fmt.Fprintf(&b, "brief_note: %s\n", quoteYAML(cfg.BriefNote))
 	}
+	if cfg.ReviewNote != "" {
+		fmt.Fprintf(&b, "review_note: %s\n", quoteYAML(cfg.ReviewNote))
+	}
 	if cfg.ShipLint != "" {
 		fmt.Fprintf(&b, "ship_lint: %s\n", quoteYAML(cfg.ShipLint))
 	}
@@ -87,8 +90,9 @@ func listFieldFor(cfg *Config, key string) *[]string {
 
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
-// scalars (base_branch, worker_placement, brief_note, ship_lint,
-// max_diff_lines; value optionally quoted), and a top-level list key (`allow`, `proof_required_paths`,
+// scalars (base_branch, worker_placement, brief_note, review_note,
+// ship_lint, max_diff_lines; value optionally quoted), and a top-level list
+// key (`allow`, `proof_required_paths`,
 // `always_review_paths`) followed by indented `- value` list items. Any
 // other top-level key is ignored (along with any indented block under it),
 // so a future config key this version doesn't know about doesn't break
@@ -136,6 +140,8 @@ func parseYAML(data string) (Config, error) {
 			cfg.WorkerPlacement = value
 		case "brief_note":
 			cfg.BriefNote = value
+		case "review_note":
+			cfg.ReviewNote = value
 		case "ship_lint":
 			cfg.ShipLint = value
 		case "max_diff_lines":

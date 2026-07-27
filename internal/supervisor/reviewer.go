@@ -19,10 +19,15 @@ import (
 // can name the discrepancy instead of the model discovering only after the fact
 // that its "approve" didn't ship anything.
 type ReviewRequest struct {
-	Task        string
-	Branch      string
-	Worktree    string
-	Diff        string
+	Task     string
+	Branch   string
+	Worktree string
+	Diff     string
+	// ReviewNote is this repo's optional .argus/config.yml review_note (see
+	// internal/repoconfig), appended verbatim to the prompt. argus assigns it
+	// no semantics — it is operator instructions passed straight to the
+	// model, the review-side counterpart to brief_note.
+	ReviewNote  string
 	Reasons     []string
 	HardReasons []string
 	// PriorFindings carries a previous request-changes verdict's Reasons for this
@@ -155,6 +160,11 @@ func reviewPrompt(req *ReviewRequest) string {
 	var b strings.Builder
 	b.WriteString("You are a code reviewer. A deterministic gate flagged this change for review.\n")
 	b.WriteString("Judge only correctness, parity with existing code, and test adequacy.\n\n")
+	if req.ReviewNote != "" {
+		b.WriteString("Repo-specific review criteria (from this repo's .argus/config.yml):\n")
+		b.WriteString(req.ReviewNote)
+		b.WriteString("\n\n")
+	}
 	if req.Worktree != "" {
 		b.WriteString("You are running inside the change's worktree. Use your Read/Grep/Glob tools\n")
 		b.WriteString("to verify the diff against the ACTUAL files: confirm referenced symbols and\n")

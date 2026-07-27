@@ -180,12 +180,13 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 		return fmt.Errorf("resolving home dir: %w", err)
 	}
 	cfg := &supervisor.Config{
-		Now:      time.Now,
-		Log:      logger,
-		Policy:   resolveGatePolicy(opts.gate, &rc),
-		Home:     home,
-		Base:     opts.base,
-		Reviewer: reviewer,
+		Now:        time.Now,
+		Log:        logger,
+		Policy:     resolveGatePolicy(opts.gate, &rc),
+		Home:       home,
+		Base:       opts.base,
+		Reviewer:   reviewer,
+		ReviewNote: rc.ReviewNote,
 	}
 
 	for round := 1; round <= opts.maxRounds; round++ {

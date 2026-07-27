@@ -138,6 +138,7 @@ each pane's directory in --panes mode).`,
 				policy: policy,
 				allow:  allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
 				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
+				reviewNote:      rc.ReviewNote,
 			})
 		},
 	}
@@ -183,6 +184,7 @@ type superviseOpts struct {
 	launcher          string
 	workerRuntime     string
 	workerPlacement   string
+	reviewNote        string
 	policy            *supervisor.ReviewPolicy
 	allow             []string
 	repoAllow         []string
@@ -331,6 +333,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		RepoAllow:         o.repoAllow,
 		ExtraAllow:        o.allow,
 		Policy:            o.policy,
+		ReviewNote:        o.reviewNote,
 	}
 	if o.review {
 		cfg.Reviewer = supervisor.NewCLIReviewer(o.reviewModel).WithLog(logger)
