@@ -160,7 +160,7 @@ func TestWaitForStatusReadsTerminal(t *testing.T) {
 	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Task: "r", Phase: protocol.PhaseBlocked, BlockedReason: "need decision", UpdatedAt: time.Now()}); err != nil {
 		t.Fatalf("seeding status: %v", err)
 	}
-	status, seen := WaitForStatus(context.Background(), wt, 5*time.Millisecond, time.Now().Add(-time.Minute))
+	status, seen := WaitForStatus(context.Background(), herdr.Client{}, "", wt, 5*time.Millisecond, time.Now().Add(-time.Minute), nil)
 	if !seen {
 		t.Fatal("WaitForStatus should have seen the status file")
 	}
@@ -187,7 +187,7 @@ func TestWaitForStatusIgnoresStaleStatus(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	_, seen := WaitForStatus(ctx, wt, 5*time.Millisecond, time.Now())
+	_, seen := WaitForStatus(ctx, herdr.Client{}, "", wt, 5*time.Millisecond, time.Now(), nil)
 	if seen {
 		t.Fatal("WaitForStatus should not report a status written before since")
 	}
@@ -214,7 +214,7 @@ func TestWaitForStatusAcceptsLyingUpdatedAt(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	status, seen := WaitForStatus(ctx, wt, 5*time.Millisecond, since)
+	status, seen := WaitForStatus(ctx, herdr.Client{}, "", wt, 5*time.Millisecond, since, nil)
 	if !seen {
 		t.Fatal("WaitForStatus discarded a real post-since status because of a lying UpdatedAt")
 	}
@@ -249,12 +249,40 @@ func TestWaitForStatusAcceptsMtimeSkewUnderTolerance(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	status, seen := WaitForStatus(ctx, wt, 5*time.Millisecond, since)
+	status, seen := WaitForStatus(ctx, herdr.Client{}, "", wt, 5*time.Millisecond, since, nil)
 	if !seen {
 		t.Fatal("WaitForStatus discarded a real post-since status because its mtime skewed slightly before since")
 	}
 	if status.Phase != protocol.PhaseAwaitingReview {
 		t.Errorf("phase: got %q want awaiting_review", status.Phase)
+	}
+}
+
+// TestWaitForStatusReportsHerdrBlockedPane is the regression case for argus
+// issue #236: a worker parked on an unanswered permission prompt (a repo
+// `Ask` rule overriding auto mode for one command) never writes status.json
+// to reflect that, so a caller polling the file alone sees nothing but an
+// undifferentiated "waiting" for however long the prompt sits unanswered.
+// WaitForStatus must cross-check herdr's own agent_status for the dispatched
+// pane and print a distinct notice naming the pane, not just fall silent.
+func TestWaitForStatusReportsHerdrBlockedPane(t *testing.T) {
+	wt := t.TempDir()
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "pane" && args[1] == "list" {
+			return []byte(`{"result":{"panes":[{"pane_id":"w1:p1","agent_status":"blocked"}]}}`), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	})
+
+	var buf bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	_, seen := WaitForStatus(ctx, client, "w1:p1", wt, 5*time.Millisecond, time.Now(), &buf)
+	if seen {
+		t.Fatal("no status.json was ever written; WaitForStatus should not report one seen")
+	}
+	if got := buf.String(); !strings.Contains(got, "blocked: awaiting permission approval in pane w1:p1") {
+		t.Errorf("want a blocked-pane notice naming the pane, got %q", got)
 	}
 }
 
