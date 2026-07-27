@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+// configSchemaHeader points editors with the yaml-language-server extension
+// at schemas/config.schema.json, the same trick eos's initSchemaHeader uses
+// for service.yaml — inline validation/autocomplete for free, no custom LSP.
+const configSchemaHeader = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/schemas/config.schema.json\n"
+
 // encodeYAML renders cfg as the minimal YAML document parseYAML can read
 // back: a leading comment, then any of the keys that are actually set, in
 // field order. Like internal/config's TOML encoder, this is deliberately not
@@ -13,6 +18,7 @@ import (
 // listed in Config's doc comment.
 func encodeYAML(cfg *Config) string {
 	var b strings.Builder
+	b.WriteString(configSchemaHeader)
 	b.WriteString("# .argus/config.yml — all keys are optional; see `argus init`.\n")
 	if cfg.BaseBranch != "" {
 		fmt.Fprintf(&b, "base_branch: %s\n", quoteYAML(cfg.BaseBranch))
