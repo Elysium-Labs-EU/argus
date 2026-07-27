@@ -851,11 +851,18 @@ type workerState struct {
 	// wall-clock reads) while herdr's own agent_status for this pane reports
 	// blocked or done; it resets to zero the moment that stops being true.
 	herdrStuckElapsed time.Duration
-	hasFile           bool
-	measuredOK        bool
-	planEvidenceOK    bool
-	hasPlanEvidence   bool
-	priorMeasuredOK   bool
+	// herdrNudged is set once checkHerdrStuck has sent its one AgentPrompt
+	// reminder for the pane's current stuck streak, so a still-stuck pane
+	// escalates on the next threshold crossing instead of nudging forever.
+	// It resets alongside herdrStuckElapsed the moment the pane stops
+	// looking stuck, so a worker that gets stuck again later is nudged
+	// again.
+	herdrNudged     bool
+	hasFile         bool
+	measuredOK      bool
+	planEvidenceOK  bool
+	hasPlanEvidence bool
+	priorMeasuredOK bool
 }
 
 // effective returns the status the gate should judge: the worker's reported phase,
@@ -1121,6 +1128,20 @@ func resolveSpawnLine(ctx context.Context, cfg *Config, p *WorkerPlan, workerEnv
 // has no path left to reach argus's own self-reported phases at all.
 const herdrStuckThreshold = 2 * time.Minute
 
+// herdrNudgeMessage is the one reminder checkHerdrStuck sends into a "done"
+// pane before escalating: the mismatch it targets (a worker whose chat
+// claims completion but never called `argus worker report`) is entirely
+// mechanical — the worker already knows what to report, it just didn't run
+// the command — so a single re-prompt resolves it without waiting on a
+// human to notice the gate's warning.
+const herdrNudgeMessage = "Your pane looks idle but status.json hasn't reached a terminal phase. If your work is actually finished, run `argus worker report <phase>` now with the JSON body your brief describes — that call, not this chat, is what tells argus you're ready for review."
+
+// herdrNudgeTimeout bounds AgentPrompt's own --wait --until working call
+// (see checkHerdrStuck): sized well under herdrStuckThreshold so a nudge
+// that never lands still escalates promptly instead of silently consuming
+// most of the next stuck window before anyone finds out it failed.
+const herdrNudgeTimeout = 30 * time.Second
+
 // herdrStuck reports whether herdr's own agent_status value for a pane means
 // its agent is not going to advance status.json on its own. This is
 // deliberately distinct from protocol.PhaseBlocked, which the worker itself
@@ -1150,6 +1171,13 @@ func findPane(panes []herdr.Pane, paneID string) (herdr.Pane, bool) {
 // own status_unreadable dedupe) and otherwise ignored — a transport error
 // says nothing about the worker's real state, so it must not itself count as
 // evidence of being stuck.
+//
+// A pane stuck at "done" gets exactly one AgentPrompt reminder (see
+// herdrNudgeMessage) before this escalates — its agent turn already ended
+// cleanly, so the likeliest cause is a worker that claimed completion in
+// chat and forgot the mandatory report call, which a text nudge can fix. A
+// pane stuck at "blocked" is waiting on an unanswered permission prompt that
+// no text nudge resolves, so it escalates immediately, as before.
 func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Logger, st *workerState, tick time.Duration) bool {
 	if st.paneID == "" {
 		return false
@@ -1169,6 +1197,7 @@ func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Log
 	pane, found := findPane(panes, st.paneID)
 	if !found || !herdrStuck(pane.AgentStatus) {
 		st.herdrStuckElapsed = 0
+		st.herdrNudged = false
 		return false
 	}
 
@@ -1176,6 +1205,22 @@ func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Log
 	if st.herdrStuckElapsed < herdrStuckThreshold {
 		return false
 	}
+
+	if pane.AgentStatus == "done" && !st.herdrNudged {
+		st.herdrNudged = true
+		if err := client.AgentPrompt(ctx, st.paneID, herdrNudgeMessage, herdrNudgeTimeout); err == nil {
+			st.herdrStuckElapsed = 0
+			if log != nil {
+				log.Action("herdr_nudge", st.plan.Task, pane.AgentStatus, "reminded worker to run argus worker report")
+			}
+			return false
+		} else if log != nil {
+			log.Fail("herdr_nudge", st.plan.Task, err)
+		}
+		// The nudge itself didn't land — fall through and escalate, since
+		// there's no working channel left to recover through.
+	}
+
 	st.herdrEscalation = fmt.Sprintf(
 		"herdr reports pane %s agent_status=%q for over %s, but status.json is still at phase %q — "+
 			"the worker may be stuck on an unanswered prompt or ended without ever writing a terminal status",

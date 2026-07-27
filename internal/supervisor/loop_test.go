@@ -1416,6 +1416,111 @@ func TestCheckHerdrStuckSkipsWorkerWithNoPane(t *testing.T) {
 	}
 }
 
+// fakePaneListAndPromptRunner answers `pane list` like fakePaneListRunner,
+// and additionally intercepts `agent prompt` calls: each one increments
+// *promptCalls and returns promptErr (nil for success). Any other command
+// gets an empty result.
+func fakePaneListAndPromptRunner(paneID string, agentStatus func() string, promptErr error, promptCalls *int) herdr.Runner {
+	return func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "pane" && args[1] == "list" {
+			return []byte(`{"result":{"panes":[{"pane_id":"` + paneID + `","agent_status":"` + agentStatus() + `"}]}}`), nil
+		}
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "prompt" {
+			*promptCalls++
+			if promptErr != nil {
+				return nil, promptErr
+			}
+			return []byte(`{"result":{}}`), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	}
+}
+
+// TestCheckHerdrStuckNudgesDoneBeforeEscalating covers argus issue #244: a
+// worker whose pane herdr reports "done" gets exactly one AgentPrompt
+// reminder to run `argus worker report` before the gate escalates to a
+// human — the mismatch is entirely mechanical, so a re-prompt gets first
+// crack at fixing it. A worker that ignores the nudge and stays stuck for a
+// second full threshold window still escalates, and never gets a second
+// nudge.
+func TestCheckHerdrStuckNudgesDoneBeforeEscalating(t *testing.T) {
+	var promptCalls int
+	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "done" }, nil, &promptCalls))
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+
+	if checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+		t.Fatal("must not escalate before herdrStuckThreshold is crossed")
+	}
+
+	if checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+		t.Fatal("crossing the threshold for the first time must nudge, not escalate")
+	}
+	if promptCalls != 1 {
+		t.Fatalf("expected exactly one AgentPrompt nudge, got %d", promptCalls)
+	}
+	if st.herdrEscalation != "" {
+		t.Error("a freshly nudged worker must not be escalated yet")
+	}
+	if st.herdrStuckElapsed != 0 {
+		t.Errorf("nudging should reset the stuck timer to give the worker a fresh window, got %v", st.herdrStuckElapsed)
+	}
+
+	// The worker ignores the nudge and stays "done" for another full
+	// threshold window: this time it must escalate, and must not nudge again.
+	if checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+		t.Fatal("must not escalate before the second threshold window is crossed")
+	}
+	if !checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+		t.Fatal("must escalate once the worker stays stuck through a second threshold window")
+	}
+	if promptCalls != 1 {
+		t.Errorf("must not nudge a worker more than once per stuck streak, got %d prompt calls", promptCalls)
+	}
+	if st.herdrEscalation == "" {
+		t.Error("expected herdrEscalation to be set")
+	}
+}
+
+// TestCheckHerdrStuckNudgeFailureEscalatesImmediately: if the nudge itself
+// can't be delivered (herdr errors on the AgentPrompt call), there is no
+// working channel left to recover through, so checkHerdrStuck must escalate
+// in the same call rather than silently swallowing the failure and waiting
+// out another threshold window.
+func TestCheckHerdrStuckNudgeFailureEscalatesImmediately(t *testing.T) {
+	var promptCalls int
+	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "done" }, errors.New("boom"), &promptCalls))
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+
+	checkHerdrStuck(context.Background(), client, nil, st, time.Minute)
+	if !checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+		t.Fatal("a failed nudge must escalate immediately, not wait out another threshold window")
+	}
+	if promptCalls != 1 {
+		t.Errorf("expected exactly one attempted nudge, got %d", promptCalls)
+	}
+	if st.herdrEscalation == "" {
+		t.Error("expected herdrEscalation to be set after a failed nudge")
+	}
+}
+
+// TestCheckHerdrStuckBlockedNeverNudges: a "blocked" pane is waiting on an
+// unanswered permission prompt, which no text nudge resolves, so it must
+// escalate immediately (matching pre-#244 behavior) without ever calling
+// AgentPrompt.
+func TestCheckHerdrStuckBlockedNeverNudges(t *testing.T) {
+	var promptCalls int
+	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "blocked" }, nil, &promptCalls))
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+
+	checkHerdrStuck(context.Background(), client, nil, st, time.Minute)
+	if !checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+		t.Fatal("a blocked pane must escalate on the first threshold crossing")
+	}
+	if promptCalls != 0 {
+		t.Errorf("a blocked pane must never receive an AgentPrompt nudge, got %d calls", promptCalls)
+	}
+}
+
 // TestGateVerdictEscalatesOnHerdrStuckWorkerWithNoStatusFile: before this fix,
 // reviewEscalations/logRunSummary (and gateVerdict's callers) skipped any
 // worker with hasFile == false outright, so a worker herdr reported blocked
