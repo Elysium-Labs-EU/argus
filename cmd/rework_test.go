@@ -69,13 +69,24 @@ const reworkTestPaneID = "w1:p1"
 // fakeReworkClient models a worktree whose pane starts bare and comes up live
 // after the first spawn (mirroring fakeRebaseClient in rebase_test.go): every
 // dispatch — whether the initial PaneRun spawn or a later AgentPrompt reuse —
-// writes status shortly after, as a real worker eventually would.
+// writes status shortly after, as a real worker eventually would, and mutates
+// the worktree with round-distinct content first. A real rework worker always
+// changes something (that is the whole point of the round), so the gate's
+// zero-delta check would otherwise flag every round here as a no-op and block
+// even a reviewer "approve"; the per-dispatch content keeps each round a
+// genuine delta from the state before it.
 func fakeReworkClient(worktree string, status *protocol.Status) herdr.Client {
 	var mu sync.Mutex
 	var spawned bool
+	var dispatchN int
 	writeStatusSoon := func() {
+		mu.Lock()
+		dispatchN++
+		n := dispatchN
+		mu.Unlock()
 		go func() {
 			time.Sleep(20 * time.Millisecond)
+			_ = os.WriteFile(filepath.Join(worktree, "reworked.txt"), fmt.Appendf(nil, "rework round %d\n", n), 0o644)
 			_ = protocol.Write(protocol.StatusPath(worktree), status)
 		}()
 	}

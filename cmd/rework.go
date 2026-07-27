@@ -266,6 +266,13 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	if s, err := protocol.Load(protocol.StatusPath(opts.worktree)); err == nil {
 		priorTitle = s.Title
 	}
+	// Captured now, before dispatchReworkRound touches the worktree: a digest of
+	// the state the prior verdict already rejected. JudgeOne compares this round's
+	// post-dispatch content against it to catch a round that reports a terminal
+	// phase having changed nothing. Measured here rather than read from prior
+	// because a non-approved verdict — the only kind rework acts on — never
+	// persisted a ContentHash of its own.
+	priorContentHash := preRoundContentHash(ctx, cfg.Base, opts.worktree)
 
 	status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, out, logger, client, repoRoot, branch, task, findings, round, opts)
 	if derr != nil {
@@ -280,7 +287,7 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	}
 
 	plan := &supervisor.WorkerPlan{Worker: supervisor.Worker{Task: task, Branch: branch, Worktree: opts.worktree}}
-	result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt, prior)
+	result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt, prior, priorContentHash)
 	approved := result.Gate.AutoApprove || (result.Review != nil && result.Review.Decision == "approve")
 	renderReworkRound(out, round, opts.maxRounds, &result, approved)
 
@@ -344,6 +351,25 @@ func taskFor(worktree, branch string) string {
 		return s.Task
 	}
 	return branch
+}
+
+// preRoundContentHash digests the worktree's touched-file bytes as they stand
+// before a rework round dispatches — the state the prior verdict already found
+// wanting — so JudgeOne can flag a round that reaches a terminal phase identical
+// to it. Best-effort: a measure or hash failure returns "", which simply
+// disables that one gate check for the round rather than blocking the round on
+// argus's own inability to measure. base matches the ref reconcile measures the
+// post-round diff against, so the two hashes cover the same file set.
+func preRoundContentHash(ctx context.Context, base, worktree string) string {
+	_, files, err := supervisor.MeasureDiff(ctx, worktree, base)
+	if err != nil {
+		return ""
+	}
+	hash, err := supervisor.ContentHash(worktree, files)
+	if err != nil {
+		return ""
+	}
+	return hash
 }
 
 // dispatchReworkRound writes one round's brief, re-dispatches the worktree's
