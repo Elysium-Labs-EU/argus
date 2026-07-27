@@ -140,10 +140,25 @@ func Ensure(path, entry string) (added bool, err error) {
 		return false, nil
 	}
 
+	raw, err = withAllowEntry(raw, perms, allow, entry)
+	if err != nil {
+		return false, err
+	}
+	if err := writeSettingsFile(path, raw); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// withAllowEntry returns raw with entry appended to permissions.allow,
+// filling in the permissions block (and raw itself) when either was absent —
+// load/allowList return nil maps for a missing file or missing block rather
+// than empty ones, so callers can't assume they're already initialized.
+func withAllowEntry(raw rawSettings, perms map[string]json.RawMessage, allow []string, entry string) (rawSettings, error) {
 	allow = append(allow, entry)
 	allowData, err := json.Marshal(allow)
 	if err != nil {
-		return false, fmt.Errorf("encoding allow list: %w", err)
+		return nil, fmt.Errorf("encoding allow list: %w", err)
 	}
 	if perms == nil {
 		perms = map[string]json.RawMessage{}
@@ -151,26 +166,31 @@ func Ensure(path, entry string) (added bool, err error) {
 	perms["allow"] = allowData
 	permsData, err := json.Marshal(perms)
 	if err != nil {
-		return false, fmt.Errorf("encoding permissions block: %w", err)
+		return nil, fmt.Errorf("encoding permissions block: %w", err)
 	}
 	if raw == nil {
 		raw = rawSettings{}
 	}
 	raw["permissions"] = permsData
+	return raw, nil
+}
 
+// writeSettingsFile marshals raw and swaps it into place via a same-directory
+// rename, so a reader never observes a partially written settings.json.
+func writeSettingsFile(path string, raw rawSettings) error {
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
-		return false, fmt.Errorf("encoding settings: %w", err)
+		return fmt.Errorf("encoding settings: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // project-local .claude dir, standard perms
-		return false, fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
+		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil { //nolint:gosec // local settings file, not a secret
-		return false, fmt.Errorf("writing %s: %w", path, err)
+		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return false, fmt.Errorf("renaming settings into place: %w", err)
+		return fmt.Errorf("renaming settings into place: %w", err)
 	}
-	return true, nil
+	return nil
 }
