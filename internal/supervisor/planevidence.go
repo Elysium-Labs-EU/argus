@@ -34,22 +34,29 @@ var projectPathReplacer = strings.NewReplacer("/", "-", ".", "-")
 // (the worker hasn't produced one, or home is misconfigured) — that is
 // reported as "no evidence found," not a hard error, the same way a missing
 // status file is treated as "hasn't reported yet" rather than an error.
-func HasPlanEvidence(home, worktree string) (bool, error) {
+//
+// The second return value is how many transcript files were actually
+// scanned. A caller logging a "no evidence" result alongside this count can
+// tell a zero-transcript miss (wrong home, worker never started a Claude Code
+// session) apart from a real grep miss against one or more transcripts that
+// did exist — the two point at very different root causes, and the reason
+// string alone conflates them.
+func HasPlanEvidence(home, worktree string) (bool, int, error) {
 	dir := filepath.Join(home, ".claude", "projects", projectPathReplacer.Replace(worktree))
 	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	if err != nil {
-		return false, fmt.Errorf("globbing session transcripts for %s: %w", worktree, err)
+		return false, 0, fmt.Errorf("globbing session transcripts for %s: %w", worktree, err)
 	}
 	for _, m := range matches {
 		found, err := transcriptContainsAny(m, planEvidenceMarkers)
 		if err != nil {
-			return false, err
+			return false, len(matches), err
 		}
 		if found {
-			return true, nil
+			return true, len(matches), nil
 		}
 	}
-	return false, nil
+	return false, len(matches), nil
 }
 
 // transcriptContainsAny reports whether any line of the transcript at path

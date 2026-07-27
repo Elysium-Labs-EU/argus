@@ -588,7 +588,7 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
 		}
-		ok, err := defaultAgent.PlanEvidence(cfg.Home, st.plan.Worktree)
+		ok, transcripts, err := defaultAgent.PlanEvidence(cfg.Home, st.plan.Worktree)
 		if err != nil {
 			st.planEvidenceErr = err
 			cfg.Log.Fail("plan_evidence", st.plan.Task, err)
@@ -596,6 +596,19 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		}
 		st.hasPlanEvidence = ok
 		st.planEvidenceOK = true
+		// Zero transcripts scanned (dir missing/misconfigured home) and one-or-more
+		// transcripts scanned with no marker match are different failure modes;
+		// recording the count here means a recurrence of the soft "plan evidence
+		// unverified" gate flag can be pattern-matched from the run log alone,
+		// without re-deriving which case it was.
+		if !ok {
+			cfg.Log.Emit(&eventlog.Event{
+				Action:  "plan_evidence",
+				Target:  st.plan.Task,
+				Outcome: "not-found",
+				Fields:  map[string]any{"transcripts_checked": transcripts},
+			})
+		}
 	}
 }
 
