@@ -24,6 +24,11 @@ type Stats struct {
 	ReviewReAsks    int
 	Approved        int
 	NotApproved     int
+	// BlockedOnQuestion is how many blocked workers (see Phases["blocked"] for
+	// the total) carried a structured Question rather than only a freeform
+	// BlockedReason — the same distinction `argus supervise`'s own report
+	// draws per-run, aggregated here across every run log.
+	BlockedOnQuestion int
 }
 
 // EscalationRate is the fraction of gate decisions that escalated (needed review
@@ -126,6 +131,7 @@ func Summarize(events []Event) Stats {
 			s.Phases[e.Outcome]++
 		case "run_summary":
 			s.Workers += intField(e.Fields, "workers")
+			s.BlockedOnQuestion += intField(e.Fields, "blocked_on_question")
 		case "tokens":
 			s.TokensByTask[e.Target] += int64Field(e.Fields, "total")
 		}

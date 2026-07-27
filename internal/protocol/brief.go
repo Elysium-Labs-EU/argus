@@ -23,6 +23,7 @@ piping the rest of the status as a JSON body on stdin, in exactly this shape:
       "real_world_proof": "<how you verified against a real target, or \"\" if n/a>",
       "pr_url": "<set once the PR exists, else \"\">",
       "blocked_reason": "<set only when phase is blocked, else \"\">",
+      "question": {"text": "<optional: a specific decision only the supervisor can make>", "options": ["<optional choice 1>", "<optional choice 2>"]},
       "title": "<conventional-commit-style PR/commit title, <=72 chars>",
       "files_touched": ["path/one.go", "path/two.go"],
       "plan": ["<todo item 1>", "<todo item 2>"],
@@ -69,4 +70,14 @@ blocked_reason in the body) when you need a decision only the supervisor can
 make. "done" is never a phase you report — argus sets that once the change is
 shipped. Report again at every transition, not just at the end; a rejected
 transition means you called it out of order — check your current phase (argus
-prints the legal next phases in the error) and retry with the right one.`
+prints the legal next phases in the error) and retry with the right one.
+
+When you report "blocked", set ` + "`question`" + ` alongside blocked_reason if
+your question is a specific, answerable decision (e.g. "wait for branch X to
+merge and rebase, or cherry-pick its commit now?") rather than only a
+narrative reason — ` + "`options`" + ` is optional, for when the choice is
+literally enumerable. A supervisor resolves it with
+` + "`argus worker answer <worktree> <text>`" + ` (or ` + "`--option N`" + `
+against your options), which is delivered into your pane as a chat message
+and recorded on status.json as a durable trace — act on it, then report your
+next phase as normal.`

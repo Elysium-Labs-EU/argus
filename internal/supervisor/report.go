@@ -101,6 +101,10 @@ func renderReport(ctx context.Context, cfg *Config, states []*workerState) {
 
 		_, _ = fmt.Fprintf(out, "    tokens: %s\n", reportTokens(cfg, st, sessionByPane[st.paneID]))
 
+		if st.hasFile && st.status.Phase == protocol.PhaseBlocked {
+			renderBlocked(out, &st.status)
+		}
+
 		if st.hasFile || st.herdrEscalation != "" {
 			renderVerdict(out, gateVerdict(st, cfg.Policy))
 			renderReview(out, st)
@@ -110,7 +114,50 @@ func renderReport(ctx context.Context, cfg *Config, states []*workerState) {
 		}
 	}
 
-	logRunSummary(cfg, states)
+	blocked, blockedOnQuestion := blockedCounts(states)
+	if blocked > 0 {
+		_, _ = fmt.Fprintf(out, "\n%s %d worker(s) blocked (%d on a structured question, answerable via `argus worker answer`)\n",
+			ui.LabelWarning.Render("!"), blocked, blockedOnQuestion)
+	}
+
+	logRunSummary(cfg, states, blocked, blockedOnQuestion)
+}
+
+// renderBlocked prints a blocked worker's reason, distinguishing a
+// machine-readable Question (with its Options, so an operator sees exactly
+// what `argus worker answer --option N` would pick) from a plain
+// BlockedReason string — the two are no longer folded into one opaque line
+// the way gateVerdict's reasons list still shows them.
+func renderBlocked(out io.Writer, s *protocol.Status) {
+	if s.Question != nil && s.Question.Text != "" {
+		_, _ = fmt.Fprintf(out, "    blocked on question: %s\n", s.Question.Text)
+		for i, opt := range s.Question.Options {
+			_, _ = fmt.Fprintf(out, "      %d. %s\n", i+1, opt)
+		}
+		return
+	}
+	if s.BlockedReason != "" {
+		_, _ = fmt.Fprintf(out, "    blocked: %s\n", s.BlockedReason)
+	}
+}
+
+// blockedCounts tallies how many workers are sitting at phase blocked, and
+// of those, how many carry a structured Question rather than only a
+// freeform BlockedReason — the categories `argus supervise`'s report and
+// run_summary event both need to surface blocked workers as their own kind
+// of outcome, the same way gate escalations are already distinguished from
+// clean auto-approves.
+func blockedCounts(states []*workerState) (blocked, blockedOnQuestion int) {
+	for _, st := range states {
+		if !st.hasFile || st.status.Phase != protocol.PhaseBlocked {
+			continue
+		}
+		blocked++
+		if st.status.Question != nil {
+			blockedOnQuestion++
+		}
+	}
+	return blocked, blockedOnQuestion
 }
 
 // reportTokens formats a worker's token spend for the terminal and, when the
@@ -138,8 +185,9 @@ func reportTokens(cfg *Config, st *workerState, sessionID string) string {
 }
 
 // logRunSummary records one run-level event: how many workers, how many the gate
-// escalated, and how many argus approved. It is the per-run row `argus stats`
-// aggregates across runs.
+// escalated, how many argus approved, and how many are sitting blocked (and of
+// those, how many on a structured Question rather than only freeform prose).
+// It is the per-run row `argus stats` aggregates across runs.
 //
 // "Approved" is read back from each worker's persisted verdict.json rather
 // than recomputed from the gate verdict and review decision here: recordApproval
@@ -148,7 +196,11 @@ func reportTokens(cfg *Config, st *workerState, sessionID string) string {
 // that logic here previously ignored HardReasons entirely — a worker rejected
 // by an unwaivable check could still be counted approved as long as the
 // reviewer text said so.
-func logRunSummary(cfg *Config, states []*workerState) {
+//
+// blocked/blockedOnQuestion are the caller's own tally (see blockedCounts) —
+// passed in rather than recomputed here so the terminal report line and this
+// event always agree on the same numbers.
+func logRunSummary(cfg *Config, states []*workerState, blocked, blockedOnQuestion int) {
 	workers, reported, escalated, approved := 0, 0, 0, 0
 	for _, st := range states {
 		workers++
@@ -168,10 +220,12 @@ func logRunSummary(cfg *Config, states []*workerState) {
 		Action:  "run_summary",
 		Outcome: fmt.Sprintf("%d/%d approved", approved, workers),
 		Fields: map[string]any{
-			"workers":   workers,
-			"reported":  reported,
-			"escalated": escalated,
-			"approved":  approved,
+			"workers":             workers,
+			"reported":            reported,
+			"escalated":           escalated,
+			"approved":            approved,
+			"blocked":             blocked,
+			"blocked_on_question": blockedOnQuestion,
 		},
 	})
 }

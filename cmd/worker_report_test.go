@@ -175,6 +175,77 @@ func TestRunWorkerReportPreservesBaseAcrossReports(t *testing.T) {
 	}
 }
 
+// TestRunWorkerReportPreservesAnswerAcrossReports pins the carry-forward
+// behavior for the answer trace: a supervisor's `argus worker answer` writes
+// Question/Answer directly to status.json, outside runWorkerReport, so the
+// worker's own next report body (which never sends either field) must not
+// silently clobber that record back to nil.
+func TestRunWorkerReportPreservesAnswerAcrossReports(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{
+		Phase:         protocol.PhaseBlocked,
+		BlockedReason: "which base?",
+		Question: &protocol.Question{
+			Text:    "wait and rebase, or cherry-pick now?",
+			Options: []string{"wait and rebase", "cherry-pick now"},
+		},
+		Answer: &protocol.Answer{Text: "cherry-pick now", Option: 2},
+	}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	body := &protocol.Status{Task: "t", Branch: "b"}
+	if err := runWorkerReport(wt, protocol.PhaseWorking, body, fixedNow(time.Now())); err != nil {
+		t.Fatalf("working report rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Question == nil || got.Question.Text != seed.Question.Text {
+		t.Errorf("Question = %+v, want it preserved as %+v", got.Question, seed.Question)
+	}
+	if got.Answer == nil || got.Answer.Text != "cherry-pick now" {
+		t.Errorf("Answer = %+v, want it preserved as %+v", got.Answer, seed.Answer)
+	}
+}
+
+// TestRunWorkerReportFreshQuestionResetsAnswer pins the other half: a worker
+// that reports blocked again with a brand-new Question means a new blocked
+// cycle started, so any earlier Answer no longer applies to it and must not
+// leak forward as if it resolved the new question too.
+func TestRunWorkerReportFreshQuestionResetsAnswer(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{
+		Phase:  protocol.PhaseWorking,
+		Answer: &protocol.Answer{Text: "cherry-pick now", Option: 2},
+	}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	body := &protocol.Status{
+		Task:          "t",
+		Branch:        "b",
+		BlockedReason: "now which forge?",
+		Question:      &protocol.Question{Text: "github or gitlab?"},
+	}
+	if err := runWorkerReport(wt, protocol.PhaseBlocked, body, fixedNow(time.Now())); err != nil {
+		t.Fatalf("blocked report rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Question == nil || got.Question.Text != "github or gitlab?" {
+		t.Errorf("Question = %+v, want the fresh one", got.Question)
+	}
+	if got.Answer != nil {
+		t.Errorf("Answer = %+v, want it reset to nil for the new question", got.Answer)
+	}
+}
+
 func TestParseReportablePhaseRejectsUnknown(t *testing.T) {
 	for _, s := range []string{"done", "bogus", ""} {
 		if _, err := parseReportablePhase(s); err == nil {

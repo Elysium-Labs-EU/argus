@@ -87,13 +87,90 @@ func TestLogRunSummaryCountsPersistedVerdictNotReviewDecision(t *testing.T) {
 		review:  &ReviewResult{Decision: "approve", Summary: "looked fine to me"},
 	}}
 
-	logRunSummary(cfg, states)
+	logRunSummary(cfg, states, 0, 0)
 
 	if strings.Contains(buf.String(), `"outcome":"1/1 approved"`) {
 		t.Errorf("run_summary must not count a worker as approved when its persisted verdict says otherwise, got %s", buf.String())
 	}
 	if !strings.Contains(buf.String(), `"outcome":"0/1 approved"`) {
 		t.Errorf("run_summary should report 0/1 approved for a rejected-but-reviewed worker, got %s", buf.String())
+	}
+}
+
+// TestRenderReportDistinguishesQuestionFromGenericBlocked pins the per-worker
+// display split: a blocked worker carrying a structured Question shows its
+// text and options, while one with only a freeform BlockedReason shows that
+// string instead — the report must not fold the two into one opaque line.
+func TestRenderReportDistinguishesQuestionFromGenericBlocked(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := &Config{
+		Out:    &buf,
+		Now:    func() time.Time { return time.Date(2026, 7, 18, 0, 5, 0, 0, time.UTC) },
+		Client: herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) { return []byte(`{"result":{"panes":[]}}`), nil }),
+		Home:   t.TempDir(),
+	}
+	start := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	states := []*workerState{
+		{
+			plan: &WorkerPlan{Worker: Worker{Task: "question-a"}}, hasFile: true, started: start,
+			status: protocol.Status{
+				Phase:         protocol.PhaseBlocked,
+				BlockedReason: "needs a decision",
+				Question:      &protocol.Question{Text: "wait or cherry-pick?", Options: []string{"wait", "cherry-pick"}},
+			},
+		},
+		{
+			plan: &WorkerPlan{Worker: Worker{Task: "generic-b"}}, hasFile: true, started: start,
+			status: protocol.Status{Phase: protocol.PhaseBlocked, BlockedReason: "no forge configured"},
+		},
+	}
+
+	renderReport(context.Background(), cfg, states)
+	out := buf.String()
+
+	for _, want := range []string{
+		"blocked on question: wait or cherry-pick?",
+		"1. wait",
+		"2. cherry-pick",
+		"blocked: no forge configured",
+		"2 worker(s) blocked (1 on a structured question",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+func TestBlockedCountsOnlyCountsBlockedWithAStatusFile(t *testing.T) {
+	states := []*workerState{
+		{hasFile: true, status: protocol.Status{Phase: protocol.PhaseBlocked, Question: &protocol.Question{Text: "q"}}},
+		{hasFile: true, status: protocol.Status{Phase: protocol.PhaseBlocked}},
+		{hasFile: true, status: protocol.Status{Phase: protocol.PhaseAwaitingReview}},
+		{hasFile: false, status: protocol.Status{Phase: protocol.PhaseBlocked}}, // no file: not a real report
+	}
+	blocked, onQuestion := blockedCounts(states)
+	if blocked != 2 {
+		t.Errorf("blocked = %d, want 2", blocked)
+	}
+	if onQuestion != 1 {
+		t.Errorf("blockedOnQuestion = %d, want 1", onQuestion)
+	}
+}
+
+// TestLogRunSummaryEmitsBlockedFields pins that the caller-supplied blocked
+// counts (see blockedCounts) land verbatim on the run_summary event, so
+// `argus stats` can aggregate "blocked on a question" across many runs.
+func TestLogRunSummaryEmitsBlockedFields(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := &Config{Log: eventlog.New(&buf, "supervise", "test-run", nil)}
+	logRunSummary(cfg, nil, 3, 2)
+
+	out := buf.String()
+	if !strings.Contains(out, `"blocked":3`) {
+		t.Errorf("run_summary missing blocked count: %s", out)
+	}
+	if !strings.Contains(out, `"blocked_on_question":2`) {
+		t.Errorf("run_summary missing blocked_on_question count: %s", out)
 	}
 }
 

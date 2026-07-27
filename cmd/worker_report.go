@@ -20,6 +20,7 @@ func newWorkerCmd() *cobra.Command {
 		Short: "Commands a worker agent runs against its own worktree",
 	}
 	cmd.AddCommand(newWorkerReportCmd())
+	cmd.AddCommand(newWorkerAnswerCmd())
 	return cmd
 }
 
@@ -169,5 +170,13 @@ func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status
 	// empty. Carry the prior value forward instead of losing it on every
 	// report.
 	rest.Base = cur.Base
+	// Answer is only ever set by `argus worker answer`, never by a worker's
+	// own report body — carry it (and the Question it resolved) forward the
+	// same way, unless this report names a fresh Question, which means a new
+	// blocked cycle started and any earlier answer no longer applies.
+	if rest.Question == nil {
+		rest.Question = cur.Question
+		rest.Answer = cur.Answer
+	}
 	return protocol.Write(protocol.StatusPath(worktree), rest)
 }

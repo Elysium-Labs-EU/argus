@@ -58,6 +58,17 @@ func TestSummarizeCountsAndRates(t *testing.T) {
 	}
 }
 
+func TestSummarizeAggregatesBlockedOnQuestion(t *testing.T) {
+	events := []Event{
+		{Run: "r1", Action: "run_summary", Fields: map[string]any{"workers": float64(2), "blocked": float64(1), "blocked_on_question": float64(1)}},
+		{Run: "r2", Action: "run_summary", Fields: map[string]any{"workers": float64(1), "blocked": float64(1), "blocked_on_question": float64(0)}},
+	}
+	s := Summarize(events)
+	if s.BlockedOnQuestion != 1 {
+		t.Errorf("BlockedOnQuestion: got %d want 1", s.BlockedOnQuestion)
+	}
+}
+
 func TestReadDirReadsJSONL(t *testing.T) {
 	dir := t.TempDir()
 	l := New(mustCreate(t, filepath.Join(dir, "run.jsonl")), "supervise", "r1", nil)
