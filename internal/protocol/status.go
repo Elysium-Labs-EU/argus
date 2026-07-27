@@ -51,6 +51,29 @@ type TestRun struct {
 	Result Result `json:"result"`
 }
 
+// Question is a worker's structured ask for a supervisor decision, reported
+// alongside BlockedReason (which stays freeform prose for narrative context)
+// so a supervisor's tooling has something machine-readable to display and
+// answer against instead of only a string to read and free-type a reply to.
+// Options, when non-empty, let `argus worker answer --option N` pick a choice
+// by index instead of retyping it.
+type Question struct {
+	Text    string   `json:"text"`
+	Options []string `json:"options,omitempty"`
+}
+
+// Answer records a supervisor's resolution of a worker's Question. It is
+// never set by a worker's own report — only `argus worker answer` writes
+// it — so status.json keeps a durable trace of what was asked and how it
+// was resolved, independent of the worker's own narration.
+type Answer struct {
+	AnsweredAt time.Time `json:"answered_at"`
+	Text       string    `json:"text"`
+	// Option is the 1-indexed choice into the Question's Options that produced
+	// Text, or 0 when the supervisor answered with free-form text instead.
+	Option int `json:"option,omitempty"`
+}
+
 // Status is the whole typed payload a worker writes to its status file. Fields
 // are ordered for struct alignment (fieldalignment-enforced), not logical order.
 type Status struct {
@@ -74,6 +97,14 @@ type Status struct {
 	// ship then falls back to the fetched issue title.
 	Title        string   `json:"title"`
 	FilesTouched []string `json:"files_touched"`
+	// Question is the worker's structured ask, set alongside BlockedReason when
+	// it wants a specific decision rather than a generic escalation. Answer is
+	// argus's own record of how a supervisor resolved it — never set by a
+	// worker's own report — carried forward by runWorkerReport the same way
+	// Base is, so it survives the worker's next report instead of being wiped
+	// by that report's own JSON body (which never sends it).
+	Question *Question `json:"question,omitempty"`
+	Answer   *Answer   `json:"answer,omitempty"`
 	// Plan is the worker's todo list, reported during the planning phase (issue
 	// #103). It is the typed evidence RequiresPlanEvidence checks before
 	// letting a report move planning -> working: a prose "write a todo list

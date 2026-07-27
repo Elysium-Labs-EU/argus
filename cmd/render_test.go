@@ -38,6 +38,52 @@ func TestRenderStats(t *testing.T) {
 	}
 }
 
+// TestRenderStatsBlockedOnQuestion pins renderStats' split between a
+// "blocked" phase count that includes structured questions (the "(N on a
+// structured question)" suffix) and one that doesn't (plain count line) —
+// the two are rendered by the same loop iteration but only diverge when
+// BlockedOnQuestion is actually non-zero for the "blocked" phase key.
+func TestRenderStatsBlockedOnQuestion(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	s := &eventlog.Stats{
+		Runs: 1, Workers: 3,
+		Phases:            map[string]int{"awaiting_review": 1, "blocked": 2},
+		BlockedOnQuestion: 1,
+	}
+	renderStats(cmd, s)
+	out := buf.String()
+	if !strings.Contains(out, "blocked: 2 (1 on a structured question)") {
+		t.Errorf("stats output missing blocked-on-question suffix:\n%s", out)
+	}
+	if strings.Contains(out, "blocked: 2\n") {
+		t.Errorf("plain (unsuffixed) blocked line should not appear when BlockedOnQuestion > 0:\n%s", out)
+	}
+}
+
+// TestRenderStatsBlockedWithNoQuestions confirms the plain, unsuffixed line
+// still renders when workers are blocked but none carried a structured
+// Question (BlockedOnQuestion == 0) — the suffix must not appear regardless
+// of how many workers are blocked.
+func TestRenderStatsBlockedWithNoQuestions(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	s := &eventlog.Stats{
+		Runs: 1, Workers: 1,
+		Phases: map[string]int{"blocked": 1},
+	}
+	renderStats(cmd, s)
+	out := buf.String()
+	if !strings.Contains(out, "blocked: 1\n") {
+		t.Errorf("stats output missing plain blocked line:\n%s", out)
+	}
+	if strings.Contains(out, "structured question") {
+		t.Errorf("suffix should not appear with BlockedOnQuestion == 0:\n%s", out)
+	}
+}
+
 func TestRenderRebaseOutcome(t *testing.T) {
 	cases := []struct {
 		phase protocol.Phase

@@ -45,6 +45,25 @@ func TestWriteLoadRoundTrip(t *testing.T) {
 			name:   "zero value",
 			status: Status{},
 		},
+		{
+			name: "blocked with question and answer",
+			status: Status{
+				UpdatedAt:     time.Date(2026, 7, 18, 14, 0, 0, 0, time.UTC),
+				Task:          "themis#8",
+				Branch:        "fix-themis-8",
+				Phase:         PhaseBlocked,
+				BlockedReason: "guard under test doesn't exist yet on base",
+				Question: &Question{
+					Text:    "wait for the other branch to merge and rebase, or pull the commit in now?",
+					Options: []string{"wait and rebase", "cherry-pick now"},
+				},
+				Answer: &Answer{
+					Text:       "cherry-pick now",
+					Option:     2,
+					AnsweredAt: time.Date(2026, 7, 18, 14, 5, 0, 0, time.UTC),
+				},
+			},
+		},
 	}
 
 	for _, tc := range cases {

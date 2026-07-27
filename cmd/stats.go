@@ -63,6 +63,10 @@ func renderStats(cmd *cobra.Command, s *eventlog.Stats) {
 	if len(s.Phases) > 0 {
 		_, _ = fmt.Fprintf(out, "  phases:\n")
 		for _, p := range sortedKeys(s.Phases) {
+			if p == "blocked" && s.BlockedOnQuestion > 0 {
+				_, _ = fmt.Fprintf(out, "               · %s: %d (%d on a structured question)\n", p, s.Phases[p], s.BlockedOnQuestion)
+				continue
+			}
 			_, _ = fmt.Fprintf(out, "               · %s: %d\n", p, s.Phases[p])
 		}
 	}
