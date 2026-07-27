@@ -1,5 +1,6 @@
 /bin/
 /dist/
+/argus
 coverage.out
 *.out
 .claude/settings.local.json
