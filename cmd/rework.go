@@ -149,7 +149,7 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 	}
 	// See supervisor.ResolveWorktree: every command taking --worktree resolves
 	// it to an absolute path before it reaches git plumbing, protocol.Load, or
-	// a pane's `cd` (argus issue #98).
+	// a pane's `cd`.
 	abs, err := supervisor.ResolveWorktree(opts.worktree)
 	if err != nil {
 		return err
@@ -330,7 +330,7 @@ func taskFor(worktree, branch string) string {
 func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger, client herdr.Client, repoRoot, branch, task string, findings []string, round int, opts *reworkOpts) (protocol.Status, string, time.Time, error) {
 	// Captured before the worktree is touched, so WaitForStatus rejects any
 	// status.json left over from a prior round or dispatch (see
-	// InvalidateStatus and issue #50) even if invalidation below races with a
+	// InvalidateStatus) even if invalidation below races with a
 	// stray write.
 	dispatchedAt := time.Now()
 

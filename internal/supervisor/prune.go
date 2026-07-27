@@ -16,8 +16,7 @@ import (
 // WorktreeEntry is one linked worktree as reported by `git worktree list
 // --porcelain`. Prunable mirrors git's own detection: the working directory
 // has already gone missing (e.g. someone ran `trash <path>` directly instead
-// of the matching git command, exactly the rough edge issue #101 describes),
-// leaving a stale registration behind.
+// of the matching git command), leaving a stale registration behind.
 type WorktreeEntry struct {
 	Path     string
 	Branch   string
@@ -287,7 +286,7 @@ func hasUnpushedCommits(ctx context.Context, worktree string) bool {
 // confirmed SafeToClean: a recoverable relocation of the working directory
 // (never a raw rm) when it still exists, then a targeted
 // `git worktree remove --force` for just this one path — the per-worktree
-// counterpart to `git worktree prune`, which issue #101 notes cannot be
+// counterpart to `git worktree prune`, which cannot be
 // scoped to a single entry at all. It returns the path content was moved to
 // (empty when the directory was already gone), so a caller can tell an
 // operator where to look to undo it.

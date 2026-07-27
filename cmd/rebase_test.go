@@ -301,11 +301,12 @@ func TestRunRebaseNoConflictOriginBehindPushRejectedSurfacesError(t *testing.T) 
 // "not_git_worktree" when the calling pane itself isn't repo-rooted. Dry-run
 // resolves and prints it (read-only git plumbing, no side effect) so a
 // broken worktree is caught here too, not just on the real dispatch.
-// TestRebaseDryRunOmittedBaseUsesRepoConfig pins issue #161/#160 end to end
-// through the real CLI: with --base left unset, runRebase must resolve the
-// repo's own .argus/config.yml base_branch instead of the flag's literal
-// "main" default — here the repo's real default branch is "trunk", so a
-// silent fallback to "main" would target the wrong ref entirely.
+// TestRebaseDryRunOmittedBaseUsesRepoConfig pins the omitted-base-falls-back-
+// to-repo-config behavior end to end through the real CLI: with --base left
+// unset, runRebase must resolve the repo's own .argus/config.yml base_branch
+// instead of the flag's literal "main" default — here the repo's real
+// default branch is "trunk", so a silent fallback to "main" would target the
+// wrong ref entirely.
 func TestRebaseDryRunOmittedBaseUsesRepoConfig(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -522,7 +523,7 @@ func TestDispatchRebaseWorkerPaneRunError(t *testing.T) {
 // pane and runs the worker, and a status.json the worker writes *after*
 // dispatch is picked up once WaitForStatus polls again. A stale status.json
 // left over from before dispatch is seeded too, to confirm it gets invalidated
-// rather than short-circuiting the wait (argus issue #50). worktree is a real
+// rather than short-circuiting the wait. worktree is a real
 // git repo with its own origin (pointing at itself) already at local HEAD, so
 // the post-status VerifyPushLanded check this test also exercises sees the
 // push as having landed, the same as a worker whose force-push actually
@@ -770,12 +771,12 @@ func TestDispatchIntoPaneAgentGetError(t *testing.T) {
 	}
 }
 
-// TestDispatchIntoPaneLiveAgentPromptNeverPickedUpReturnsError is the direct
-// regression test for argus issue #135: a live agent's AgentPrompt call used
-// to return as soon as herdr accepted the text, with no confirmation the
-// agent ever reacted — so a prompt silently dropped (idle/done agent, or a
-// race with another concurrent AgentPrompt call) left the caller's
-// subsequent status.json poll waiting forever, with no error surfaced
+// TestDispatchIntoPaneLiveAgentPromptNeverPickedUpReturnsError is a direct
+// regression test: a live agent's AgentPrompt call used to return as soon as
+// herdr accepted the text, with no confirmation the agent ever reacted — so
+// a prompt silently dropped (idle/done agent, or a race with another
+// concurrent AgentPrompt call) left the caller's subsequent status.json poll
+// waiting forever, with no error surfaced
 // anywhere. herdr's own `--wait --until working` now makes that failure
 // mode observable: this fake models herdr reporting it never saw the
 // working transition (the same outcome herdr's own "timeout"/
@@ -949,7 +950,7 @@ func TestDispatchIntoPaneLiveAgentPromptUsesLivenessTimeout(t *testing.T) {
 // "pane run" call succeeds, so waitForAgentLive's first poll finds it live
 // immediately) plus recording of the exact command line PaneRun was asked to
 // type into the pane, so a test can assert on the resolved --worktree's
-// absolute cd target (argus issue #96).
+// absolute cd target.
 func capturingSpawnClient(paneID string) (client herdr.Client, spawnLine func() string) {
 	var mu sync.Mutex
 	var spawned bool
@@ -985,9 +986,9 @@ func capturingSpawnClient(paneID string) (client herdr.Client, spawnLine func() 
 	}
 }
 
-// TestRebaseSpawnLineUsesAbsoluteWorktree is the direct regression test for
-// argus issue #96: opts.worktree given relative to argus's own cwd (not the
-// target pane's) must be resolved to absolute before it reaches the spawn
+// TestRebaseSpawnLineUsesAbsoluteWorktree is a direct regression test:
+// opts.worktree given relative to argus's own cwd (not the target pane's)
+// must be resolved to absolute before it reaches the spawn
 // line's `cd`, in every common relative form an operator or script might
 // pass. A relative cd that a reused pane's own cwd happens to already satisfy
 // silently no-ops the && chain, so the launcher never starts and dispatch
@@ -1146,8 +1147,9 @@ func TestRebaseSpawnLineWorktreeWithShellMetacharsSingleQuoted(t *testing.T) {
 }
 
 // TestDispatchIntoPaneSpawnNeverComesLive is the direct regression test for
-// the second half of argus issue #96: a spawn-new-agent PaneRun that
-// "succeeds" (herdr accepted the keystrokes) but whose `cd && <launcher>`
+// the spawn-side counterpart of TestRebaseSpawnLineUsesAbsoluteWorktree: a
+// spawn-new-agent PaneRun that "succeeds" (herdr accepted the keystrokes) but
+// whose `cd && <launcher>`
 // chain silently failed inside the pane (e.g. because --worktree wasn't
 // absolute and the pane was already rooted there) must not hang forever
 // waiting on a status.json that will never be written. It must instead return

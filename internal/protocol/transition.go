@@ -6,7 +6,7 @@ import "slices"
 // report may make. Before this table, pollStatus/IsTerminal accepted any Phase
 // string a worker wrote — every edge in the phase graph was reachable from every
 // other phase in practice, the same shape of gap that let a worker's bad
-// UpdatedAt silently break argus for 51 minutes (issue #90). Only forward
+// UpdatedAt silently break argus for 51 minutes. Only forward
 // progress, plus recovery to working from self_test, awaiting_review, or
 // blocked, is legal. Awaiting_review's recovery edge exists because a worker
 // can receive corrective feedback out-of-band (e.g. a human reviewing
@@ -32,7 +32,7 @@ var legalTransitions = map[Phase][]Phase{
 // IsLegalTransition reports whether a worker report may move a worktree's
 // status from cur to next. Both the write path (worker report) and any future
 // read-side validation should call this instead of re-deriving the phase graph,
-// so the two can't drift apart the way the reader and writer did before #92.
+// so the two can't drift apart the way the reader and writer once did.
 func IsLegalTransition(cur, next Phase) bool {
 	return slices.Contains(legalTransitions[cur], next)
 }
@@ -45,7 +45,7 @@ func LegalNext(cur Phase) []Phase {
 
 // RequiresPlanEvidence reports whether moving a status from cur to next is the
 // one edge that additionally demands non-empty Plan evidence on cur, on top of
-// being phase-legal (issue #103): planning -> working. Every worker brief has
+// being phase-legal: planning -> working. Every worker brief has
 // long said "write a todo list before anything else," but that was prose a
 // worker could (and, in two real sessions, did) ignore entirely — the
 // legal-transition table above only ever checked the phase name, not whether

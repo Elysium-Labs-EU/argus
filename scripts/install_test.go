@@ -88,7 +88,7 @@ func TestSelectInstallDir(t *testing.T) {
 	}
 }
 
-// TestStripQuarantine exercises the fix for issue #47: a binary carrying the
+// TestStripQuarantine exercises the fix: a binary carrying the
 // macOS "com.apple.quarantine" xattr gets SIGKILLed by Gatekeeper on first
 // run. On Darwin it verifies the attribute is actually removed; on other
 // platforms it verifies the same invocation is a safe no-op (so CI, which

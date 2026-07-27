@@ -23,7 +23,7 @@ const credentialEnvFlagHelp = "override which env var carries a credential, name
 // resolveCredentialOverrides merges cli (this invocation's --credential-env
 // flags) over the persisted ~/.argus/config.toml credential map (see
 // internal/config and `argus config set`), per the CLI-beats-config priority
-// order in issue #64's design. cli may be nil.
+// order. cli may be nil.
 func resolveCredentialOverrides(cli map[string]string) (map[string]string, error) {
 	path, err := config.Path()
 	if err != nil {

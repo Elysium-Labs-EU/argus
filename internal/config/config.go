@@ -4,7 +4,7 @@
 // config set credential.<name> <env-var>`, never hand-authored — the
 // discoverability problem a hand-edited schema would raise ("how would the
 // operator know the shape?") goes away when the only writer is a command that
-// validates as it goes (see issue #64).
+// validates as it goes.
 package config
 
 import (
@@ -43,8 +43,9 @@ func Path() (string, error) {
 
 // Load reads and parses the config file at path. A missing file is not an
 // error — it returns a zero Config, the same "nothing configured yet" state
-// as an empty file — since the config is entirely optional (see the built-in
-// defaults tier in issue #64's design).
+// as an empty file — since the config is entirely optional: argus's built-in
+// env-var default names (see internal/credential) already cover the case
+// where an operator has set nothing.
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- path is an operator-set env var or our own fixed ~/.argus/config.toml, not attacker input
 	if err != nil {

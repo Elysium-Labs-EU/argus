@@ -47,7 +47,8 @@ func TestSettingsForConfinesToWorktree(t *testing.T) {
 	}
 }
 
-// TestSettingsForNoRepoAllowIsToolchainNeutral pins issue #161's fix: with no
+// TestSettingsForNoRepoAllowIsToolchainNeutral pins the toolchain-neutrality
+// fix: with no
 // repo config, argus assumes no build/test toolchain for anyone (not just
 // non-Go repos) — the old hardcoded "Bash(go build *)"/"Bash(make *)"
 // defaults must not resurface.

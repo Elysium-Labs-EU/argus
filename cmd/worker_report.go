@@ -46,11 +46,11 @@ func newWorkerReportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "report <phase>",
 		Short: "Report a worker's status, gated by the legal phase-transition table",
-		Long: `Report replaces a worker writing status.json directly (argus issue #92): it
+		Long: `Report replaces a worker writing status.json directly: it
 loads the worktree's current status, checks that <phase> is a legal move from
 that phase against the same table pollStatus enforces, and only if legal
 stamps the timestamp itself and persists the rest of the status body read from
-stdin (or --file). Neither a worker's own clock (issue #90) nor a worker's own
+stdin (or --file). Neither a worker's own clock nor a worker's own
 claim of what phase comes next is trusted; argus decides both.
 
 <phase> is one of: planning, working, self_test, awaiting_review, blocked.
@@ -141,10 +141,10 @@ func readReportBody(cmd *cobra.Command, file string) ([]byte, error) {
 }
 
 // runWorkerReport is the guarded transition + write at the heart of `argus
-// worker report` (issue #92): it loads the worktree's current status, rejects
+// worker report`: it loads the worktree's current status, rejects
 // next if it is not a legal move from the current phase, rejects planning ->
-// working if the on-file planning report carries no plan evidence (issue
-// #103), and only then stamps UpdatedAt with now() — argus's clock, never the
+// working if the on-file planning report carries no plan evidence, and only
+// then stamps UpdatedAt with now() — argus's clock, never the
 // caller's — before persisting. Split out of the RunE closure so it is
 // directly testable without going through cobra flag parsing or stdin.
 func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status, now func() time.Time) error {

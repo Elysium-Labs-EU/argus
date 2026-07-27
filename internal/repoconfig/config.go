@@ -1,7 +1,7 @@
 // Package repoconfig reads a repo's own optional .argus/config.yml — the
 // declarative contract a repo owner can write once instead of fighting
 // argus's toolchain-neutral defaults with --allow/--base on every
-// invocation (see argus issue #161). argus itself assigns no semantics to
+// invocation. argus itself assigns no semantics to
 // any value here beyond the narrow places that read it back
 // (agentadapter's base allow-list, supervise/rebase/ship's base-branch
 // resolution, the brief_note appended verbatim to a generated brief, the

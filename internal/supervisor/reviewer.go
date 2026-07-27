@@ -34,7 +34,7 @@ type ReviewRequest struct {
 	// same worktree, when one exists (see protocol.LoadApproval). A fresh review
 	// otherwise has no memory of what an earlier round already flagged, so a
 	// still-present defect can slip through a review that only judges the diff
-	// holistically (argus issue #108).
+	// holistically.
 	PriorFindings []string
 }
 

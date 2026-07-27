@@ -70,8 +70,9 @@ func TestRunWorkerReportStampsArgusClockNotCallers(t *testing.T) {
 
 func TestRunWorkerReportRejectsWorkingWithoutPlanEvidence(t *testing.T) {
 	wt := t.TempDir()
-	// Planning report on file has no plan array — the exact "wrote no todo
-	// list" case issue #103 is about.
+	// Planning report on file has no plan array — the real-world case of a
+	// worker that reported the planning phase but never actually wrote a
+	// todo list.
 	seed := protocol.Status{Phase: protocol.PhasePlanning}
 	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
 		t.Fatalf("seeding status: %v", err)

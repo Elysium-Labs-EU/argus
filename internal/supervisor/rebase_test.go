@@ -13,8 +13,8 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
-// TestInvalidateStatusRemovesStaleFiles covers argus issue #50's fix: a rebase
-// dispatch must not let a leftover status.json (or verdict.json) from an
+// TestInvalidateStatusRemovesStaleFiles verifies InvalidateStatus's fix: a
+// rebase dispatch must not let a leftover status.json (or verdict.json) from an
 // earlier, unrelated task in the same worktree survive to be misread as this
 // dispatch's outcome.
 func TestInvalidateStatusRemovesStaleFiles(t *testing.T) {
@@ -248,8 +248,8 @@ func TestConflictsWithDetectsCleanAndConflicting(t *testing.T) {
 	}
 }
 
-// reconcileBase is a stand-in for the shape of argus issue #151's repro:
-// reconcile() has two structurally near-identical "for _, st := range states"
+// reconcileBase reproduces a diff-adjacency hazard: reconcile() has two
+// structurally near-identical "for _, st := range states"
 // loops (mirroring the real internal/supervisor/loop.go), which is what leads
 // git's diff to anchor a change to the wrong loop and consider two branches'
 // edits to the second loop non-adjacent even though they aren't.
@@ -280,9 +280,9 @@ func unrelated() int {
 }
 `
 
-// reconcileWithGuard mirrors argus PR #145: a guard clause inserted between
-// the two loops, directly above the second loop, without touching the
-// HasPlanEvidence line itself.
+// reconcileWithGuard is one half of a same-function, non-overlapping-lines
+// edit pair: it inserts a guard clause between the two loops, directly above
+// the second loop, without touching the HasPlanEvidence line itself.
 const reconcileWithGuard = `package supervisor
 
 func reconcile(cfg *Config, states []*workerState) {
@@ -314,9 +314,9 @@ func unrelated() int {
 }
 `
 
-// reconcileWithRename mirrors argus PR #146: the HasPlanEvidence call renamed
-// to route through a seam, without touching any other line reconcileWithGuard
-// touches.
+// reconcileWithRename is the other half of the edit pair: it renames the
+// HasPlanEvidence call to route through a seam, without touching any other
+// line reconcileWithGuard touches.
 const reconcileWithRename = `package supervisor
 
 func reconcile(cfg *Config, states []*workerState) {
@@ -418,24 +418,24 @@ func writeAndCommit(t *testing.T, dir, content, msg string) {
 	gitDo(t, dir, "commit", "-q", "-m", msg)
 }
 
-// TestConflictsWithCatchesSameFunctionEditedByBothSides reproduces argus issue
-// #151: PR #145 (merged into origin/main first) inserts a guard clause
-// directly above a line PR #146's own branch renames. The two edits never
-// touch the same line, so git's merge-tree considers the merge clean — but
-// the merge silently keeps only one side's edit to reconcile(). ConflictsWith
-// must report a conflict anyway, even though the underlying git merge-tree
-// check alone would not.
+// TestConflictsWithCatchesSameFunctionEditedByBothSides reproduces a hazard
+// git's own merge-tree check misses: one side (merged into origin/main first)
+// inserts a guard clause directly above a line the other side's branch
+// renames. The two edits never touch the same line, so git's merge-tree
+// considers the merge clean — but the merge silently keeps only one side's
+// edit to reconcile(). ConflictsWith must report a conflict anyway, even
+// though the underlying git merge-tree check alone would not.
 func TestConflictsWithCatchesSameFunctionEditedByBothSides(t *testing.T) {
 	ctx := context.Background()
 	wt, base := initGoRepo(t, reconcileBase)
 
-	// origin/main advances the way PR #145 did: merged first.
+	// origin/main advances first: the guard-clause edit lands there.
 	other := gitTempDir(t)
 	gitDo(t, filepath.Dir(other), "clone", "-q", mustRemote(t, wt), filepath.Base(other))
 	writeAndCommit(t, other, reconcileWithGuard, "145: add guard")
 	gitDo(t, other, "push", "-q", "origin", base)
 
-	// The worktree's own branch, diverged from the same base, as PR #146 did.
+	// The worktree's own branch, diverged from the same base, carries the rename edit.
 	writeAndCommit(t, wt, reconcileWithRename, "146: rename call via seam")
 
 	if err := FetchBase(ctx, wt, base); err != nil {

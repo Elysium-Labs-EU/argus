@@ -415,7 +415,7 @@ func copyFile(src, dst string) error {
 // scripts/install.sh's resign_darwin_binary. Go's linker already ad-hoc-signs
 // arm64 binaries at build time, but the kernel's per-vnode code-signature
 // cache can go stale when a Mach-O's bytes land on a path that reuses an
-// inode (e.g. this same update overwriting itself) — see issue #66. No-op on
+// inode (e.g. this same update overwriting itself). No-op on
 // non-Darwin or without codesign on PATH; goos is a parameter (rather than
 // reading runtime.GOOS directly) so the non-Darwin no-op path is testable
 // cross-platform.
@@ -439,7 +439,7 @@ func resignBinary(ctx context.Context, goos, path string) error {
 // filesystem, and the OS keeps the old inode open for any process (e.g. the
 // one calling this function) that's already running it. On Darwin it then
 // re-signs dstPath in place, without which the installed binary is
-// Gatekeeper-killed on next launch (issue #124).
+// Gatekeeper-killed on next launch.
 func replaceBinary(ctx context.Context, newPath, dstPath string) error {
 	tmp := dstPath + ".tmp"
 	if err := copyFile(newPath, tmp); err != nil {

@@ -105,9 +105,9 @@ func TestFetchLatestReleaseIncludePre(t *testing.T) {
 
 func TestFetchLatestReleaseIncludePreOutOfOrder(t *testing.T) {
 	// GitHub's /releases list is documented as newest-first but has been
-	// observed live to return an entry out of order (issue #74) — the
-	// newest release here, v0.3.0, sits in the middle of the list, not
-	// first. Trusting list position (as the old releases[0] logic did)
+	// observed live to return an entry out of order — the newest release
+	// here, v0.3.0, sits in the middle of the list, not first. Trusting
+	// list position (as the old releases[0] logic did)
 	// would silently pick the stale v0.1.0.
 	useHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -439,10 +439,10 @@ func TestResignBinaryNoOpNonDarwin(t *testing.T) {
 	}
 }
 
-// TestResignBinaryDarwin exercises the actual signing path issue #124 needs
-// (replaceBinary was skipping this entirely) by re-signing a copy of the
-// running test binary and confirming codesign reports an ad-hoc signature
-// where before there was none.
+// TestResignBinaryDarwin exercises the actual codesign re-signing step that
+// replaceBinary was skipping entirely, by re-signing a copy of the running
+// test binary and confirming codesign reports an ad-hoc signature where
+// before there was none.
 func TestResignBinaryDarwin(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("codesign re-signing only applies on darwin")

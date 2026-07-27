@@ -425,7 +425,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 	// source: if cfg.Broker is still nil here (no known agent key resolved —
 	// see credproxy.Registry/startCredentialProxy — or --no-cred-proxy), the
 	// worker gets nothing at all and fails deep inside the container with a
-	// bare "Not logged in" (issue #57). Fail fast at the one place that knows
+	// bare "Not logged in". Fail fast at the one place that knows
 	// both facts at once, instead of letting that surprise happen mid-run.
 	if !o.dryRun && cfg.Broker == nil && o.workerRuntime != "" && o.workerRuntime != "none" {
 		return &ui.UserError{
@@ -447,11 +447,12 @@ func attachWorkers(ctx context.Context, client herdr.Client, workspace string, w
 	var targets []target
 	for _, wt := range worktrees {
 		// --worktrees is --worktree-shaped like --repo/rebase's/review's/ship's
-		// flags, so it gets the same resolution even though a repo-wide sweep
-		// for issue #96 found this particular path unreachable from that bug
-		// today (Attach skips execute() entirely) — fixed defensively anyway,
-		// since this is exactly the class of bug that shouldn't need a live
-		// repro to be worth closing off (argus issue #98).
+		// flags, so it gets the same resolution even though an audit for
+		// relative-path bugs (an unresolved relative path silently breaking a
+		// downstream `cd` or git -C call) found this particular path
+		// unreachable today (Attach skips execute() entirely) — fixed
+		// defensively anyway, since that class of bug shouldn't need a live
+		// repro to be worth closing off.
 		abs, err := supervisor.ResolveWorktree(wt)
 		if err != nil {
 			return nil, fmt.Errorf("resolving --worktrees entry %q: %w", wt, err)

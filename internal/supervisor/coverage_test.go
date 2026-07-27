@@ -193,8 +193,8 @@ func TestWaitForStatusIgnoresStaleStatus(t *testing.T) {
 	}
 }
 
-// TestWaitForStatusAcceptsLyingUpdatedAt covers argus issue #90 for the
-// rebase call site: WaitForStatus must judge freshness by the status file's
+// TestWaitForStatusAcceptsLyingUpdatedAt verifies the rebase call site's
+// fix: WaitForStatus must judge freshness by the status file's
 // mtime, not the worker's self-reported UpdatedAt. A worker that writes a
 // garbage/template UpdatedAt reading as before since must still have its
 // real, post-since write picked up.
@@ -223,8 +223,8 @@ func TestWaitForStatusAcceptsLyingUpdatedAt(t *testing.T) {
 	}
 }
 
-// TestWaitForStatusAcceptsMtimeSkewUnderTolerance covers argus issue #94:
-// isStale must give the file's mtime a grace window below since, not an
+// TestWaitForStatusAcceptsMtimeSkewUnderTolerance verifies isStale's mtime
+// tolerance: isStale must give the file's mtime a grace window below since, not an
 // exact boundary, because a filesystem's effective mtime resolution can be
 // coarser than time.Now()'s. A real post-dispatch write can therefore read
 // back an mtime a few hundred milliseconds *before* since despite happening
@@ -258,8 +258,8 @@ func TestWaitForStatusAcceptsMtimeSkewUnderTolerance(t *testing.T) {
 	}
 }
 
-// TestWaitForStatusReportsHerdrBlockedPane is the regression case for argus
-// issue #236: a worker parked on an unanswered permission prompt (a repo
+// TestWaitForStatusReportsHerdrBlockedPane is a regression test: a worker
+// parked on an unanswered permission prompt (a repo
 // `Ask` rule overriding auto mode for one command) never writes status.json
 // to reflect that, so a caller polling the file alone sees nothing but an
 // undifferentiated "waiting" for however long the prompt sits unanswered.
@@ -329,7 +329,7 @@ func TestRunFullPathToReport(t *testing.T) {
 	// watch -> reconcile -> gate -> report end to end without a real worker or
 	// herdr. The terminal status is written from the "pane run" leg of the mock
 	// runner rather than seeded upfront, since execute now invalidates any
-	// status.json already sitting in the worktree before it spawns (issue #75)
+	// status.json already sitting in the worktree before it spawns
 	// — a status written before dispatch would be discarded as stale, same as
 	// it must be for a real leftover file.
 	wt := gitWorktreeWithDiff(t)

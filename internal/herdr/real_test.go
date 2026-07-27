@@ -14,7 +14,7 @@ import (
 // against a live herdr binary instead of a mocked Runner. It exists because a
 // mocked-Runner test can only ever assert on the args argus sends — it can't
 // catch a wrong belief about what herdr actually does with them. That's
-// exactly what shipped in issue #216's first pass: WorktreeCreate's own
+// exactly what shipped in this package's first pass: WorktreeCreate's own
 // --workspace param was believed to nest a pane into an existing workspace
 // (mocked tests happily encoded that belief), but a real herdr never does
 // that — `worktree create --workspace <id>` always opens its own new

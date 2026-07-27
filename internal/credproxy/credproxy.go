@@ -79,7 +79,7 @@ type Upstream struct {
 // mechanism forge token lookup uses (see internal/credential and cmd
 // --credential-env), not by editing this list — the hardcoding this
 // generalizes was ever having exactly one shape (Anthropic) wired into the
-// call site at all (see issue #64).
+// call site at all.
 type KeySpec struct {
 	Inject     func(r *http.Request, realKey string)
 	Name       string

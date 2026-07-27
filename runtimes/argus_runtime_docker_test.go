@@ -1,6 +1,6 @@
 // Package runtimes_test exercises argus-runtime-docker's --platform
-// selection — the piece behind issue #55: a docker run with no --platform
-// silently resolves to the daemon default, which fails with a misleading
+// selection: a docker run with no --platform silently resolves to the
+// daemon default, which fails with a misleading
 // "pull access denied" error against an image built with an explicit
 // platform pin. It shells out to the real script rather than reimplementing
 // its logic in Go.

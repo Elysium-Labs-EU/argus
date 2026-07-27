@@ -6,7 +6,7 @@
 // reach into. Without an allow entry in the adopting repo's
 // .claude/settings.json, every `argus supervise`/`ship`/`review`/... call
 // prompts for manual approval, defeating the point of using argus for the
-// mechanical half of supervision (argus issue #102).
+// mechanical half of supervision.
 package permission
 
 import (

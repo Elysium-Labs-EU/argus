@@ -89,9 +89,9 @@ func TestGitLabFindPRNotFound(t *testing.T) {
 	}
 }
 
-// TestNewKindGitLabBuildsSelfHostedBase pins the escape hatch for issue #242:
-// a self-hosted GitLab host passed with an explicit KindGitLab gets a GitLab
-// client whose API base is built from that host, not hardcoded to gitlab.com.
+// TestNewKindGitLabBuildsSelfHostedBase pins the escape hatch: a self-hosted
+// GitLab host passed with an explicit KindGitLab gets a GitLab client whose
+// API base is built from that host, not hardcoded to gitlab.com.
 func TestNewKindGitLabBuildsSelfHostedBase(t *testing.T) {
 	hc := fakeHTTP(t, "https://gitlab.corp.example.com/api/v4/projects/o%2Fr/merge_requests", "",
 		`{"iid":1,"web_url":"https://gitlab.corp.example.com/o/r/-/merge_requests/1","state":"opened"}`, 201)

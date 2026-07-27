@@ -275,9 +275,9 @@ func (c Client) AgentGet(ctx context.Context, target string) (Pane, bool, error)
 // A bare submission succeeds identically whether or not the agent ever
 // reacts to it: herdr accepts the text and returns immediately, with no
 // signal that it landed on a live turn rather than being silently dropped
-// (argus issue #135 — an idle/done agent, or two AgentPrompt calls racing
-// each other, produced no error and no observable effect, and the caller's
-// subsequent status.json poll then waited forever). So this always passes
+// (an idle/done agent, or two AgentPrompt calls racing each other, produced
+// no error and no observable effect, and the caller's subsequent status.json
+// poll then waited forever). So this always passes
 // herdr's own `--wait --until working` flags, which block in herdr until it
 // observes the pane's agent_status actually become "working" — the only
 // confirmation available that the prompt was picked up, not just accepted.
