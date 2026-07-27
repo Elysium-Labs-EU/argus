@@ -109,7 +109,7 @@ func runGateCommand(ctx context.Context, worktree, name string, args ...string) 
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("exceeded %s and was killed", shipGateTimeout)
 	}
-	return fmt.Errorf("%w\n%s", err, tail(buf.Bytes(), maxCapturedOutput))
+	return fmt.Errorf("%w\n%s", err, tail(buf.Bytes()))
 }
 
 // firstExisting returns the first of names present in dir, or "" if none are.

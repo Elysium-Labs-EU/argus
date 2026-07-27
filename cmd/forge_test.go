@@ -58,6 +58,21 @@ func TestIssuesToTasks(t *testing.T) {
 	}
 }
 
+// TestFixedBriefTailInstructsRunningRepoLint pins the fix for the gap where a
+// worker's diff could earn a clean gate verdict and then fail at `argus
+// ship`'s `git commit` when the repo's own pre-commit hook ran lint/build
+// checks the gate never reproduced: every generated brief must tell the
+// worker to run those checks itself before reporting a terminal phase.
+func TestFixedBriefTailInstructsRunningRepoLint(t *testing.T) {
+	got := fixedBriefTail("")
+	if !strings.Contains(got, "lint/build/pre-commit") {
+		t.Errorf("fixedBriefTail(\"\") = %q, want an instruction to run the repo's own lint/build/pre-commit checks", got)
+	}
+	if !strings.Contains(got, "awaiting_review") {
+		t.Errorf("fixedBriefTail(\"\") = %q, want it to say when to run those checks (before a terminal phase)", got)
+	}
+}
+
 // TestIssuesToTasksAppendsRepoBriefNote pins issue #161: the old hardcoded
 // "Add a focused test and keep make ci green. Follow the repo STYLE.md." is
 // gone; a repo's own .argus/config.yml brief_note takes its place when

@@ -119,10 +119,13 @@ const diffMismatchTolerance = 10
 // pure gate can't make: it escalates when argus could not measure the diff (so
 // the self-report is unverifiable), when the real diff materially exceeds what
 // the worker claimed (a buggy or dishonest status.json), when a claimed test
-// pass does not reproduce (st.testMismatches, from VerifyTests), and when
-// herdr's own agent_status — not status.json — is the only evidence of the
-// worker's real state (checkHerdrStuck in loop.go), which forces escalation
-// even if status.json was never written at all. This is where "trust typed
+// pass does not reproduce (st.testMismatches, from VerifyTests), when this
+// repo's own configured verify command fails to reproduce clean
+// (st.verifyMismatch, from RunVerifyCommand — the same bar `argus ship`'s
+// `git commit` enforces via the repo's own hooks), and when herdr's own
+// agent_status — not status.json — is the only evidence of the worker's real
+// state (checkHerdrStuck in loop.go), which forces escalation even if
+// status.json was never written at all. This is where "trust typed
 // self-report" becomes "trust it only where it matches ground truth."
 func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 	eff := st.effective()
@@ -190,6 +193,15 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 			v.AutoApprove = false
 			v.Reasons = append(v.Reasons, m)
 			v.HardReasons = append(v.HardReasons, m)
+		}
+		// Same unwaivable treatment for this repo's own configured verify
+		// command (lint/build/pre-commit): a failure here means ship's own
+		// `git commit` would hit the same failure via the repo's pre-commit
+		// hook, so no reviewer verdict should be able to approve past it.
+		if st.verifyMismatch != "" {
+			v.AutoApprove = false
+			v.Reasons = append(v.Reasons, st.verifyMismatch)
+			v.HardReasons = append(v.HardReasons, st.verifyMismatch)
 		}
 		switch {
 		case st.planEvidenceErr != nil:

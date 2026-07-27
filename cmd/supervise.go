@@ -35,6 +35,7 @@ func newSuperviseCmd() *cobra.Command {
 		reviewModel        string
 		review             bool
 		maxDiffLines       int
+		verifyCmd          string
 		interval           time.Duration
 		timeout            time.Duration
 		reviewConcurrency  int
@@ -129,14 +130,15 @@ each pane's directory in --panes mode).`,
 				proofRequiredExplicit: cmd.Flags().Changed("proof-required-path"),
 				alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
 			}, &rc)
+			verifyCommand := resolveVerifyCommand(cmd.Flags().Changed("verify-cmd"), verifyCmd, &rc)
 
 			return runSupervision(cmd, client, workers, &superviseOpts{
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
 				base: resolvedBase, launcher: launcher, workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewConcurrency: reviewConcurrency,
-				policy: policy,
-				allow:  allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
+				policy: policy, verifyCommand: verifyCommand,
+				allow: allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
 				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
 				reviewNote:      rc.ReviewNote,
 			})
@@ -158,6 +160,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
+	cmd.Flags().StringVar(&verifyCmd, "verify-cmd", "", "review gate: shell command re-run in a worker's worktree once it reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing — today's behavior. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().IntVar(&reviewConcurrency, "review-concurrency", 0, "max concurrent claude -p --review calls when the gate escalates several workers at once (0 = supervisor.defaultReviewConcurrency)")
@@ -185,6 +188,7 @@ type superviseOpts struct {
 	workerRuntime     string
 	workerPlacement   string
 	reviewNote        string
+	verifyCommand     string
 	policy            *supervisor.ReviewPolicy
 	allow             []string
 	repoAllow         []string
@@ -334,6 +338,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		ExtraAllow:        o.allow,
 		Policy:            o.policy,
 		ReviewNote:        o.reviewNote,
+		VerifyCommand:     o.verifyCommand,
 	}
 	if o.review {
 		cfg.Reviewer = supervisor.NewCLIReviewer(o.reviewModel).WithLog(logger)
@@ -726,12 +731,26 @@ func repoBriefNote(repoPath string) string {
 // MeasureDiff's ground truth (internal/supervisor/measure.go) which counts
 // untracked new files as added lines — so they always apply, not something a
 // repo owner can disable.
+//
+// The lint/build/pre-commit sentence below closes the other half of the same
+// gap a configured verify_command closes on the gate side (see
+// resolveVerifyCommand): `argus ship`'s `git commit` runs whatever hooks the
+// target repo has wired up (e.g. lefthook running golangci-lint), so a diff
+// that never ran them locally can earn a clean gate verdict and still fail
+// at commit time. It stays deliberately toolchain-agnostic — argus has no
+// opinion on what "the repo's own lint/build" means for a given repo, only
+// that a worker should run whatever that is before calling itself done.
 func fixedBriefTail(briefNote string) string {
 	const fixed = "Do NOT git commit or push; argus ships. " +
 		"When reporting your diff size, count untracked new files too " +
 		"(e.g. `git diff --stat <base>` plus every new file's own line count) " +
 		"— a plain `git diff` alone misses files you just created, and argus's " +
-		"own measurement does not."
+		"own measurement does not. Before reporting a terminal phase " +
+		"(awaiting_review or blocked), run this repo's own lint/build/pre-commit " +
+		"checks, if any (e.g. a Makefile/Taskfile target, lefthook/husky hooks, " +
+		"golangci-lint), and fix anything they flag — argus ship's `git commit` " +
+		"runs the same pre-commit hooks, so a failure you don't catch here " +
+		"surfaces there instead."
 	if briefNote == "" {
 		return fixed
 	}

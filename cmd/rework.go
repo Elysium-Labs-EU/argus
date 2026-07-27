@@ -32,6 +32,7 @@ func newReworkCmd() *cobra.Command {
 		interval           time.Duration
 		maxRounds          int
 		maxDiffLines       int
+		verifyCmd          string
 		dryRun             bool
 		noCredProxy        bool
 	)
@@ -68,6 +69,8 @@ outcome instead of retrying forever.`,
 					proofRequiredExplicit: cmd.Flags().Changed("proof-required-path"),
 					alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
 				},
+				verifyCmd:         verifyCmd,
+				verifyCmdExplicit: cmd.Flags().Changed("verify-cmd"),
 			})
 		},
 	}
@@ -84,6 +87,7 @@ outcome instead of retrying forever.`,
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
+	cmd.Flags().StringVar(&verifyCmd, "verify-cmd", "", "review gate: shell command re-run in the worktree once the reworked worker reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan without dispatching a worker")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front the rework worker's API traffic with the credential proxy; it inherits the host's real ANTHROPIC_API_KEY")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
@@ -95,20 +99,22 @@ var reworkCmd = newReworkCmd()
 // reworkOpts carries newReworkCmd's flag values into runRework, mirroring
 // rebaseOpts's split of constructor-flag-registration from RunE logic.
 type reworkOpts struct {
-	credentialEnv    map[string]string
-	workerRuntime    string
-	worktree         string
-	base             string
-	task             string
-	launcher         string
-	findings         []string
-	gate             gateFlags
-	interval         time.Duration
-	maxRounds        int
-	livenessTimeout  time.Duration // internal knob, mirrors rebaseOpts; zero = package default
-	livenessInterval time.Duration
-	dryRun           bool
-	noCredProxy      bool
+	credentialEnv     map[string]string
+	verifyCmd         string
+	workerRuntime     string
+	base              string
+	task              string
+	launcher          string
+	worktree          string
+	findings          []string
+	gate              gateFlags
+	livenessTimeout   time.Duration // internal knob, mirrors rebaseOpts; zero = package default
+	maxRounds         int
+	interval          time.Duration
+	livenessInterval  time.Duration
+	dryRun            bool
+	noCredProxy       bool
+	verifyCmdExplicit bool
 }
 
 // dispatchTarget builds dispatchIntoPane's input from a reworkOpts, mirroring
@@ -180,13 +186,14 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 		return fmt.Errorf("resolving home dir: %w", err)
 	}
 	cfg := &supervisor.Config{
-		Now:        time.Now,
-		Log:        logger,
-		Policy:     resolveGatePolicy(opts.gate, &rc),
-		Home:       home,
-		Base:       opts.base,
-		Reviewer:   reviewer,
-		ReviewNote: rc.ReviewNote,
+		Now:           time.Now,
+		Log:           logger,
+		Policy:        resolveGatePolicy(opts.gate, &rc),
+		Home:          home,
+		Base:          opts.base,
+		Reviewer:      reviewer,
+		ReviewNote:    rc.ReviewNote,
+		VerifyCommand: resolveVerifyCommand(opts.verifyCmdExplicit, opts.verifyCmd, &rc),
 	}
 
 	for round := 1; round <= opts.maxRounds; round++ {

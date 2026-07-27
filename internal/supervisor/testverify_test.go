@@ -217,6 +217,106 @@ func TestReconcileCapturesReviewDiffBeforeTestSideEffects(t *testing.T) {
 	}
 }
 
+func TestRunVerifyCommandSkipsWhenUnconfigured(t *testing.T) {
+	wt := t.TempDir()
+	if m := RunVerifyCommand(context.Background(), wt, ""); m != "" {
+		t.Errorf("mismatch = %q, want none — an empty verify command must not run anything", m)
+	}
+}
+
+func TestRunVerifyCommandAcceptsCleanRun(t *testing.T) {
+	wt := t.TempDir()
+	if m := RunVerifyCommand(context.Background(), wt, "exit 0"); m != "" {
+		t.Errorf("mismatch = %q, want none for a genuinely clean command", m)
+	}
+}
+
+func TestRunVerifyCommandFlagsRepeatedFailure(t *testing.T) {
+	wt := t.TempDir()
+	m := RunVerifyCommand(context.Background(), wt, "echo lint-boom; exit 1")
+	if m == "" {
+		t.Fatal("mismatch = \"\", want a reason for a command that fails on both attempts")
+	}
+	if !strings.Contains(m, "lint-boom") {
+		t.Errorf("mismatch should carry the failing command's captured output, got %q", m)
+	}
+}
+
+func TestRunVerifyCommandRetriesOnceBeforeFlagging(t *testing.T) {
+	wt := t.TempDir()
+	marker := filepath.Join(wt, "verify-attempted")
+	cmd := "test -f " + marker + " && exit 0 || { touch " + marker + "; exit 1; }"
+	if m := RunVerifyCommand(context.Background(), wt, cmd); m != "" {
+		t.Fatalf("mismatch = %q, want none — a fail-then-pass pair is a flake, not a real mismatch", m)
+	}
+}
+
+func TestGateEscalatesWhenVerifyCommandFails(t *testing.T) {
+	st := &workerState{
+		hasFile:        true,
+		measuredOK:     true,
+		measured:       protocol.DiffStat{Files: 1, Insertions: 3},
+		measuredFiles:  []string{"cmd/root.go"},
+		verifyMismatch: `repo's verify command "make lint" failed twice in a row: exit status 1`,
+		plan:           &WorkerPlan{Worker: Worker{Task: "lint-failure"}},
+		status: protocol.Status{
+			Phase:        protocol.PhaseAwaitingReview,
+			Tests:        []protocol.TestRun{{Cmd: "go test ./...", Result: protocol.ResultPass}},
+			FilesTouched: []string{"cmd/root.go"},
+			DiffStat:     protocol.DiffStat{Insertions: 3},
+		},
+	}
+	v := gateVerdict(st, nil)
+	if v.AutoApprove {
+		t.Fatal("gate must not auto-approve a small, clean diff whose repo verify command failed")
+	}
+	if !hasReasonContaining(v.HardReasons, "make lint") {
+		t.Errorf("expected an unwaivable verify-command reason, got %v", v.HardReasons)
+	}
+}
+
+func TestReconcileWiresVerifyCommandIntoVerifyMismatch(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	states := []*workerState{{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "lint-failure", Worktree: wt}},
+		status:  protocol.Status{Phase: protocol.PhaseAwaitingReview},
+	}}
+	reconcile(context.Background(), &Config{Base: "HEAD", VerifyCommand: "exit 1"}, states)
+
+	if states[0].verifyMismatch == "" {
+		t.Fatal("reconcile should have wired RunVerifyCommand's failure into st.verifyMismatch")
+	}
+}
+
+func TestReconcileSkipsVerifyCommandWhenUnconfigured(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	states := []*workerState{{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "no-verify-cmd", Worktree: wt}},
+		status:  protocol.Status{Phase: protocol.PhaseAwaitingReview},
+	}}
+	reconcile(context.Background(), &Config{Base: "HEAD"}, states)
+
+	if states[0].verifyMismatch != "" {
+		t.Fatalf("verifyMismatch = %q, want none — no verify command was configured", states[0].verifyMismatch)
+	}
+}
+
+func TestReconcileSkipsVerifyCommandForNonTerminalPhase(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	states := []*workerState{{
+		hasFile: true,
+		plan:    &WorkerPlan{Worker: Worker{Task: "still-working", Worktree: wt}},
+		status:  protocol.Status{Phase: protocol.PhaseWorking},
+	}}
+	reconcile(context.Background(), &Config{Base: "HEAD", VerifyCommand: "exit 1"}, states)
+
+	if states[0].verifyMismatch != "" {
+		t.Fatalf("verify command must not run for a non-terminal phase, got %q", states[0].verifyMismatch)
+	}
+}
+
 func TestGateAutoApprovesWhenTestMismatchesEmpty(t *testing.T) {
 	st := &workerState{
 		hasFile:       true,
