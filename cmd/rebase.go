@@ -277,7 +277,7 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	}
 
 	_, _ = fmt.Fprintf(out, "%s dispatched rebase worker in pane %s; waiting...\n", ui.LabelInfo.Render("i"), wt.RootPaneID)
-	status, seen := supervisor.WaitForStatus(ctx, opts.worktree, opts.interval, dispatchedAt)
+	status, seen := supervisor.WaitForStatus(ctx, client, wt.RootPaneID, opts.worktree, opts.interval, dispatchedAt, out)
 	if !seen {
 		logger.Action("rebase", branch, "no-status", "")
 		return fmt.Errorf("worker wrote no status before the deadline")

@@ -248,7 +248,7 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 		prior = &approval
 	}
 
-	status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, logger, client, repoRoot, branch, task, findings, round, opts)
+	status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, out, logger, client, repoRoot, branch, task, findings, round, opts)
 	if derr != nil {
 		return reworkRoundOutcome{}, derr
 	}
@@ -327,7 +327,7 @@ func taskFor(worktree, branch string) string {
 // dispatchReworkRound writes one round's brief, re-dispatches the worktree's
 // worker (reusing dispatchIntoPane's live-agent-vs-spawn logic), and waits for
 // its next terminal status.
-func dispatchReworkRound(ctx context.Context, logger *eventlog.Logger, client herdr.Client, repoRoot, branch, task string, findings []string, round int, opts *reworkOpts) (protocol.Status, string, time.Time, error) {
+func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger, client herdr.Client, repoRoot, branch, task string, findings []string, round int, opts *reworkOpts) (protocol.Status, string, time.Time, error) {
 	// Captured before the worktree is touched, so WaitForStatus rejects any
 	// status.json left over from a prior round or dispatch (see
 	// InvalidateStatus and issue #50) even if invalidation below races with a
@@ -353,7 +353,7 @@ func dispatchReworkRound(ctx context.Context, logger *eventlog.Logger, client he
 		return protocol.Status{}, "", dispatchedAt, err
 	}
 
-	status, seen := supervisor.WaitForStatus(ctx, opts.worktree, opts.interval, dispatchedAt)
+	status, seen := supervisor.WaitForStatus(ctx, client, wt.RootPaneID, opts.worktree, opts.interval, dispatchedAt, out)
 	if !seen {
 		return protocol.Status{}, "", dispatchedAt, fmt.Errorf("worker wrote no status before the deadline (round %d/%d)", round, opts.maxRounds)
 	}
