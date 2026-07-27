@@ -563,6 +563,10 @@ func TestRunUpdateFullSuccess(t *testing.T) {
 	if perr != nil {
 		t.Skipf("hostPlatform: %v", perr)
 	}
+	// runUpdate calls refreshInstalledCompletions after replaceBinary succeeds,
+	// which resolves completion paths under $HOME; isolate it so this test
+	// can't read or write the real host's completion files.
+	t.Setenv("HOME", t.TempDir())
 	assetName := "argus-" + platform
 	binContents := []byte("new argus binary contents")
 	sum := sha256.Sum256(binContents)
