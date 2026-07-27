@@ -51,6 +51,7 @@ func newSuperviseCmd() *cobra.Command {
 		worktrees             []string
 		workerRuntime         string
 		workerPlacement       string
+		forgeKind             string
 		allow                 []string
 		credentialEnv         map[string]string
 	)
@@ -100,7 +101,8 @@ each pane's directory in --panes mode).`,
 			} else {
 				workers, err = spawnWorkers(cmd.Context(), client, &workerInput{
 					panes: panes, branches: branches, labels: labels, tasks: tasks, tasksFile: tasksFile, repo: repo,
-				}, issues, jiraIssues, overrides, jiraSpawnOpts{assignToCaller: jiraAssignOnSpawn, transition: jiraTransitionOnSpawn})
+				}, issues, jiraIssues, overrides, jiraSpawnOpts{assignToCaller: jiraAssignOnSpawn, transition: jiraTransitionOnSpawn},
+					forgeKind, cmd.Flags().Changed("forge"))
 			}
 			if err != nil {
 				return err
@@ -180,6 +182,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&workerPlacement, "worker-placement", workerPlacementWorkspace, "where a spawned worker's pane lands: workspace (default, each worker its own top-level herdr workspace) | tab (nest into HERDR_WORKSPACE_ID as a tab, even with --repo passed explicitly) | pane (not yet supported). Without this flag, this repo's .argus/config.yml worker_placement wins, then this default")
 	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist, on top of this repo's .argus/config.yml allow list if any (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a one-off run)")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
+	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host when fetching --issues: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
 	return cmd
 }
 
@@ -516,8 +519,11 @@ type jiraSpawnOpts struct {
 // one worker source, defaults --repo to the working directory, folds any --issues
 // and --jira-issues into tasks/branches by fetching them from the forge or Jira,
 // then pairs the slices. It is the non-attach half of supervise, kept out of RunE
-// so each mode reads flat.
-func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts) ([]supervisor.Worker, error) {
+// so each mode reads flat. forgeKindFlag/forgeKindExplicit are --forge's raw
+// value and whether it was actually passed, needed only for --issues (the one
+// forge.New call this path makes, to fetch issue bodies before any worker
+// exists).
+func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) ([]supervisor.Worker, error) {
 	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && in.tasksFile == "" && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
@@ -545,7 +551,7 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 		}
 		in.tasks = append(in.tasks, fileTasks...)
 	}
-	if err := foldIssueSources(ctx, in, issues, jiraIssues, credentialOverrides, jiraSpawn); err != nil {
+	if err := foldIssueSources(ctx, in, issues, jiraIssues, credentialOverrides, jiraSpawn, forgeKindFlag, forgeKindExplicit); err != nil {
 		return nil, err
 	}
 	return buildWorkers(ctx, client, in)
@@ -586,11 +592,16 @@ func loadTasksFile(path string) ([]string, error) {
 // task string for an issue that already has a title and body. Generated
 // branches only fill in.branches when it is still empty, so explicit
 // --branches always wins. Split out of spawnWorkers to keep each source's
-// fetch-and-fold step independently testable and readable.
-func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts) error {
+// fetch-and-fold step independently testable and readable. forgeKindFlag/
+// forgeKindExplicit only matter to the --issues path (see resolveIssueForgeKind).
+func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) error {
 	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
-		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues, credentialOverrides)
+		kind, err := resolveIssueForgeKind(ctx, in.repo, forgeKindExplicit, forgeKindFlag)
+		if err != nil {
+			return err
+		}
+		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues, credentialOverrides, kind)
 		if err != nil {
 			return err
 		}
@@ -751,13 +762,32 @@ func at(s []string, i int) string {
 
 // tasksFromIssues resolves the repo's forge from its origin remote, then fetches
 // each issue and renders it into a worker brief. It works for GitHub, GitLab, and
-// Codeberg/Gitea-family hosts without extra flags.
-func tasksFromIssues(ctx context.Context, repoPath string, issues []int, credentialOverrides map[string]string) (tasks, branches []string, err error) {
-	f, owner, name, err := resolveForge(ctx, repoPath, credentialOverrides)
+// Codeberg/Gitea-family hosts without extra flags, plus a self-hosted GitLab or
+// Gitea/Forgejo host when kind says which shape it is.
+func tasksFromIssues(ctx context.Context, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind) (tasks, branches []string, err error) {
+	f, owner, name, err := resolveForge(ctx, repoPath, credentialOverrides, kind)
 	if err != nil {
 		return nil, nil, err
 	}
 	return issuesToTasks(ctx, f, owner, name, repoPath, issues)
+}
+
+// resolveIssueForgeKind applies --forge > this repo's .argus/config.yml forge
+// key > auto-detect, for the one forge.New call --issues makes to fetch issue
+// bodies before any worker exists. Unlike the rest of supervise's repo config
+// (loaded later, in newSuperviseCmd's RunE, from the first resolved worker's
+// RepoRoot), this needs to run earlier, so it resolves its own repo root and
+// config here — best-effort, matching supervisor.ResolveBase's own lookup: a
+// repo path that doesn't resolve, or has no config file, just falls through
+// to auto-detect.
+func resolveIssueForgeKind(ctx context.Context, repoPath string, explicit bool, flagValue string) (forge.Kind, error) {
+	var configValue string
+	if repoRoot, err := supervisor.RepoRoot(ctx, repoPath); err == nil {
+		if rc, err := repoconfig.Load(repoconfig.Path(repoRoot)); err == nil {
+			configValue = rc.Forge
+		}
+	}
+	return parseForgeKind(resolveForgeKindValue(explicit, flagValue, configValue))
 }
 
 // repoBriefNote reads this repo's optional .argus/config.yml brief_note (see
@@ -809,7 +839,9 @@ func fixedBriefTail(briefNote string) string {
 // remote and returns an authenticated client. credentialOverrides maps a forge
 // host to an alternate env var name that takes priority over argus's built-in
 // token var list (see internal/credential and --credential-env); it may be nil.
-func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[string]string) (f forge.Forge, owner, name string, err error) {
+// kind picks the API shape for a self-hosted host outside forge.New's
+// auto-detected allowlist (see resolveIssueForgeKind).
+func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[string]string, kind forge.Kind) (f forge.Forge, owner, name string, err error) {
 	remote, err := supervisor.RemoteURL(ctx, repoPath)
 	if err != nil {
 		return nil, "", "", err
@@ -825,7 +857,7 @@ func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[
 			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN), or run `gh auth login` / `glab auth login`",
 		}
 	}
-	f, err = forge.New(host, token, nil, forge.KindAuto)
+	f, err = forge.New(host, token, nil, kind)
 	if err != nil {
 		return nil, "", "", err
 	}

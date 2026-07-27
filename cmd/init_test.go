@@ -202,6 +202,80 @@ func TestRunInitInteractiveMaxDiffLinesNonNumericKeepsDefault(t *testing.T) {
 	}
 }
 
+// TestRunInitForgeFlagWritesConfigWithoutPrompting pins issue #256's --forge
+// flag path: with --yes, an explicit --forge is written verbatim with no
+// interactive prompt.
+func TestRunInitForgeFlagWritesConfigWithoutPrompting(t *testing.T) {
+	dir := t.TempDir()
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	cmd.SetIn(strings.NewReader("")) // --yes must never read from this
+
+	if err := runInit(cmd, &initArgs{repo: dir, yes: true, forgeKind: "gitea"}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	got, err := repoconfig.Load(repoconfig.Path(dir))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Forge != "gitea" {
+		t.Errorf("Forge = %q, want %q", got.Forge, "gitea")
+	}
+}
+
+// TestRunInitForgeFlagRejectsUnknownKind pins the other half: a typo in
+// --forge fails fast instead of silently writing a bogus config value.
+func TestRunInitForgeFlagRejectsUnknownKind(t *testing.T) {
+	dir := t.TempDir()
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	if err := runInit(cmd, &initArgs{repo: dir, yes: true, forgeKind: "bogus"}); err == nil {
+		t.Fatal("want an error for an unrecognized --forge value")
+	}
+	if _, err := os.Stat(repoconfig.Path(dir)); !os.IsNotExist(err) {
+		t.Errorf("a rejected --forge value should write nothing, stat err: %v", err)
+	}
+}
+
+// TestRunInitInteractivePromptWritesForge exercises the forge prompt itself
+// (no --forge flag), confirming an interactive answer reaches the written
+// config.
+func TestRunInitInteractivePromptWritesForge(t *testing.T) {
+	dir := t.TempDir()
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	// base_branch, allow, brief_note, max_diff_lines, proof_required_paths,
+	// always_review_paths, worker_placement, ship_lint (all bare Enter), then
+	// forge.
+	cmd.SetIn(strings.NewReader("\n\n\n\n\n\n\n\ngitlab\n"))
+
+	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	got, err := repoconfig.Load(repoconfig.Path(dir))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Forge != "gitlab" {
+		t.Errorf("Forge = %q, want %q", got.Forge, "gitlab")
+	}
+}
+
 func TestRunInitRefusesOverwriteWithoutConfirmation(t *testing.T) {
 	dir := t.TempDir()
 	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{BaseBranch: "existing"}); err != nil {

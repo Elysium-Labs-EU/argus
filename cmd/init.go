@@ -19,8 +19,9 @@ import (
 
 func newInitCmd() *cobra.Command {
 	var (
-		repo string
-		yes  bool
+		repo      string
+		forgeKind string
+		yes       bool
 	)
 
 	cmd := &cobra.Command{
@@ -32,14 +33,18 @@ prints the suggestion, and asks you to confirm or edit each value before
 writing .argus/config.yml (see internal/repoconfig). This is pure convenience:
 argus itself has no built-in opinion on any repo's toolchain and never will —
 guessing wrong, or a toolchain this version doesn't recognize, is not a bug to
-file, just edit the YAML by hand (see argus issue #161).`,
+file, just edit the YAML by hand (see argus issue #161). The forge key is the
+one setting init can't guess at all: a self-hosted host is exactly the
+ambiguity ship/supervise/worktree prune's own --forge flag exists to resolve,
+so it's only ever set via --forge here or the interactive prompt.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runInit(cmd, &initArgs{repo: repo, yes: yes})
+			return runInit(cmd, &initArgs{repo: repo, yes: yes, forgeKind: forgeKind})
 		},
 	}
 
 	cmd.Flags().StringVar(&repo, "repo", ".", "repo to write .argus/config.yml for")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "write the detected suggestion without prompting, and overwrite an existing config.yml without asking")
+	cmd.Flags().StringVar(&forgeKind, "forge", "", "self-hosted forge kind for this repo's .argus/config.yml: \"gitlab\" or \"gitea\" (unset: prompted for interactively, or left unset with --yes, for a hosted or auto-detected forge)")
 	return cmd
 }
 
@@ -48,8 +53,9 @@ var initCmd = newInitCmd()
 // initArgs holds newInitCmd's flag values so runInit can be tested directly,
 // without going through cobra flag parsing.
 type initArgs struct {
-	repo string
-	yes  bool
+	repo      string
+	forgeKind string
+	yes       bool
 }
 
 func runInit(cmd *cobra.Command, a *initArgs) error {
@@ -75,6 +81,16 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 	}
 
 	suggested := detectRepoConfig(cmd.Context(), repoRoot)
+	// --forge can't be detected the way base_branch/allow/brief_note are (see
+	// detectRepoConfig): a self-hosted host is exactly the ambiguity forge.New
+	// refuses to guess at, so it only ever comes from an explicit --forge or
+	// the interactive prompt below, never a toolchain-marker-file guess.
+	if a.forgeKind != "" {
+		if _, err := parseForgeKind(a.forgeKind); err != nil {
+			return err
+		}
+		suggested.Forge = a.forgeKind
+	}
 	cfg := suggested
 	if !a.yes {
 		cfg.BaseBranch = promptLine(reader, out, "base_branch", suggested.BaseBranch)
@@ -85,6 +101,7 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.AlwaysReviewPaths = promptList(reader, out, "always_review_paths", suggested.AlwaysReviewPaths)
 		cfg.WorkerPlacement = promptLine(reader, out, "worker_placement (workspace|tab)", suggested.WorkerPlacement)
 		cfg.ShipLint = promptLine(reader, out, "ship_lint (controller-side gate command run before commit)", suggested.ShipLint)
+		cfg.Forge = promptLine(reader, out, "forge (self-hosted only: gitlab|gitea, blank for hosted/auto-detected)", suggested.Forge)
 	}
 
 	if err := repoconfig.Save(path, &cfg); err != nil {

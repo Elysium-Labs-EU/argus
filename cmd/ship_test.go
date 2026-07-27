@@ -470,6 +470,55 @@ func TestRunShipOmittedBaseUsesRepoConfig(t *testing.T) {
 	}
 }
 
+// TestRunShipDryRunUsesRepoConfigForgeDefault pins the new .argus/config.yml
+// forge key (issue #256): with no --forge flag, a self-hosted host argus
+// would otherwise refuse (see TestRunShipDryRunRefusesAmbiguousSelfHostedGitLabHost)
+// succeeds once the repo's own config supplies the forge kind.
+func TestRunShipDryRunUsesRepoConfigForgeDefault(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{Forge: "gitea"}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{worktree: wt, base: "main", issue: 21, force: true, dryRun: true})
+	if err != nil {
+		t.Fatalf("dry-run ship should use the repo config's forge default, got: %v", err)
+	}
+	if !strings.Contains(buf.String(), "ship plan (dry run)") {
+		t.Errorf("dry-run output missing plan header: %q", buf.String())
+	}
+}
+
+// TestRunShipExplicitForgeFlagOverridesRepoConfig pins the other half of
+// issue #256: an operator-passed --forge always wins over the repo's
+// configured default, even when they disagree.
+func TestRunShipExplicitForgeFlagOverridesRepoConfig(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{Forge: "gitea"}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{
+		worktree: wt, base: "main", issue: 21, force: true, dryRun: true,
+		forgeKind: "bogus", forgeKindExplicit: true,
+	})
+	if err == nil {
+		t.Fatal("want an error: explicit --forge bogus should override the repo config's forge:gitea and fail to parse")
+	}
+}
+
 func TestRunShipFailsWithoutForgeToken(t *testing.T) {
 	// codeberg.org is on New's auto-detect allowlist (see issue #242's rework:
 	// an arbitrary unlisted host now fails forge-shape validation before ever

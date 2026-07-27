@@ -15,6 +15,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 )
 
@@ -73,6 +74,70 @@ func TestWorktreePruneCmdRegistersCredentialEnvFlag(t *testing.T) {
 	cmd.SetErr(&buf)
 	cmd.SetContext(context.Background())
 	cmd.SetArgs([]string{"--repo", repoRoot, "--merged", "--dry-run", "--credential-env", "codeberg.org=CUSTOM_CODEBERG_TOKEN"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cmd.Execute: %v", err)
+	}
+	if !strings.Contains(buf.String(), "0 cleaned, 0 left in place") {
+		t.Errorf("want an empty-sweep summary, got: %q", buf.String())
+	}
+}
+
+// TestRunWorktreePruneRefusesAmbiguousSelfHostedHost pins issue #256's
+// worktree-prune half: a self-hosted host argus can't shape-detect refuses
+// without --forge or a repo config forge key, same as ship already does.
+func TestRunWorktreePruneRefusesAmbiguousSelfHostedHost(t *testing.T) {
+	t.Setenv("FORGE_TOKEN", "tok")
+	repoRoot := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
+
+	cmd := newWorktreePruneCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	cmd.SetArgs([]string{"--repo", repoRoot, "--merged", "--dry-run"})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("want an error for a self-hosted host with no --forge/config default")
+	}
+}
+
+// TestRunWorktreePruneForgeFlagUnblocksSelfHostedHost is the other half: an
+// explicit --forge lets prune run against a self-hosted host.
+func TestRunWorktreePruneForgeFlagUnblocksSelfHostedHost(t *testing.T) {
+	t.Setenv("FORGE_TOKEN", "tok")
+	repoRoot := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
+
+	cmd := newWorktreePruneCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	cmd.SetArgs([]string{"--repo", repoRoot, "--merged", "--dry-run", "--forge", "gitea"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cmd.Execute: %v", err)
+	}
+	if !strings.Contains(buf.String(), "0 cleaned, 0 left in place") {
+		t.Errorf("want an empty-sweep summary, got: %q", buf.String())
+	}
+}
+
+// TestRunWorktreePruneForgeConfigUnblocksSelfHostedHost mirrors the flag case
+// but via this repo's .argus/config.yml forge key instead of --forge.
+func TestRunWorktreePruneForgeConfigUnblocksSelfHostedHost(t *testing.T) {
+	t.Setenv("FORGE_TOKEN", "tok")
+	repoRoot := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
+	if err := repoconfig.Save(repoconfig.Path(repoRoot), &repoconfig.Config{Forge: "gitea"}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+
+	cmd := newWorktreePruneCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	cmd.SetArgs([]string{"--repo", repoRoot, "--merged", "--dry-run"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("cmd.Execute: %v", err)

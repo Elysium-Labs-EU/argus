@@ -143,20 +143,20 @@ These are enforced in code, not conventions the worker is merely asked to follow
   nothing external recorded it was still outstanding. **After any `supervise` call
   that errors before spawn, note the retry yourself immediately** — argus will not
   remind you, and there is no log to recover it from later.
-- **Any self-hosted forge needs `--forge gitlab`/`--forge gitea`.** Auto-detection
-  only knows the three hosted forges by their exact host — `github.com`,
-  `gitlab.com`, `codeberg.org` — because a host name is not a reliable signal
-  for which REST shape a self-hosted instance actually speaks (a self-hosted
-  GitLab and a self-hosted Gitea/Forgejo are exactly as likely to be named
-  `git.company.com` as anything mentioning "gitlab"). Any other host now makes
-  `argus ship` refuse with a clear error instead of silently guessing — including
-  under `--dry-run`, which validates the forge shape with no token so a clean
-  dry-run actually proves the real ship's forge call will hit the right API.
-  Pass `argus ship ... --forge gitlab` or `--forge gitea` to say which the host
-  is and ship for real. `supervise`/`worktree prune`'s forge calls have no
-  `--forge` flag yet — they hard-fail on any non-hosted-forge host with no
-  override, including self-hosted Gitea/Forgejo instances that previously
-  worked with no flag at all.
+- **Any self-hosted forge needs `--forge` set to `gitlab` or `gitea`.**
+  Auto-detection only knows the three hosted forges by their exact host —
+  `github.com`, `gitlab.com`, `codeberg.org` — because a host name is not a
+  reliable signal for which REST shape a self-hosted instance actually speaks
+  (a self-hosted GitLab and a self-hosted Gitea/Forgejo are exactly as likely
+  to be named `git.company.com` as anything mentioning "gitlab"). Any other
+  host now makes `ship`, `supervise` (its `--issues` forge fetch), and
+  `worktree prune` refuse with a clear error instead of silently guessing —
+  including under `--dry-run`, which validates the forge shape with no token
+  so a clean dry-run actually proves the real ship's forge call will hit the
+  right API. Pass `--forge` on any of the three to say which the host is, or
+  set this repo's `.argus/config.yml` `forge` key once instead of repeating
+  the flag on every invocation (see `docs/repo-config.md`) — an explicit
+  `--forge` flag still wins over the config key.
 
 ## Preflight
 
@@ -319,6 +319,7 @@ Useful flags (see `argus supervise --help` for all):
 - `--review-model <id>` — model for `--review`.
 - `--review-concurrency <n>` — max concurrent `--review` calls when the gate escalates several workers at once (default 4).
 - `--worker-placement <workspace|tab>` (default `workspace`) — `tab` nests each worker's pane as a tab in your current herdr workspace instead of a new top-level one; needs `HERDR_WORKSPACE_ID` set (i.e. running `argus supervise` from inside a herdr pane).
+- `--forge <gitlab|gitea>` — say which API shape a self-hosted host speaks for the `--issues` forge fetch (see the known-gaps note above); this repo's `.argus/config.yml` `forge` key sets a default instead of repeating the flag every run.
 - Gate tuning — `--max-diff-lines` (default 400, `0` disables): counts
   insertions+deletions together from the *measured* git diff; over the limit
   escalates regardless of whether every test passed. It's a pure size-based risk
@@ -534,6 +535,6 @@ binary (checksum-only, no signature verification yet).
 - Don't assume a supervise error before spawn is recorded anywhere — if it errors
   before a worker starts, note the retry yourself immediately.
 - Don't assume any self-hosted forge (GitLab, Gitea, or Forgejo) works without
-  `--forge gitlab`/`--forge gitea` — `argus ship` refuses any host outside
-  github.com/gitlab.com/codeberg.org without it, and `supervise`/`worktree prune`
-  have no override yet at all.
+  `--forge` — `ship`, `supervise`, and `worktree prune` all refuse any host
+  outside github.com/gitlab.com/codeberg.org without it (or this repo's
+  `.argus/config.yml` `forge` key).

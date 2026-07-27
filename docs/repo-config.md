@@ -42,6 +42,15 @@ All keys are optional; a missing file is equivalent to an empty one.
   sibling directories) so argus-created worktrees land where that tooling
   already looks, instead of a second, uncoordinated set under
   `.claude/worktrees/`.
+- **`forge`** — `"gitlab"` or `"gitea"`, the API shape for a repo whose forge
+  is self-hosted and outside `forge.New`'s auto-detected allowlist
+  (`github.com`, `gitlab.com`, `codeberg.org`); a host name alone can't say
+  which shape a self-hosted instance actually speaks, so this is a static
+  per-repo fact set once instead of repeated as `--forge gitlab`/`--forge
+  gitea` on every `ship`/`supervise`/`worktree prune` invocation. Precedence:
+  an explicit `--forge` flag, then this key, then auto-detect (which still
+  refuses any host outside the three-host allowlist). `argus init` prompts
+  for it, or pass `--forge` to `argus init` directly.
 - **`allow`** — the base Claude Code permission-allow list `supervise` writes
   into each worker's generated `settings.local.json`, replacing (not just
   appending to) argus's old hardcoded Go/make list. A CLI `--allow` still

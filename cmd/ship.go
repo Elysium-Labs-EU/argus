@@ -59,7 +59,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 				worktree: worktree, base: base, baseIsDefault: !cmd.Flags().Changed("base"), title: title, repo: repo,
 				issue: issue, force: force, dryRun: dryRun, credentialEnv: overrides,
 				jiraIssue: jiraIssue, jiraTransition: jiraTransition, jiraAssignee: jiraAssignee,
-				forgeKind: forgeKind,
+				forgeKind: forgeKind, forgeKindExplicit: cmd.Flags().Changed("forge"),
 			})
 		},
 	}
@@ -75,7 +75,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 	cmd.Flags().StringVar(&jiraIssue, "jira-issue", "", "Jira issue key (e.g. PROJ-123) to update once the PR is open; unset by default, which skips the Jira post-ship hook entirely. Requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
 	cmd.Flags().StringVar(&jiraTransition, "jira-transition", "", "with --jira-issue: transition name or ID to move the issue to (e.g. \"In Review\"); no transition is made if unset")
 	cmd.Flags().StringVar(&jiraAssignee, "jira-assignee", "", "with --jira-issue: Jira accountID to assign the issue to; not reassigned if unset")
-	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host)")
+	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
 	return cmd
 }
 
@@ -96,6 +96,14 @@ type shipArgs struct {
 	issue          int
 	force          bool
 	dryRun         bool
+	// forgeKindExplicit is true only when --forge was actually passed
+	// (cmd.Flags().Changed("forge")): an operator-given flag always wins over
+	// this repo's .argus/config.yml forge key, the same explicit-flag-wins
+	// precedence baseIsDefault gives --base. Any caller building shipArgs
+	// directly (tests) leaves this false, which means "fall back to the
+	// repo's config, then auto-detect" — the pre-this-change behavior when no
+	// config key is set.
+	forgeKindExplicit bool
 	// baseIsDefault is true only when --base was left at its unset CLI
 	// default (cmd.Flags().Changed("base") == false): runShip then resolves
 	// the real base via supervisor.ResolveBase instead of trusting the
@@ -153,7 +161,7 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	if err != nil {
 		return err
 	}
-	kind, err := parseForgeKind(a.forgeKind)
+	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, forgeConfigDefault(ctx, a.worktree)))
 	if err != nil {
 		return err
 	}
@@ -401,6 +409,38 @@ func resolveRepo(ctx context.Context, override, worktree string) (host, owner, n
 		owner, name = o, n
 	}
 	return host, owner, name, nil
+}
+
+// forgeConfigDefault reads worktree's repo .argus/config.yml forge key,
+// best-effort like supervisor.ResolveBase's own repoconfig lookup: a
+// worktree outside any repo, or with no config file, simply has no default
+// to offer, falling through to whatever the caller does next (an explicit
+// --forge, or auto-detection).
+func forgeConfigDefault(ctx context.Context, worktree string) string {
+	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
+	if err != nil {
+		return ""
+	}
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		return ""
+	}
+	return rc.Forge
+}
+
+// resolveForgeKindValue applies --forge > this repo's .argus/config.yml
+// forge key > the flag's own default (""), the same explicit-flag-wins
+// precedence resolveWorkerPlacement/resolveReviewEffort (cmd/supervise.go)
+// use for their own config keys. explicit is true only when --forge was
+// actually passed on the command line.
+func resolveForgeKindValue(explicit bool, flagValue, configValue string) string {
+	if explicit {
+		return flagValue
+	}
+	if configValue != "" {
+		return configValue
+	}
+	return flagValue
 }
 
 // parseForgeKind turns --forge's raw flag value into a forge.Kind, rejecting

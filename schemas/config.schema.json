@@ -17,6 +17,12 @@
       "enum": ["workspace", "tab"],
       "examples": ["workspace", "tab"]
     },
+    "forge": {
+      "type": "string",
+      "description": "Self-hosted forge API shape for a host outside argus's auto-detected allowlist (github.com, gitlab.com, codeberg.org). An explicit --forge flag on ship/supervise/worktree prune still overrides this. Empty/unset behaves like auto-detect, which still refuses any other unrecognized host.",
+      "enum": ["gitlab", "gitea"],
+      "examples": ["gitlab", "gitea"]
+    },
     "worktree_dir": {
       "type": "string",
       "description": "Where a spawned worker's worktree is created. Empty/unset defaults to <repo>/.claude/worktrees/<branch>. A relative value is joined under the repo root, so \"..\" points at a sibling-of-repo convention (<parent>/<branch>); an absolute value is used as-is.",
