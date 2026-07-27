@@ -116,7 +116,7 @@ Beyond the worker agent, argus plugs into:
 
 * **herdr**, the terminal multiplexer argus drives (through its CLI only) to host worker panes.
 * **Forges**, auto-detected from the git remote, for `ship` and `--issues`: GitHub, GitLab (`gitlab.com`), and Codeberg, Gitea, or Forgejo. A self hosted GitLab host is treated as Gitea or Forgejo.
-* **Jira Cloud.** `argus supervise --jira-issues PROJ-123,...` turns issue keys into worker briefs. Needs `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`, or a `~/.argus/jira.json` config file.
+* **Jira Cloud.** `argus supervise --jira-issues PROJ-123,...` turns issue keys into worker briefs. Add `--jira-assign-on-spawn` and/or `--jira-transition-on-spawn "In Progress"` to claim each ticket for the caller and move it into an in-progress-shaped status before its worker starts. Needs `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`, or a `~/.argus/jira.json` config file.
 * **A Claude Code skill.** A bundled skill at `.claude/skills/argus/` teaches Claude Code to drive `supervise`, `review`, and `ship` for you. Copy it to `~/.claude/skills/argus/` to use it in any repo.
 
 ## Development

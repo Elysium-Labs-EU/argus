@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -118,14 +120,53 @@ func TestIssuesToTasksNoRepoConfigOmitsToolchainText(t *testing.T) {
 	}
 }
 
-// fakeJira is a jiraIssueFetcher stub for tests: it returns canned issues keyed
-// by Jira key instead of a numeric forge issue number.
+// fakeJira is a jiraSpawnClient stub for tests: it returns canned issues keyed
+// by Jira key instead of a numeric forge issue number, and records every
+// Assign/Transition/Myself call so the pre-spawn hook is verifiable without a
+// network.
 type fakeJira struct {
-	issues map[string]forge.Issue
+	myselfErr     error
+	assignErr     error
+	transitionErr error
+	issues        map[string]forge.Issue
+	assigned      map[string]string
+	transitioned  map[string]string
+	myselfID      string
+	myselfCalls   int
 }
 
 func (f *fakeJira) FetchIssue(_ context.Context, key string) (forge.Issue, error) {
 	return f.issues[key], nil
+}
+
+func (f *fakeJira) Myself(context.Context) (string, error) {
+	f.myselfCalls++
+	if f.myselfErr != nil {
+		return "", f.myselfErr
+	}
+	return f.myselfID, nil
+}
+
+func (f *fakeJira) Assign(_ context.Context, key, accountID string) error {
+	if f.assignErr != nil {
+		return f.assignErr
+	}
+	if f.assigned == nil {
+		f.assigned = map[string]string{}
+	}
+	f.assigned[key] = accountID
+	return nil
+}
+
+func (f *fakeJira) Transition(_ context.Context, key, idOrName string) error {
+	if f.transitionErr != nil {
+		return f.transitionErr
+	}
+	if f.transitioned == nil {
+		f.transitioned = map[string]string{}
+	}
+	f.transitioned[key] = idOrName
+	return nil
 }
 
 func TestJiraIssuesToTasks(t *testing.T) {
@@ -133,7 +174,7 @@ func TestJiraIssuesToTasks(t *testing.T) {
 		"PROJ-142": {Title: "daemon down warning", Body: "warn when down"},
 		"PROJ-145": {Title: "log backoff", Body: "back off on EACCES"},
 	}}
-	tasks, branches, err := jiraIssuesToTasks(context.Background(), f, t.TempDir(), "myrepo", []string{"PROJ-142", "PROJ-145"})
+	tasks, branches, err := jiraIssuesToTasks(context.Background(), f, t.TempDir(), "myrepo", []string{"PROJ-142", "PROJ-145"}, jiraSpawnOpts{})
 	if err != nil {
 		t.Fatalf("jiraIssuesToTasks: %v", err)
 	}
@@ -145,6 +186,84 @@ func TestJiraIssuesToTasks(t *testing.T) {
 	}
 	if branches[0] != "myrepo-fix-proj-142" || branches[1] != "myrepo-fix-proj-145" {
 		t.Errorf("branches: %v", branches)
+	}
+	if f.myselfCalls != 0 || len(f.assigned) != 0 || len(f.transitioned) != 0 {
+		t.Errorf("no jiraSpawnOpts set: want no assign/transition/myself calls, got myself=%d assigned=%v transitioned=%v", f.myselfCalls, f.assigned, f.transitioned)
+	}
+}
+
+// TestJiraIssuesToTasksAssignsAndTransitionsOnSpawn covers the pre-spawn hook:
+// with assignToCaller set, each issue is assigned to the accountID Myself
+// resolves (fetched once, not once per issue); with transition set, each
+// issue is also transitioned to that value.
+func TestJiraIssuesToTasksAssignsAndTransitionsOnSpawn(t *testing.T) {
+	f := &fakeJira{
+		issues: map[string]forge.Issue{
+			"PROJ-142": {Title: "daemon down warning", Body: "warn when down"},
+			"PROJ-145": {Title: "log backoff", Body: "back off on EACCES"},
+		},
+		myselfID: "acc-caller",
+	}
+	_, _, err := jiraIssuesToTasks(context.Background(), f, t.TempDir(), "myrepo", []string{"PROJ-142", "PROJ-145"},
+		jiraSpawnOpts{assignToCaller: true, transition: "In Progress"})
+	if err != nil {
+		t.Fatalf("jiraIssuesToTasks: %v", err)
+	}
+	if f.myselfCalls != 1 {
+		t.Errorf("Myself calls = %d, want 1 (resolved once, not per issue)", f.myselfCalls)
+	}
+	want := map[string]string{"PROJ-142": "acc-caller", "PROJ-145": "acc-caller"}
+	if !reflect.DeepEqual(f.assigned, want) {
+		t.Errorf("assigned = %v, want %v", f.assigned, want)
+	}
+	wantTransitioned := map[string]string{"PROJ-142": "In Progress", "PROJ-145": "In Progress"}
+	if !reflect.DeepEqual(f.transitioned, wantTransitioned) {
+		t.Errorf("transitioned = %v, want %v", f.transitioned, wantTransitioned)
+	}
+}
+
+// TestJiraIssuesToTasksAbortsOnAssignFailure covers the fail-fast contract:
+// unlike ship's best-effort post-ship hook, a pre-spawn assign/transition
+// failure must stop the spawn instead of degrading to a warning, since the
+// PR/worker for that issue doesn't exist yet to protect.
+func TestJiraIssuesToTasksAbortsOnAssignFailure(t *testing.T) {
+	f := &fakeJira{
+		issues:    map[string]forge.Issue{"PROJ-1": {Title: "t", Body: "b"}},
+		myselfID:  "acc-caller",
+		assignErr: errors.New("boom"),
+	}
+	_, _, err := jiraIssuesToTasks(context.Background(), f, t.TempDir(), "myrepo", []string{"PROJ-1"}, jiraSpawnOpts{assignToCaller: true})
+	if err == nil {
+		t.Fatal("want error when Assign fails")
+	}
+}
+
+// TestJiraIssuesToTasksAbortsOnMyselfFailure covers resolving the caller's
+// own accountID failing before any per-issue call is made.
+func TestJiraIssuesToTasksAbortsOnMyselfFailure(t *testing.T) {
+	f := &fakeJira{
+		issues:    map[string]forge.Issue{"PROJ-1": {Title: "t", Body: "b"}},
+		myselfErr: errors.New("not authenticated"),
+	}
+	_, _, err := jiraIssuesToTasks(context.Background(), f, t.TempDir(), "myrepo", []string{"PROJ-1"}, jiraSpawnOpts{assignToCaller: true})
+	if err == nil {
+		t.Fatal("want error when Myself fails")
+	}
+	if len(f.assigned) != 0 {
+		t.Errorf("want no Assign call when Myself failed, got %v", f.assigned)
+	}
+}
+
+// TestJiraIssuesToTasksAbortsOnTransitionFailure covers the transition-only
+// path failing.
+func TestJiraIssuesToTasksAbortsOnTransitionFailure(t *testing.T) {
+	f := &fakeJira{
+		issues:        map[string]forge.Issue{"PROJ-1": {Title: "t", Body: "b"}},
+		transitionErr: errors.New("no such transition"),
+	}
+	_, _, err := jiraIssuesToTasks(context.Background(), f, t.TempDir(), "myrepo", []string{"PROJ-1"}, jiraSpawnOpts{transition: "Bogus"})
+	if err == nil {
+		t.Fatal("want error when Transition fails")
 	}
 }
 
