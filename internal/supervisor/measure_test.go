@@ -163,6 +163,36 @@ func TestGateEscalatesWhenWorkerUnderReportsDiff(t *testing.T) {
 	}
 }
 
+// TestGateDoesNotUnderReportCheckForNonTerminalPhase guards against comparing
+// a live git measurement to a self-report that isn't final yet: mid-"working"
+// status.json's DiffStat is a stale snapshot from an earlier report, while git
+// reflects whatever the worker has on disk at the instant of this poll — an
+// honest worker still mid-edit must not trip the unwaivable under-report hard
+// reason just because those two numbers haven't caught up with each other yet.
+func TestGateDoesNotUnderReportCheckForNonTerminalPhase(t *testing.T) {
+	wt := bigGitWorktree(t, "cmd/other.go", 50)
+	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+
+	st := &workerState{
+		hasFile:       true,
+		measuredOK:    true,
+		measured:      ds,
+		measuredFiles: files,
+		plan:          &WorkerPlan{Worker: Worker{Task: "still-working", Worktree: wt}},
+		status: protocol.Status{
+			Phase:    protocol.PhaseWorking,
+			DiffStat: protocol.DiffStat{Files: 1, Insertions: 1},
+		},
+	}
+	v := gateVerdict(st, nil)
+	if hasReasonContaining(v.Reasons, "under-reported diff") {
+		t.Errorf("under-report check must not run for a non-terminal phase, got %v", v.Reasons)
+	}
+}
+
 // TestGateOversizedDiffIsNotAHardReason documents the other half of the
 // hard/soft split (issue #105): a diff that merely exceeds the size ceiling is
 // a judgment call --review can still approve past, so it must land only in

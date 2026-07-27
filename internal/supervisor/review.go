@@ -115,6 +115,32 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 // newline, generated file) without letting a materially larger change auto-approve.
 const diffMismatchTolerance = 10
 
+// underReportReason compares a terminal-phase worker's self-reported diff
+// against argus's own git measurement, returning a non-empty reason when the
+// real diff materially exceeds what was claimed. Only meaningful once the
+// worker has reached a terminal phase — see gateVerdict's phase gate on the
+// caller.
+func underReportReason(st *workerState) string {
+	reported := st.status.DiffStat.Insertions + st.status.DiffStat.Deletions
+	measured := st.measured.Insertions + st.measured.Deletions
+	// A worker's self-report only ever covers this round's own delta, never
+	// the cumulative diff since base — so once a prior round's change already
+	// cleared a verdict, that verdict's measurement is subtracted here, or
+	// every further round on an already-large change would fail this check
+	// regardless of how correct it is.
+	if st.priorMeasuredOK {
+		if prior := st.priorMeasured.Insertions + st.priorMeasured.Deletions; prior < measured {
+			measured -= prior
+		} else {
+			measured = 0
+		}
+	}
+	if measured-reported > diffMismatchTolerance {
+		return fmt.Sprintf("worker under-reported diff: claimed %d lines, git measured %d", reported, measured)
+	}
+	return ""
+}
+
 // gateVerdict is Assess applied to a worker's *measured* state plus checks the
 // pure gate can't make: it escalates when argus could not measure the diff (so
 // the self-report is unverifiable), when the real diff materially exceeds what
@@ -143,25 +169,21 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 		return v
 	}
 	if st.measuredOK {
-		reported := st.status.DiffStat.Insertions + st.status.DiffStat.Deletions
-		measured := st.measured.Insertions + st.measured.Deletions
-		// A worker's self-report only ever covers this round's own delta,
-		// never the cumulative diff since base — so once a prior round's
-		// change already cleared a verdict, that verdict's measurement is
-		// subtracted here, or every further round on an already-large change
-		// would fail this check regardless of how correct it is.
-		if st.priorMeasuredOK {
-			if prior := st.priorMeasured.Insertions + st.priorMeasured.Deletions; prior < measured {
-				measured -= prior
-			} else {
-				measured = 0
+		// A worker's self-reported DiffStat is only meaningful once it claims to
+		// be done — mid-"working" it's a snapshot from an earlier report, while
+		// git measures whatever's on disk *right now* as the worker keeps
+		// editing. Comparing those before the worker reaches a terminal phase
+		// pits a live, still-changing number against a stale one and can flag a
+		// perfectly honest in-progress worker as having "under-reported" — this
+		// hard reason is unwaivable, so it must never fire on a mid-flight
+		// comparison that isn't apples-to-apples yet.
+		terminal := eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone
+		if terminal {
+			if reason := underReportReason(st); reason != "" {
+				v.AutoApprove = false
+				v.Reasons = append(v.Reasons, reason)
+				v.HardReasons = append(v.HardReasons, reason)
 			}
-		}
-		if measured-reported > diffMismatchTolerance {
-			v.AutoApprove = false
-			reason := fmt.Sprintf("worker under-reported diff: claimed %d lines, git measured %d", reported, measured)
-			v.Reasons = append(v.Reasons, reason)
-			v.HardReasons = append(v.HardReasons, reason)
 		}
 		// A worker that reaches a terminal phase claiming completed, verified work
 		// but touched zero files per git is exactly the failure mode that let a
@@ -169,7 +191,7 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 		// sailed through the gate: no code change means nothing was actually done
 		// or reviewable, so this must never auto-approve even though an empty diff
 		// looks "clean" by every other check above.
-		if len(st.measuredFiles) == 0 && (eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone) {
+		if len(st.measuredFiles) == 0 && terminal {
 			v.AutoApprove = false
 			reason := fmt.Sprintf("worker reports phase %q but git shows zero files changed against base — status may be stale or unverified", eff.Phase)
 			v.Reasons = append(v.Reasons, reason)
