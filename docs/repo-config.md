@@ -33,6 +33,15 @@ All keys are optional; a missing file is equivalent to an empty one.
   the base already persisted on a worktree's own `status.json` (set once by
   `supervise` at worktree-creation time), this key, the repo's detected
   `origin/HEAD`, then the literal `"main"`.
+- **`worktree_dir`** — where a spawned worker's worktree is created. Unset
+  keeps argus's default, `<repo>/.claude/worktrees/<branch>`. A relative
+  value is joined under the repo root, so `".."` points worktrees at a
+  sibling-of-repo convention (`<parent>/<branch>`) instead of a nested one;
+  an absolute value is used as-is. Set this when a repo already has its own
+  worktree convention (e.g. pane-discovery or cleanup scripts that expect
+  sibling directories) so argus-created worktrees land where that tooling
+  already looks, instead of a second, uncoordinated set under
+  `.claude/worktrees/`.
 - **`allow`** — the base Claude Code permission-allow list `supervise` writes
   into each worker's generated `settings.local.json`, replacing (not just
   appending to) argus's old hardcoded Go/make list. A CLI `--allow` still

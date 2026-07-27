@@ -36,7 +36,14 @@ type Worker struct {
 	Label    string
 	RepoRoot string
 	Worktree string
-	PaneID   string
+	// WorktreeDir overrides where BuildPlan derives a missing Worktree from
+	// (see WorktreePath) — set from the repo's own .argus/config.yml
+	// worktree_dir (internal/repoconfig) so a repo with its own worktree
+	// convention (e.g. sibling directories next to the checkout) doesn't end
+	// up with a second, uncoordinated set of worktrees under argus's default
+	// .claude/worktrees/. Empty keeps that default.
+	WorktreeDir string
+	PaneID      string
 }
 
 // CredentialBroker mints per-worker credentials so a worker never holds a real
@@ -120,18 +127,40 @@ type WorkerPlan struct {
 	Settings permissionSettings
 }
 
+// defaultWorktreeDir is BuildPlan's worktree location when a worker sets
+// neither Worktree nor WorktreeDir — the original hardcoded convention,
+// still the default for repos that never set .argus/config.yml worktree_dir.
+const defaultWorktreeDir = ".claude/worktrees"
+
+// WorktreePath resolves a worker's worktree directory from repoRoot, the
+// repo's configured worktree_dir (empty means defaultWorktreeDir), and
+// branch. dir containing ".." (or any other relative climb) is joined under
+// repoRoot rather than resolved against the process cwd, so a repo whose own
+// convention is a sibling directory next to the checkout (dir "..") lands
+// there deterministically regardless of where argus itself runs from. An
+// absolute dir is used as-is, entirely independent of repoRoot.
+func WorktreePath(repoRoot, dir, branch string) string {
+	if dir == "" {
+		dir = defaultWorktreeDir
+	}
+	if filepath.IsAbs(dir) {
+		return filepath.Join(dir, branch)
+	}
+	return filepath.Join(repoRoot, dir, branch)
+}
+
 // BuildPlan resolves each worker into a concrete plan. Missing worktree paths are
-// derived as <repo>/.claude/worktrees/<branch>; each brief is the task text plus
-// the shared status-writing contract so writer and reader can't drift. repoAllow
-// and extraAllow are forwarded to settingsFor so every worker's allowlist
-// reflects the same repo-config and operator-supplied extension the dry-run
-// preview shows.
+// derived by WorktreePath from RepoRoot, WorktreeDir, and Branch; each brief is
+// the task text plus the shared status-writing contract so writer and reader
+// can't drift. repoAllow and extraAllow are forwarded to settingsFor so every
+// worker's allowlist reflects the same repo-config and operator-supplied
+// extension the dry-run preview shows.
 func BuildPlan(workers []Worker, repoAllow, extraAllow []string) []WorkerPlan {
 	plans := make([]WorkerPlan, len(workers))
 	for i := range workers {
 		w := workers[i]
 		if w.Worktree == "" {
-			w.Worktree = filepath.Join(w.RepoRoot, ".claude", "worktrees", w.Branch)
+			w.Worktree = WorktreePath(w.RepoRoot, w.WorktreeDir, w.Branch)
 		}
 		if w.Label == "" {
 			// Fold in the task text so the herdr-visible label carries actual

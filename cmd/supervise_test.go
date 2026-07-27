@@ -654,6 +654,25 @@ func TestResolveWorkerPlacementExplicitFlagWinsOutright(t *testing.T) {
 	}
 }
 
+func TestApplyRepoWorktreeDirSetsEmptyWorktreeWorkers(t *testing.T) {
+	workers := []supervisor.Worker{{Branch: "b", RepoRoot: "/repo-a"}}
+	applyRepoWorktreeDir(workers, "..")
+	if got := workers[0].WorktreeDir; got != ".." {
+		t.Errorf("WorktreeDir = %q, want %q", got, "..")
+	}
+}
+
+func TestApplyRepoWorktreeDirLeavesExplicitWorktreeAlone(t *testing.T) {
+	// --attach's workers already carry an explicit Worktree (the existing
+	// directory being observed); a repo's configured worktree_dir must not
+	// touch them.
+	workers := []supervisor.Worker{{Branch: "b", Worktree: "/pinned/path"}}
+	applyRepoWorktreeDir(workers, "..")
+	if got := workers[0].WorktreeDir; got != "" {
+		t.Errorf("WorktreeDir = %q, want empty for a worker with an explicit Worktree", got)
+	}
+}
+
 func TestResolveWorkerPlacementPrefersRepoConfig(t *testing.T) {
 	rc := repoconfig.Config{WorkerPlacement: "tab"}
 	got := resolveWorkerPlacement(false, workerPlacementWorkspace, &rc)

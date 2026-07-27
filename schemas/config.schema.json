@@ -17,6 +17,11 @@
       "enum": ["workspace", "tab"],
       "examples": ["workspace", "tab"]
     },
+    "worktree_dir": {
+      "type": "string",
+      "description": "Where a spawned worker's worktree is created. Empty/unset defaults to <repo>/.claude/worktrees/<branch>. A relative value is joined under the repo root, so \"..\" points at a sibling-of-repo convention (<parent>/<branch>); an absolute value is used as-is.",
+      "examples": ["..", "../worktrees", "/Users/me/worktrees"]
+    },
     "brief_note": {
       "type": "string",
       "description": "Free-text note appended verbatim to every generated worker brief.",
