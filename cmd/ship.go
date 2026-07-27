@@ -129,6 +129,58 @@ type shipTarget struct {
 // without needing a real git remote/push.
 var currentBranch = supervisor.CurrentBranch
 
+// shipContext is what resolveShipContext resolves before runShip decides
+// whether to print a dry-run plan or actually ship: everything derived from
+// the worktree/flags, independent of whether a forge token is available.
+type shipContext struct {
+	branch            string
+	host, owner, name string
+	kind              forge.Kind
+}
+
+// resolveShipContext runs runShip's validation/resolution steps — worktree
+// path, base branch, current branch, approval gate, repo/forge identity — so
+// runShip itself only has to branch on the outcome. Split out because this is
+// the bulk of runShip's own decision points; isolating them here keeps both
+// functions independently testable and each under the CRAP gate.
+func resolveShipContext(ctx context.Context, a *shipArgs) (*shipContext, error) {
+	// See supervisor.ResolveWorktree: a --worktree given relative to argus's
+	// own cwd must be resolved before it reaches CurrentBranch/CommitAll/Push
+	// or protocol.Load/LoadApproval, so every downstream call agrees on the
+	// same absolute path.
+	resolved, err := supervisor.ResolveWorktree(a.worktree)
+	if err != nil {
+		return nil, err
+	}
+	a.worktree = resolved
+	if a.baseIsDefault {
+		a.base = supervisor.ResolveBase(ctx, a.worktree, a.base, false)
+	}
+
+	branch, err := currentBranch(ctx, a.worktree)
+	if err != nil {
+		return nil, err
+	}
+	if verr := checkApproved(ctx, a.worktree, "origin/"+a.base, a.force); verr != nil {
+		return nil, verr
+	}
+	host, owner, name, err := resolveRepo(ctx, a.repo, a.worktree)
+	if err != nil {
+		return nil, err
+	}
+	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, forgeConfigDefault(ctx, a.worktree)))
+	if err != nil {
+		return nil, err
+	}
+	// Validated with no token so this also runs (and can fail) under --dry-run:
+	// a clean dry-run plan previously proved nothing about whether the real API
+	// call would even hit the right forge shape for the host.
+	if _, verr := forge.New(host, "", nil, kind); verr != nil {
+		return nil, verr
+	}
+	return &shipContext{branch: branch, host: host, owner: owner, name: name, kind: kind}, nil
+}
+
 // runShip is newShipCmd's RunE body, extracted so the decision logic (commit,
 // push, open PR) is independently testable and the constructor itself stays
 // flag-registration-only.
@@ -136,40 +188,10 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 	if a.worktree == "" {
 		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus ship --worktree <path> --issue <n>"}
 	}
-	// See supervisor.ResolveWorktree: a --worktree given relative to argus's
-	// own cwd must be resolved before it reaches CurrentBranch/CommitAll/Push
-	// or protocol.Load/LoadApproval, so every downstream call agrees on the
-	// same absolute path.
-	resolved, err := supervisor.ResolveWorktree(a.worktree)
-	if err != nil {
-		return err
-	}
-	a.worktree = resolved
 	ctx := cmd.Context()
-	if a.baseIsDefault {
-		a.base = supervisor.ResolveBase(ctx, a.worktree, a.base, false)
-	}
-
-	branch, err := currentBranch(ctx, a.worktree)
+	sc, err := resolveShipContext(ctx, a)
 	if err != nil {
 		return err
-	}
-	if verr := checkApproved(ctx, a.worktree, "origin/"+a.base, a.force); verr != nil {
-		return verr
-	}
-	host, owner, name, err := resolveRepo(ctx, a.repo, a.worktree)
-	if err != nil {
-		return err
-	}
-	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, forgeConfigDefault(ctx, a.worktree)))
-	if err != nil {
-		return err
-	}
-	// Validated with no token so this also runs (and can fail) under --dry-run:
-	// a clean dry-run plan previously proved nothing about whether the real API
-	// call would even hit the right forge shape for the host.
-	if _, verr := forge.New(host, "", nil, kind); verr != nil {
-		return verr
 	}
 
 	reader := bufio.NewReader(cmd.InOrStdin())
@@ -179,31 +201,31 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 		// No token/forge client yet at this point (see below) — the issue-title
 		// fetch fallback is simply skipped for the preview; status.Title and the
 		// old branch/issue default need no network and still apply.
-		prTitle, terr := resolvePRTitle(ctx, nil, reader, out, a, owner, name, branch)
+		prTitle, terr := resolvePRTitle(ctx, nil, reader, out, a, sc.owner, sc.name, sc.branch)
 		if terr != nil {
 			return terr
 		}
-		target := &shipTarget{host: host, owner: owner, name: name, branch: branch, prTitle: prTitle, commitMsg: prTitle + closesLine(a.issue)}
+		target := &shipTarget{host: sc.host, owner: sc.owner, name: sc.name, branch: sc.branch, prTitle: prTitle, commitMsg: prTitle + closesLine(a.issue)}
 		renderShipPlan(out, target, a.base)
 		return nil
 	}
 
-	token := forge.TokenForHost(host, a.credentialEnv)
+	token := forge.TokenForHost(sc.host, a.credentialEnv)
 	if token == "" {
 		return &ui.UserError{
-			Err:  fmt.Errorf("no API token for %s", host),
+			Err:  fmt.Errorf("no API token for %s", sc.host),
 			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN), or run `gh auth login` / `glab auth login`",
 		}
 	}
-	f, ferr := forge.New(host, token, nil, kind)
+	f, ferr := forge.New(sc.host, token, nil, sc.kind)
 	if ferr != nil {
 		return ferr
 	}
-	prTitle, terr := resolvePRTitle(ctx, f, reader, out, a, owner, name, branch)
+	prTitle, terr := resolvePRTitle(ctx, f, reader, out, a, sc.owner, sc.name, sc.branch)
 	if terr != nil {
 		return terr
 	}
-	target := &shipTarget{host: host, owner: owner, name: name, branch: branch, prTitle: prTitle, commitMsg: prTitle + closesLine(a.issue)}
+	target := &shipTarget{host: sc.host, owner: sc.owner, name: sc.name, branch: sc.branch, prTitle: prTitle, commitMsg: prTitle + closesLine(a.issue)}
 	return shipChange(cmd, f, a, target)
 }
 
