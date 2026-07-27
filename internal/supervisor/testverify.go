@@ -42,29 +42,39 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 			continue
 		}
 
-		first := runVerify(ctx, worktree, t.Cmd, timeout)
+		// Target is a separate field precisely so a worker can report e.g.
+		// {Cmd: "go tool fieldalignment", Target: "./..."} without folding it
+		// into Cmd — the re-run must recompose the same command line the
+		// worker actually ran, or it silently exercises a different (and for
+		// some tools, argument-less and thus meaningless) invocation.
+		cmdStr := t.Cmd
+		if t.Target != "" {
+			cmdStr = t.Cmd + " " + t.Target
+		}
+
+		first := runVerify(ctx, worktree, cmdStr, timeout)
 		if first.ok {
 			continue
 		}
 		if first.timedOut {
 			mismatches = append(mismatches, fmt.Sprintf(
-				"could not verify claimed pass of %q: re-run exceeded %s and was killed", t.Cmd, timeout))
+				"could not verify claimed pass of %q: re-run exceeded %s and was killed", cmdStr, timeout))
 			continue
 		}
 
-		second := runVerify(ctx, worktree, t.Cmd, timeout)
+		second := runVerify(ctx, worktree, cmdStr, timeout)
 		if second.ok {
 			continue
 		}
 		if second.timedOut {
 			mismatches = append(mismatches, fmt.Sprintf(
-				"could not verify claimed pass of %q: re-run exceeded %s and was killed", t.Cmd, timeout))
+				"could not verify claimed pass of %q: re-run exceeded %s and was killed", cmdStr, timeout))
 			continue
 		}
 
 		mismatches = append(mismatches, fmt.Sprintf(
 			"worker claimed %q passed, but re-running it failed twice in a row: %v\n--- attempt 1 output (tail) ---\n%s\n--- attempt 2 output (tail) ---\n%s",
-			t.Cmd, second.err, tail(first.output), tail(second.output)))
+			cmdStr, second.err, tail(first.output), tail(second.output)))
 	}
 	return mismatches
 }

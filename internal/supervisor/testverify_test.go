@@ -14,7 +14,7 @@ import (
 func TestVerifyTestsFlagsFabricatedPass(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
-		{Cmd: "exit 1", Target: "unit", Result: protocol.ResultPass},
+		{Cmd: "exit 1", Result: protocol.ResultPass},
 	}
 	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 1 {
@@ -25,7 +25,7 @@ func TestVerifyTestsFlagsFabricatedPass(t *testing.T) {
 func TestVerifyTestsAcceptsGenuinePass(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
-		{Cmd: "exit 0", Target: "unit", Result: protocol.ResultPass},
+		{Cmd: "exit 0", Result: protocol.ResultPass},
 	}
 	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
@@ -33,11 +33,31 @@ func TestVerifyTestsAcceptsGenuinePass(t *testing.T) {
 	}
 }
 
+// TestVerifyTestsJoinsCmdAndTarget is the regression for the gate silently
+// dropping Target when re-running a worker's claimed pass: "test -f" alone
+// (no path operand) always fails, so this only passes if the re-run actually
+// appends Target to Cmd — matching the go-tool-with-a-package-arg shape
+// (e.g. "go tool fieldalignment" + "./...") this field split exists for.
+func TestVerifyTestsJoinsCmdAndTarget(t *testing.T) {
+	wt := t.TempDir()
+	marker := filepath.Join(wt, "marker.txt")
+	if err := os.WriteFile(marker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []protocol.TestRun{
+		{Cmd: "test -f", Target: "marker.txt", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — re-run must join Cmd and Target, not run Cmd alone", mismatches)
+	}
+}
+
 func TestVerifyTestsSkipsFailAndSkippedClaims(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
-		{Cmd: "exit 1", Target: "unit", Result: protocol.ResultFail},
-		{Cmd: "exit 1", Target: "unit", Result: protocol.ResultSkipped},
+		{Cmd: "exit 1", Result: protocol.ResultFail},
+		{Cmd: "exit 1", Result: protocol.ResultSkipped},
 	}
 	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
@@ -53,7 +73,7 @@ func TestVerifyTestsRetriesOnceBeforeFlagging(t *testing.T) {
 	wt := t.TempDir()
 	marker := filepath.Join(wt, "attempted")
 	tests := []protocol.TestRun{
-		{Cmd: "test -f " + marker + " && exit 0 || { touch " + marker + "; exit 1; }", Target: "unit", Result: protocol.ResultPass},
+		{Cmd: "test -f " + marker + " && exit 0 || { touch " + marker + "; exit 1; }", Result: protocol.ResultPass},
 	}
 	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
@@ -68,7 +88,7 @@ func TestVerifyTestsRetriesOnceBeforeFlagging(t *testing.T) {
 func TestVerifyTestsFlagsRepeatedFailureWithBothOutputs(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
-		{Cmd: "echo boom-output-here; exit 2", Target: "unit", Result: protocol.ResultPass},
+		{Cmd: "echo boom-output-here; exit 2", Result: protocol.ResultPass},
 	}
 	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 1 {
@@ -85,7 +105,7 @@ func TestVerifyTestsFlagsRepeatedFailureWithBothOutputs(t *testing.T) {
 func TestVerifyTestsReportsTimeout(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
-		{Cmd: "sleep 5", Target: "unit", Result: protocol.ResultPass},
+		{Cmd: "sleep 5", Result: protocol.ResultPass},
 	}
 	mismatches := VerifyTests(context.Background(), wt, tests, 50*time.Millisecond)
 	if len(mismatches) != 1 {
