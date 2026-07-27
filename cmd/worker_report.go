@@ -178,5 +178,12 @@ func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status
 		rest.Question = cur.Question
 		rest.Answer = cur.Answer
 	}
+	// A worker that doesn't set title in this report (e.g. a rework round
+	// describing only that round's fix) must not wipe out a title an earlier
+	// report already set — only a report that explicitly names a new title
+	// gets to replace it.
+	if rest.Title == "" {
+		rest.Title = cur.Title
+	}
 	return protocol.Write(protocol.StatusPath(worktree), rest)
 }

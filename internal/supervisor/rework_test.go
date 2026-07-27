@@ -29,6 +29,19 @@ func TestReworkBriefIncludesFindingsRoundAndTask(t *testing.T) {
 	}
 }
 
+// TestReworkBriefWarnsAgainstNarrowRetitle pins the issue-282 fix at the
+// brief level: a rework round is told to leave title empty rather than
+// describe only that round's fix, since runWorkerReport can only carry a
+// prior title forward when the round's own report doesn't set a new one.
+func TestReworkBriefWarnsAgainstNarrowRetitle(t *testing.T) {
+	brief := ReworkBrief("fix the widget", "feat-x", []string{"finding"}, 1, 3)
+	for _, want := range []string{"title", "empty", "deliberately"} {
+		if !strings.Contains(brief, want) {
+			t.Errorf("ReworkBrief missing %q (title-continuity guidance) in:\n%s", want, brief)
+		}
+	}
+}
+
 func TestReworkBriefOmitsOriginalTaskSectionWhenEmpty(t *testing.T) {
 	brief := ReworkBrief("", "feat-x", []string{"finding"}, 1, 3)
 	if strings.Contains(brief, "Original task:") {

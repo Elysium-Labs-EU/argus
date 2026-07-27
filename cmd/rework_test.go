@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -539,6 +540,97 @@ func TestRunReworkStopsImmediatelyWhenWorkerReportsBlocked(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "need a design decision") {
 		t.Errorf("expected the blocked reason surfaced:\n%s", buf.String())
+	}
+}
+
+// TestRestoreTitleAcrossRound covers restoreTitleAcrossRound directly: it
+// must persist the restored title to status.json on disk, not just correct
+// the in-memory struct, since ship reads the title back off disk in a wholly
+// separate process invocation with no access to this round's state.
+func TestRestoreTitleAcrossRound(t *testing.T) {
+	cases := []struct {
+		name        string
+		prior       string
+		statusTitle string
+		wantFinal   string
+		wantWrite   bool
+	}{
+		{"unchanged", "feat: thing", "feat: thing", "feat: thing", false},
+		{"no prior title", "", "feat: thing", "feat: thing", false},
+		{"round left it empty", "feat: original feature", "", "feat: original feature", true},
+		{"round narrowed it", "feat: original feature", "fix: narrow round nit", "feat: original feature", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wt := t.TempDir()
+			status := &protocol.Status{Title: tc.statusTitle}
+			var buf bytes.Buffer
+			if err := restoreTitleAcrossRound(&buf, wt, 2, 3, tc.prior, status); err != nil {
+				t.Fatalf("restoreTitleAcrossRound: %v", err)
+			}
+			if status.Title != tc.wantFinal {
+				t.Errorf("status.Title = %q, want %q", status.Title, tc.wantFinal)
+			}
+			onDisk, err := protocol.Load(protocol.StatusPath(wt))
+			if tc.wantWrite {
+				if err != nil {
+					t.Fatalf("expected status.json to be written, Load failed: %v", err)
+				}
+				if onDisk.Title != tc.wantFinal {
+					t.Errorf("on-disk Title = %q, want %q", onDisk.Title, tc.wantFinal)
+				}
+				if !strings.Contains(buf.String(), "keeping original title") {
+					t.Errorf("expected a note about keeping the original title, got:\n%s", buf.String())
+				}
+			} else if err == nil {
+				t.Errorf("expected no status.json write, but found one with Title %q", onDisk.Title)
+			}
+		})
+	}
+}
+
+// TestRunReworkRestoresOriginalTitleAcrossRealInvalidateStatus is the
+// end-to-end pin for issue #282: it runs the real runRework -> runReworkRound
+// -> dispatchReworkRound path (only the herdr client is faked), so it
+// actually exercises supervisor.InvalidateStatus deleting status.json before
+// the round's dispatch — the exact deletion that made runWorkerReport's
+// cur.Title carry-forward alone insufficient, since cur is loaded after the
+// file is already gone. A rework round whose own report names a narrower
+// title (describing only that round's fix) must not leave that narrower
+// title as what's on disk once the round completes.
+func TestRunReworkRestoresOriginalTitleAcrossRealInvalidateStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDirWithDiff(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	originalTitle := "feat: interactive shell-completion installer for argus completion"
+	seed := &protocol.Status{Title: originalTitle}
+	if err := protocol.Write(protocol.StatusPath(dir), seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	cmd, buf := testCmd()
+	retitled := reworkStatus()
+	retitled.Title = "fix: isolate HOME in runUpdate completion-refresh test"
+	client := fakeReworkClient(dir, retitled)
+	reviewer := &sequenceReviewer{results: []supervisor.ReviewResult{{Decision: "approve", Summary: "fixed"}}}
+
+	err := runRework(cmd, client, reviewer, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "feat-x", maxRounds: 3, interval: 5 * time.Millisecond,
+		gate: gateFlags{},
+	})
+	if err != nil {
+		t.Fatalf("runRework: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(dir))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Title != originalTitle {
+		t.Errorf("status.json Title = %q after rework round, want the original PR title %q preserved (this is exactly what ship reads to title the PR/commit)", got.Title, originalTitle)
+	}
+	if !strings.Contains(buf.String(), "keeping original title") {
+		t.Errorf("expected rework's own output to note the restore:\n%s", buf.String())
 	}
 }
 
