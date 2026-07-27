@@ -7,12 +7,13 @@
 # untouched functions -- even in a file you edited elsewhere -- does not block.
 #
 #   GO_CRAP_BASE       base ref (default: origin/main); CI sets it to PR target
-#   GO_CRAP_THRESHOLD  CRAP threshold (default: 30, go-crap's own default)
+#   GO_CRAP_THRESHOLD  CRAP threshold (default: 20; go-crap's own upstream
+#                      default is 30, tightened here for this repo)
 #
 # Pure bash + python3 (no gawk), so it runs the same on macOS and Linux CI.
 set -euo pipefail
 
-THRESHOLD="${GO_CRAP_THRESHOLD:-30}"
+THRESHOLD="${GO_CRAP_THRESHOLD:-20}"
 BASE="${GO_CRAP_BASE:-origin/main}"
 
 command -v go-crap >/dev/null 2>&1 || {
