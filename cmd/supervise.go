@@ -22,35 +22,37 @@ import (
 
 func newSuperviseCmd() *cobra.Command {
 	var (
-		panes              []string
-		branches           []string
-		labels             []string
-		tasks              []string
-		tasksFile          string
-		repo               string
-		base               string
-		launcher           string
-		proofRequiredPaths []string
-		alwaysReviewPaths  []string
-		reviewModel        string
-		reviewEffort       string
-		review             bool
-		maxDiffLines       int
-		verifyCmd          string
-		interval           time.Duration
-		timeout            time.Duration
-		reviewConcurrency  int
-		issues             []int
-		jiraIssues         []string
-		dryRun             bool
-		noCredProxy        bool
-		attach             bool
-		workspace          string
-		worktrees          []string
-		workerRuntime      string
-		workerPlacement    string
-		allow              []string
-		credentialEnv      map[string]string
+		panes                 []string
+		branches              []string
+		labels                []string
+		tasks                 []string
+		tasksFile             string
+		repo                  string
+		base                  string
+		launcher              string
+		proofRequiredPaths    []string
+		alwaysReviewPaths     []string
+		reviewModel           string
+		reviewEffort          string
+		review                bool
+		maxDiffLines          int
+		verifyCmd             string
+		interval              time.Duration
+		timeout               time.Duration
+		reviewConcurrency     int
+		issues                []int
+		jiraIssues            []string
+		jiraAssignOnSpawn     bool
+		jiraTransitionOnSpawn string
+		dryRun                bool
+		noCredProxy           bool
+		attach                bool
+		workspace             string
+		worktrees             []string
+		workerRuntime         string
+		workerPlacement       string
+		allow                 []string
+		credentialEnv         map[string]string
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -98,7 +100,7 @@ each pane's directory in --panes mode).`,
 			} else {
 				workers, err = spawnWorkers(cmd.Context(), client, &workerInput{
 					panes: panes, branches: branches, labels: labels, tasks: tasks, tasksFile: tasksFile, repo: repo,
-				}, issues, jiraIssues, overrides)
+				}, issues, jiraIssues, overrides, jiraSpawnOpts{assignToCaller: jiraAssignOnSpawn, transition: jiraTransitionOnSpawn})
 			}
 			if err != nil {
 				return err
@@ -149,6 +151,8 @@ each pane's directory in --panes mode).`,
 
 	cmd.Flags().IntSliceVar(&issues, "issues", nil, "issue numbers to fetch from the repo's forge and turn into worker briefs (branch defaults to <repo>-fix-issue-<n>)")
 	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to <repo>-fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
+	cmd.Flags().BoolVar(&jiraAssignOnSpawn, "jira-assign-on-spawn", false, "with --jira-issues: assign each issue to the caller (the account owning the configured Jira credentials) at spawn time, before the worker starts")
+	cmd.Flags().StringVar(&jiraTransitionOnSpawn, "jira-transition-on-spawn", "", "with --jira-issues: transition name or ID to move each issue to at spawn time (e.g. \"In Progress\"); unset skips this step")
 	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated); drives worker count in the default mode")
 	cmd.Flags().StringVar(&tasksFile, "tasks-file", "", "path to a file with one task per line, appended after --tasks; unlike --tasks this is not CSV-parsed, so commas and quotes in a free-text brief are safe")
 	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>)")
@@ -498,12 +502,22 @@ type workerInput struct {
 	tasks     []string
 }
 
+// jiraSpawnOpts holds the optional pre-spawn Jira behavior --jira-issues can
+// trigger before a worker starts: claiming the ticket for whoever is running
+// this (assignToCaller) and/or moving it into an in-progress-shaped status
+// (transition) — mirroring ship's post-ship --jira-assignee/--jira-transition
+// but on the other end of the worker lifecycle (see jiraIssuesToTasks).
+type jiraSpawnOpts struct {
+	transition     string
+	assignToCaller bool
+}
+
 // spawnWorkers resolves the spawn-mode inputs into workers: it requires at least
 // one worker source, defaults --repo to the working directory, folds any --issues
 // and --jira-issues into tasks/branches by fetching them from the forge or Jira,
 // then pairs the slices. It is the non-attach half of supervise, kept out of RunE
 // so each mode reads flat.
-func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string) ([]supervisor.Worker, error) {
+func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts) ([]supervisor.Worker, error) {
 	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && in.tasksFile == "" && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
@@ -531,7 +545,7 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 		}
 		in.tasks = append(in.tasks, fileTasks...)
 	}
-	if err := foldIssueSources(ctx, in, issues, jiraIssues, credentialOverrides); err != nil {
+	if err := foldIssueSources(ctx, in, issues, jiraIssues, credentialOverrides, jiraSpawn); err != nil {
 		return nil, err
 	}
 	return buildWorkers(ctx, client, in)
@@ -573,7 +587,7 @@ func loadTasksFile(path string) ([]string, error) {
 // branches only fill in.branches when it is still empty, so explicit
 // --branches always wins. Split out of spawnWorkers to keep each source's
 // fetch-and-fold step independently testable and readable.
-func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string) error {
+func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts) error {
 	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
 		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues, credentialOverrides)
@@ -589,7 +603,7 @@ func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIs
 	// Jira is an issue tracker with no git-host concept to resolve from the
 	// origin remote.
 	if len(jiraIssues) > 0 {
-		fetched, brs, err := jiraTasksFromIssues(ctx, in.repo, jiraIssues)
+		fetched, brs, err := jiraTasksFromIssues(ctx, in.repo, jiraIssues, jiraSpawn)
 		if err != nil {
 			return err
 		}
@@ -834,17 +848,28 @@ func issuesToTasks(ctx context.Context, f forge.Forge, owner, name, repoPath str
 	return tasks, branches, nil
 }
 
-// jiraIssueFetcher is the subset of *jira.Client that jiraIssuesToTasks needs,
-// so it is testable without a network.
+// jiraIssueFetcher is the subset of *jira.Client that jiraIssuesToTasks needs
+// to build a brief, so it is testable without a network.
 type jiraIssueFetcher interface {
 	FetchIssue(ctx context.Context, key string) (forge.Issue, error)
+}
+
+// jiraSpawnClient extends jiraIssueFetcher with the write calls
+// jiraIssuesToTasks needs for its optional pre-spawn assign/transition step
+// (see jiraSpawnOpts) — kept separate from jiraIssueFetcher so a test
+// exercising only the brief-building path can stub the smaller interface.
+type jiraSpawnClient interface {
+	jiraIssueFetcher
+	Assign(ctx context.Context, key, accountID string) error
+	Transition(ctx context.Context, key, idOrName string) error
+	Myself(ctx context.Context) (string, error)
 }
 
 // jiraTasksFromIssues builds a Jira client from JIRA_BASE_URL, JIRA_EMAIL, and
 // JIRA_API_TOKEN and fetches each key. Unlike tasksFromIssues this does not go
 // through internal/forge or the origin remote: Jira is an issue tracker, not a
 // git host, so there is no owner/repo or PR concept to resolve.
-func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string) (tasks, branches []string, err error) {
+func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
 	c, err := jira.NewFromEnv(nil)
 	if err != nil {
 		return nil, nil, &ui.UserError{
@@ -852,7 +877,7 @@ func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string) (t
 			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN, or write them to a JSON config file at $JIRA_CONFIG_FILE or ~/.argus/jira.json, to fetch --jira-issues",
 		}
 	}
-	return jiraIssuesToTasks(ctx, c, repoPath, repoBranchPrefix(ctx, repoPath), keys)
+	return jiraIssuesToTasks(ctx, c, repoPath, repoBranchPrefix(ctx, repoPath), keys, jiraSpawn)
 }
 
 // repoBranchPrefix names the git repo at repoPath for branch prefixing, so
@@ -871,16 +896,41 @@ func repoBranchPrefix(ctx context.Context, repoPath string) string {
 }
 
 // jiraIssuesToTasks renders each Jira issue into a worker brief and a default
-// branch name, mirroring issuesToTasks for the git-forge issue pipeline.
-// repoPath resolves this repo's optional brief_note the same way
-// issuesToTasks does — Jira is only the issue tracker here, the tasks it
-// produces still run against this same repo checkout.
-func jiraIssuesToTasks(ctx context.Context, c jiraIssueFetcher, repoPath, branchPrefix string, keys []string) (tasks, branches []string, err error) {
+// branch name, mirroring issuesToTasks for the git-forge issue pipeline. It
+// also runs the optional pre-spawn Jira hook (jiraSpawn) before a worker for
+// that issue starts, so the ticket shows a claimed signal on the board for
+// its whole worker lifetime rather than only after ship's post-ship hook
+// runs (see postShipJira in cmd/ship.go). Unlike that post-ship hook, a
+// failure here aborts the spawn instead of degrading to a warning — the PR
+// doesn't exist yet, so there is still something to protect: an operator
+// finding out the claim never took before workers pile onto an
+// apparently-unclaimed ticket. repoPath resolves this repo's optional
+// brief_note the same way issuesToTasks does.
+func jiraIssuesToTasks(ctx context.Context, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
 	tail := fixedBriefTail(repoBriefNote(repoPath))
+
+	var callerAccountID string
+	if jiraSpawn.assignToCaller {
+		callerAccountID, err = c.Myself(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolving caller's Jira account for --jira-assign-on-spawn: %w", err)
+		}
+	}
+
 	for _, key := range keys {
 		iss, ferr := c.FetchIssue(ctx, key)
 		if ferr != nil {
 			return nil, nil, fmt.Errorf("fetching jira issue %s: %w", key, ferr)
+		}
+		if jiraSpawn.assignToCaller {
+			if aerr := c.Assign(ctx, key, callerAccountID); aerr != nil {
+				return nil, nil, fmt.Errorf("assigning jira issue %s to caller: %w", key, aerr)
+			}
+		}
+		if jiraSpawn.transition != "" {
+			if terr := c.Transition(ctx, key, jiraSpawn.transition); terr != nil {
+				return nil, nil, fmt.Errorf("transitioning jira issue %s to %q: %w", key, jiraSpawn.transition, terr)
+			}
 		}
 		tasks = append(tasks, fmt.Sprintf(
 			"Fix Jira issue %s: %s\n\n%s\n\n%s",

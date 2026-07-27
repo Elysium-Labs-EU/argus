@@ -426,6 +426,68 @@ func TestAssignEmptyUnassigns(t *testing.T) {
 	}
 }
 
+// TestMyselfReturnsAccountID covers the happy path: GET /myself decodes and
+// returns the accountId field.
+func TestMyselfReturnsAccountID(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/myself", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accountId":"acc-999","displayName":"Dev"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	accountID, err := c.Myself(context.Background())
+	if err != nil {
+		t.Fatalf("Myself: %v", err)
+	}
+	if accountID != "acc-999" {
+		t.Errorf("accountID = %q, want acc-999", accountID)
+	}
+}
+
+// TestMyselfSurfacesMissingAccountID covers a 2xx response with no accountId
+// field surfacing as a clear error instead of silently returning "".
+func TestMyselfSurfacesMissingAccountID(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/myself", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"displayName":"Dev"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	if _, err := c.Myself(context.Background()); err == nil {
+		t.Error("want error when myself response has no accountId")
+	}
+}
+
+// TestMyselfSurfacesAPIError covers a non-2xx response from GET /myself
+// surfacing Jira's error message.
+func TestMyselfSurfacesAPIError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/myself", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errorMessages":["not authenticated"]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	_, err := c.Myself(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not authenticated") {
+		t.Errorf("want surfaced API message, got %v", err)
+	}
+}
+
 // noConfigFile points JIRA_CONFIG_FILE at a path that does not exist, so
 // tests exercising the missing-env-vars path don't accidentally pick up a
 // real ~/.argus/jira.json on the machine running the test.

@@ -366,6 +366,30 @@ func (c *Client) Assign(ctx context.Context, key, accountID string) error {
 	return c.write(ctx, http.MethodPut, url, payload)
 }
 
+// myselfResponse is the subset of GET /rest/api/3/myself we read.
+type myselfResponse struct {
+	AccountID string `json:"accountId"`
+}
+
+// Myself resolves the accountID of the API token's owner. It exists so a
+// caller can assign an issue to "whoever is running this" (e.g. a pre-spawn
+// claim hook) without the operator having to look up their own opaque Jira
+// accountID and pass it in explicitly.
+func (c *Client) Myself(ctx context.Context) (string, error) {
+	base, err := c.resolvedBase(ctx)
+	if err != nil {
+		return "", err
+	}
+	var me myselfResponse
+	if err := c.readJSON(ctx, base+"/rest/api/3/myself", &me); err != nil {
+		return "", err
+	}
+	if me.AccountID == "" {
+		return "", fmt.Errorf("myself response had no accountId")
+	}
+	return me.AccountID, nil
+}
+
 // readJSON performs an authenticated GET and decodes a 2xx JSON body into
 // out, turning a non-2xx response into a clear error carrying Jira's message
 // (see apiMessage). It is the shared GET path Transition's lookup uses;

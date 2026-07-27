@@ -268,6 +268,13 @@ argus supervise --repo <path> --issues 141,142,143 --review
 argus supervise --repo <path> --jira-issues PROJ-123,PROJ-124 --review
 ```
 
+Claim tickets on Jira's board the moment their workers spawn, instead of only updating Jira after `ship` opens the PR:
+
+```bash
+argus supervise --repo <path> --jira-issues PROJ-123,PROJ-124 --review \
+  --jira-assign-on-spawn --jira-transition-on-spawn "In Progress"
+```
+
 **If this errors with "error creating worktree ... already exists"** — a worktree
 directory or git-registered worktree entry for that branch name is already there (a
 leftover from a prior manual worktree, or a previous run's worktree/branch that was
@@ -389,7 +396,8 @@ identically to a real ship — a clean `--dry-run` print is itself proof a verdi
 exists, faster than inspecting `status.json` or run logs by hand.
 
 Optional post-ship Jira hook (transitions/assigns/comments the linked issue once the
-PR is open):
+PR is open) — the other end of this lifecycle from `supervise`'s pre-spawn
+`--jira-assign-on-spawn`/`--jira-transition-on-spawn` above:
 
 ```bash
 argus ship --worktree <path> --issue 42 \
