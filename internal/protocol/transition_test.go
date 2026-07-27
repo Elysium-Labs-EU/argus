@@ -11,6 +11,7 @@ func TestIsLegalTransition(t *testing.T) {
 		{PhaseSelfTest, PhaseAwaitingReview},
 		{PhaseSelfTest, PhaseWorking},
 		{PhaseSelfTest, PhaseBlocked},
+		{PhaseAwaitingReview, PhaseWorking},
 		{PhaseAwaitingReview, PhaseBlocked},
 		{PhaseBlocked, PhaseWorking},
 	}
@@ -28,7 +29,6 @@ func TestIsLegalTransition(t *testing.T) {
 		{PhaseWorking, PhaseAwaitingReview},  // skips self_test
 		{PhaseWorking, PhaseDone},
 		{PhaseSelfTest, PhaseDone},
-		{PhaseAwaitingReview, PhaseWorking},        // review is terminal for the worker
 		{PhaseAwaitingReview, PhaseDone},           // done comes from ship, not the worker
 		{PhaseAwaitingReview, PhaseAwaitingReview}, // no self-loop
 		{PhaseBlocked, PhaseAwaitingReview},
