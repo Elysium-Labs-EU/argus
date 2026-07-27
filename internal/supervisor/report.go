@@ -108,6 +108,7 @@ func renderReport(ctx context.Context, cfg *Config, states []*workerState) {
 		if st.hasFile || st.herdrEscalation != "" {
 			renderVerdict(out, gateVerdict(st, cfg.Policy))
 			renderReview(out, st)
+			renderProvenance(out, st.plan.Worktree)
 		}
 		if st.hasFile && st.status.PRURL != "" {
 			_, _ = fmt.Fprintf(out, "    pr: %s\n", st.status.PRURL)
@@ -202,6 +203,11 @@ func reportTokens(cfg *Config, st *workerState, sessionID string) string {
 // event always agree on the same numbers.
 func logRunSummary(cfg *Config, states []*workerState, blocked, blockedOnQuestion int) {
 	workers, reported, escalated, approved := 0, 0, 0, 0
+	// Provenance counts split "approved" by who cleared it and surface how many
+	// workers still need a human read, so the operator can trust the aggregate
+	// the same way the per-worker report's provenance line lets them trust each
+	// diff (see renderProvenance).
+	gateApproved, reviewerApproved, awaitingHuman := 0, 0, 0
 	for _, st := range states {
 		workers++
 		if !st.hasFile && st.herdrEscalation == "" {
@@ -212,8 +218,18 @@ func logRunSummary(cfg *Config, states []*workerState, blocked, blockedOnQuestio
 		if !v.AutoApprove {
 			escalated++
 		}
-		if a, found, err := protocol.LoadApproval(st.plan.Worktree); err == nil && found && a.Approved {
-			approved++
+		if a, found, err := protocol.LoadApproval(st.plan.Worktree); err == nil && found {
+			if a.Approved {
+				approved++
+			}
+			switch a.Provenance() {
+			case protocol.ProvenanceGateApproved:
+				gateApproved++
+			case protocol.ProvenanceReviewerApproved:
+				reviewerApproved++
+			case protocol.ProvenanceAwaitingHuman:
+				awaitingHuman++
+			}
 		}
 	}
 	cfg.Log.Emit(&eventlog.Event{
@@ -224,6 +240,9 @@ func logRunSummary(cfg *Config, states []*workerState, blocked, blockedOnQuestio
 			"reported":            reported,
 			"escalated":           escalated,
 			"approved":            approved,
+			"gate_approved":       gateApproved,
+			"reviewer_approved":   reviewerApproved,
+			"awaiting_human":      awaitingHuman,
 			"blocked":             blocked,
 			"blocked_on_question": blockedOnQuestion,
 		},
@@ -265,6 +284,32 @@ func renderVerdict(out io.Writer, v Verdict) {
 	_, _ = fmt.Fprintf(out, "    gate: %s needs review\n", ui.LabelWarning.Render("○"))
 	for _, r := range v.Reasons {
 		_, _ = fmt.Fprintf(out, "      - %s\n", r)
+	}
+}
+
+// renderProvenance prints the one line that closes the verify-once loop: which of
+// the three approval sources cleared this worker, and whether the operator still
+// needs to hand-read its diff. It reads the persisted verdict.json rather than
+// recomputing from the gate verdict here, because that file — written by
+// recordApproval — is the only place a reviewer's actual decision and an
+// unwaivable hard-reason override are both already folded in; renderVerdict's
+// recomputed gate verdict knows neither. A missing verdict (no report reached a
+// terminal phase) prints nothing, same as renderReview's no-op.
+func renderProvenance(out io.Writer, worktree string) {
+	a, found, err := protocol.LoadApproval(worktree)
+	if err != nil || !found {
+		return
+	}
+	switch a.Provenance() {
+	case protocol.ProvenanceGateApproved:
+		_, _ = fmt.Fprintf(out, "    approval: %s gate-auto-approved — verified by the gate, no human read needed before ship\n",
+			ui.LabelSuccess.Render("✓"))
+	case protocol.ProvenanceReviewerApproved:
+		_, _ = fmt.Fprintf(out, "    approval: %s reviewer-approved — verified by the review, no human read needed before ship\n",
+			ui.LabelSuccess.Render("✓"))
+	case protocol.ProvenanceAwaitingHuman:
+		_, _ = fmt.Fprintf(out, "    approval: %s surfaced-awaiting-human — hand-read this diff and decide\n",
+			ui.LabelWarning.Render("○"))
 	}
 }
 

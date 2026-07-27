@@ -28,6 +28,8 @@ stateDiagram-v2
 
 The judgment minority is the gate. When a worker reaches `awaiting_review`, the gate cross-checks what it reported against the diff argus measures from git. A clean match approves automatically. A mismatch escalates: to you, or with `--review`, to a headless `claude -p` review. That review is the only point where an LLM re-enters the loop. A few checks, like an unmeasurable or under-reported diff, are hard escalations that no review verdict can waive, because the discrepancy is itself evidence that the worker's self report cannot be trusted.
 
+The supervise report labels each worker with the source that cleared it, so you never re-verify what the gate already did. `gate-auto-approved` means the deterministic gate cleared it on plain facts; `reviewer-approved` means the gate escalated and the LLM review approved it; `surfaced-awaiting-human` means there is no approving verdict and a human decision is needed. **Verify once: hand-read only `surfaced-awaiting-human` and `blocked` workers. Never re-review a gate- or reviewer-approved diff — it has already been checked, and re-reading every diff by hand is the single largest avoidable cost in a supervise run.**
+
 After a worker ships, its worktree is cleaned up with `argus worktree prune`, which advances through its own lifecycle and only removes a worktree once it is safe to.
 
 ```mermaid

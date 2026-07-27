@@ -35,3 +35,37 @@ func TestLoadApprovalMissingIsNotFound(t *testing.T) {
 		t.Error("found should be false when no verdict was written")
 	}
 }
+
+// TestProvenanceClassifiesApproval pins the derivation both the supervise report
+// and run_summary rely on: a rejected verdict always needs a human regardless of
+// which source rejected it, a reviewer approve and a gate approve are told apart
+// by Source, and only the awaiting-human case reports NeedsHumanRead. This is the
+// signal that lets an operator skip re-reading an already-cleared diff.
+func TestProvenanceClassifiesApproval(t *testing.T) {
+	cases := []struct {
+		name      string
+		source    string
+		want      Provenance
+		approved  bool
+		wantHuman bool
+	}{
+		{"rejected by reviewer", "review", ProvenanceAwaitingHuman, false, true},
+		{"rejected/escalated by gate", "gate", ProvenanceAwaitingHuman, false, true},
+		{"rejected with no source", "", ProvenanceAwaitingHuman, false, true},
+		{"reviewer approved", "review", ProvenanceReviewerApproved, true, false},
+		{"gate auto-approved", "gate", ProvenanceGateApproved, true, false},
+		{"approved by any non-review source", "other", ProvenanceGateApproved, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := Approval{Approved: tc.approved, Source: tc.source}
+			got := a.Provenance()
+			if got != tc.want {
+				t.Errorf("Provenance() = %q, want %q", got, tc.want)
+			}
+			if got.NeedsHumanRead() != tc.wantHuman {
+				t.Errorf("NeedsHumanRead() = %v, want %v", got.NeedsHumanRead(), tc.wantHuman)
+			}
+		})
+	}
+}
