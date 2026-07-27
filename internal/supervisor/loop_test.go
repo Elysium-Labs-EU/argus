@@ -1356,15 +1356,16 @@ func fakePaneListRunner(paneID string, agentStatus func() string) herdr.Runner {
 func TestCheckHerdrStuckEscalatesAfterThreshold(t *testing.T) {
 	client := herdr.NewWithRunner(fakePaneListRunner("w1:p1", func() string { return "blocked" }))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+	log := eventlog.New(io.Discard, "supervise", "run1", nil)
 
-	if checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+	if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("must not escalate before herdrStuckThreshold is crossed")
 	}
 	if st.herdrEscalation != "" {
 		t.Error("no escalation should be recorded before the threshold")
 	}
 
-	if !checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+	if !checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("must escalate once accumulated stuck time crosses herdrStuckThreshold")
 	}
 	if st.herdrEscalation == "" {
@@ -1451,12 +1452,13 @@ func TestCheckHerdrStuckNudgesDoneBeforeEscalating(t *testing.T) {
 	var promptCalls int
 	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "done" }, nil, &promptCalls))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+	log := eventlog.New(io.Discard, "supervise", "run1", nil)
 
-	if checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+	if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("must not escalate before herdrStuckThreshold is crossed")
 	}
 
-	if checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+	if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("crossing the threshold for the first time must nudge, not escalate")
 	}
 	if promptCalls != 1 {
@@ -1471,10 +1473,10 @@ func TestCheckHerdrStuckNudgesDoneBeforeEscalating(t *testing.T) {
 
 	// The worker ignores the nudge and stays "done" for another full
 	// threshold window: this time it must escalate, and must not nudge again.
-	if checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+	if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("must not escalate before the second threshold window is crossed")
 	}
-	if !checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+	if !checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("must escalate once the worker stays stuck through a second threshold window")
 	}
 	if promptCalls != 1 {
@@ -1494,9 +1496,10 @@ func TestCheckHerdrStuckNudgeFailureEscalatesImmediately(t *testing.T) {
 	var promptCalls int
 	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "done" }, errors.New("boom"), &promptCalls))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+	log := eventlog.New(io.Discard, "supervise", "run1", nil)
 
-	checkHerdrStuck(context.Background(), client, nil, st, time.Minute)
-	if !checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+	checkHerdrStuck(context.Background(), client, log, st, time.Minute)
+	if !checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("a failed nudge must escalate immediately, not wait out another threshold window")
 	}
 	if promptCalls != 1 {
@@ -1514,13 +1517,49 @@ func TestCheckHerdrStuckBlockedNeverNudges(t *testing.T) {
 	var promptCalls int
 	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "blocked" }, nil, &promptCalls))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+	log := eventlog.New(io.Discard, "supervise", "run1", nil)
 
-	checkHerdrStuck(context.Background(), client, nil, st, time.Minute)
-	if !checkHerdrStuck(context.Background(), client, nil, st, time.Minute) {
+	checkHerdrStuck(context.Background(), client, log, st, time.Minute)
+	if !checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("a blocked pane must escalate on the first threshold crossing")
 	}
 	if promptCalls != 0 {
 		t.Errorf("a blocked pane must never receive an AgentPrompt nudge, got %d calls", promptCalls)
+	}
+}
+
+// TestCheckHerdrStuckLogsPaneListErrorOnce: a herdr transport failure says
+// nothing about the worker's real state, so it must never itself count as
+// evidence of being stuck (checkHerdrStuck must return false and leave
+// herdrEscalation unset), while still surfacing to the operator — but only
+// once per distinct error, mirroring pollStatus's own status_unreadable
+// dedupe, so a persistent herdr outage doesn't spam the run log on every
+// tick.
+func TestCheckHerdrStuckLogsPaneListErrorOnce(t *testing.T) {
+	callErr := errors.New("boom")
+	client := herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
+		return nil, callErr
+	})
+	var buf bytes.Buffer
+	log := eventlog.New(&buf, "supervise", "run1", nil)
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+
+	if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
+		t.Fatal("a herdr transport error must never be treated as stuck")
+	}
+	if st.herdrEscalation != "" {
+		t.Error("a herdr transport error must not set herdrEscalation")
+	}
+	if st.herdrErr != callErr.Error() {
+		t.Errorf("herdrErr = %q, want %q", st.herdrErr, callErr.Error())
+	}
+
+	checkHerdrStuck(context.Background(), client, log, st, time.Minute)
+	checkHerdrStuck(context.Background(), client, log, st, time.Minute)
+
+	logged := strings.Count(buf.String(), "herdr_status_unreadable")
+	if logged != 1 {
+		t.Errorf("expected the repeated identical herdr error to be logged once, got %d occurrences in %q", logged, buf.String())
 	}
 }
 
