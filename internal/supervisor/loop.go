@@ -529,7 +529,28 @@ func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
 // its session transcript for real plan/todo evidence, so the gate and report use
 // ground truth rather than the worker's self-report. A measurement failure is
 // recorded (and later surfaced) rather than silently trusting status.json.
+//
+// Steps run in fixed order: measureReconcileDiffs before captureReviewDiffs,
+// since the later test/verify steps can leave worktree side effects the
+// reviewer must never see.
 func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
+	measureReconcileDiffs(ctx, cfg, states)
+	captureReviewDiffs(ctx, cfg, states)
+	verifyClaimedTests(ctx, states)
+	runConfiguredVerifyCommand(ctx, cfg, states)
+
+	// Non-default --launcher never produces a Claude Code transcript, so
+	// checkPlanEvidence would only ever report false — leave plan evidence
+	// not-applicable instead of failed.
+	if !usesDefaultLauncher(cfg.Launcher) {
+		return
+	}
+	checkPlanEvidence(cfg, states)
+}
+
+// measureReconcileDiffs also carries forward the prior round's recorded
+// verdict measurement so gateVerdict judges only what changed since then.
+func measureReconcileDiffs(ctx context.Context, cfg *Config, states []*workerState) {
 	for _, st := range states {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
@@ -555,14 +576,13 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 			}
 		}
 	}
+}
 
-	// Capture the diff reviewOne will later show the LLM reviewer *before*
-	// VerifyTests runs below: VerifyTests re-executes an arbitrary
-	// worker-supplied command, which may itself write to the worktree (a
-	// coverage file, a regenerated lockfile, ...). Fetching the diff here,
-	// ahead of that, means the reviewer only ever sees the worker's own
-	// change — never a test run's side effects — regardless of whether this
-	// worker later escalates to review.
+// captureReviewDiffs must run before verifyClaimedTests/runConfiguredVerifyCommand:
+// those execute worker-supplied commands that can dirty the worktree
+// (coverage files, regenerated lockfiles), and the reviewer must never see
+// that noise.
+func captureReviewDiffs(ctx context.Context, cfg *Config, states []*workerState) {
 	for _, st := range states {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
@@ -572,11 +592,12 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		}
 		st.reviewDiff, st.reviewDiffErr = DiffFor(ctx, st.plan.Worktree, cfg.Base)
 	}
+}
 
-	// Re-run every test the worker claimed passed, independent of the
-	// launcher check below: unlike plan evidence, this reproduces the claim
-	// itself via git worktree + shell, not a Claude Code transcript
-	// convention, so it applies to any launcher.
+// verifyClaimedTests reproduces every claimed test pass via git worktree +
+// shell rather than a launcher-specific transcript convention, so it applies
+// regardless of --launcher.
+func verifyClaimedTests(ctx context.Context, states []*workerState) {
 	for _, st := range states {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
@@ -586,15 +607,14 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		}
 		st.testMismatches = VerifyTests(ctx, st.plan.Worktree, st.status.Tests, testVerifyTimeout)
 	}
+}
 
-	// Re-run this repo's own configured verify command (lint/build/pre-commit
-	// — see Config.VerifyCommand), the same bar `argus ship`'s `git commit`
-	// enforces via the repo's own hooks, so a failure surfaces here instead
-	// of first appearing at ship time. Runs after VerifyTests for the same
-	// reason reviewDiff is captured before it: st.reviewDiff already holds
-	// the pre-verification diff, so a verify command's own worktree side
-	// effects (a regenerated lockfile, coverage output) can't leak into what
-	// the reviewer is shown either.
+// runConfiguredVerifyCommand mirrors the bar `argus ship`'s `git commit`
+// hooks enforce (Config.VerifyCommand), so a failure surfaces here instead
+// of at ship time; it runs after captureReviewDiffs for the same reason —
+// its own worktree side effects must not leak into the diff already shown
+// to the reviewer.
+func runConfiguredVerifyCommand(ctx context.Context, cfg *Config, states []*workerState) {
 	for _, st := range states {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
@@ -604,17 +624,11 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 		}
 		st.verifyMismatch = RunVerifyCommand(ctx, st.plan.Worktree, cfg.VerifyCommand)
 	}
+}
 
-	// A worker started with a non-default --launcher never produces a Claude
-	// Code transcript, so HasPlanEvidence would always report "no evidence
-	// found" — not a real signal, just the absence of a convention that
-	// doesn't apply. Leaving planEvidenceOK/hasPlanEvidence at their zero
-	// value here makes gateVerdict treat plan evidence as not-applicable
-	// rather than failed.
-	if !usesDefaultLauncher(cfg.Launcher) {
-		return
-	}
-
+// checkPlanEvidence records whether each worker's Claude Code transcript
+// shows real plan/todo evidence (see defaultAgent.PlanEvidence).
+func checkPlanEvidence(cfg *Config, states []*workerState) {
 	for _, st := range states {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
