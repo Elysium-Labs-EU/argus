@@ -7,7 +7,13 @@ import "slices"
 // string a worker wrote — every edge in the phase graph was reachable from every
 // other phase in practice, the same shape of gap that let a worker's bad
 // UpdatedAt silently break argus for 51 minutes (issue #90). Only forward
-// progress, plus recovery to working from self_test or blocked, is legal.
+// progress, plus recovery to working from self_test, awaiting_review, or
+// blocked, is legal. Awaiting_review's recovery edge exists because a worker
+// can receive corrective feedback out-of-band (e.g. a human reviewing
+// directly in chat rather than through `argus review`/`rework`) while it is
+// still the live process in its worktree — it needs a way to reopen its own
+// status and resubmit without a second process being dispatched into the same
+// worktree.
 // Phase("") is the fresh-worktree case: no status.json exists yet, so Load
 // returns a zero Status and the only legal first move is into planning.
 //
@@ -19,7 +25,7 @@ var legalTransitions = map[Phase][]Phase{
 	PhasePlanning:       {PhaseWorking},
 	PhaseWorking:        {PhaseSelfTest, PhaseBlocked},
 	PhaseSelfTest:       {PhaseAwaitingReview, PhaseWorking, PhaseBlocked},
-	PhaseAwaitingReview: {PhaseBlocked},
+	PhaseAwaitingReview: {PhaseWorking, PhaseBlocked},
 	PhaseBlocked:        {PhaseWorking},
 }
 
