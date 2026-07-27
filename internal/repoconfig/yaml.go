@@ -151,42 +151,57 @@ func parseYAML(data string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("config: line %d: bad value %q: %w", i+1, rest, err)
 		}
-		switch key {
-		case "base_branch":
-			cfg.BaseBranch = value
-		case "worker_placement":
-			cfg.WorkerPlacement = value
-		case "forge":
-			cfg.Forge = value
-		case "worktree_dir":
-			cfg.WorktreeDir = value
-		case "brief_note":
-			cfg.BriefNote = value
-		case "review_note":
-			cfg.ReviewNote = value
-		case "ship_lint":
-			cfg.ShipLint = value
-		case "verify_command":
-			cfg.VerifyCommand = value
-		case "review_effort":
-			cfg.ReviewEffort = value
-		case "max_diff_lines":
-			n, perr := strconv.Atoi(value)
-			if perr != nil {
-				return Config{}, fmt.Errorf("config: line %d: max_diff_lines: %w", i+1, perr)
-			}
-			cfg.MaxDiffLines = &n
-		default:
+		handled, err := assignScalarField(&cfg, key, value, i+1)
+		if err != nil {
+			return Config{}, err
+		}
+		if !handled && rest == "" {
 			// Unknown key: if it introduces its own indented list block, skip
 			// past it too so the next iteration doesn't trip the "list item
 			// outside of a recognized key" check above.
-			if rest == "" {
-				_, consumed, _ := parseYAMLList(lines, i+1)
-				i += consumed
-			}
+			_, consumed, _ := parseYAMLList(lines, i+1)
+			i += consumed
 		}
 	}
 	return cfg, nil
+}
+
+// assignScalarField sets cfg's field for one of parseYAML's scalar keys
+// (base_branch, worker_placement, forge, worktree_dir, brief_note,
+// review_note, ship_lint, verify_command, review_effort, max_diff_lines),
+// reporting whether key was recognized so parseYAML can still skip an
+// unrecognized key's indented block. line is the 1-based source line, for
+// error messages.
+func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
+	switch key {
+	case "base_branch":
+		cfg.BaseBranch = value
+	case "worker_placement":
+		cfg.WorkerPlacement = value
+	case "forge":
+		cfg.Forge = value
+	case "worktree_dir":
+		cfg.WorktreeDir = value
+	case "brief_note":
+		cfg.BriefNote = value
+	case "review_note":
+		cfg.ReviewNote = value
+	case "ship_lint":
+		cfg.ShipLint = value
+	case "verify_command":
+		cfg.VerifyCommand = value
+	case "review_effort":
+		cfg.ReviewEffort = value
+	case "max_diff_lines":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return true, fmt.Errorf("config: line %d: max_diff_lines: %w", line, err)
+		}
+		cfg.MaxDiffLines = &n
+	default:
+		return false, nil
+	}
+	return true, nil
 }
 
 // parseYAMLList reads consecutive indented "- value" list items starting at
