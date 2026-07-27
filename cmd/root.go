@@ -46,4 +46,9 @@ func init() {
 	rootCmd.AddCommand(systemCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(workerCmd)
+	rootCmd.AddCommand(completionCmd)
 }
+
+// completionCmd is a package-level var (like configCmd, systemUpdateCmd, ...)
+// matching this repo's existing self-registration convention.
+var completionCmd = newCompletionCmd(rootCmd)
