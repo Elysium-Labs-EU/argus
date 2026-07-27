@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,6 +24,7 @@ func newReworkCmd() *cobra.Command {
 		base               string
 		task               string
 		findings           []string
+		findingsFile       string
 		launcher           string
 		workerRuntime      string
 		reviewModel        string
@@ -56,6 +58,10 @@ outcome instead of retrying forever.`,
 			if err != nil {
 				return err
 			}
+			findings, err = appendFindingsFile(findings, findingsFile)
+			if err != nil {
+				return err
+			}
 			logger, closeLog := openRunLog(cmd, "rework")
 			defer closeLog()
 			// reviewer is resolved lazily inside runRework, once this repo's
@@ -85,7 +91,8 @@ outcome instead of retrying forever.`,
 	cmd.Flags().StringVar(&worktree, "worktree", "", "worktree whose worker to re-dispatch")
 	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref to diff against for the gate/review")
 	cmd.Flags().StringVar(&task, "task", "", "task/issue the change addresses (default: the worker's last reported task, else the branch name)")
-	cmd.Flags().StringSliceVar(&findings, "findings", nil, "findings to hand the worker for round 1 (default: the worktree's last recorded request-changes verdict)")
+	cmd.Flags().StringArrayVar(&findings, "findings", nil, "a finding to hand the worker for round 1 (default: the worktree's last recorded request-changes verdict); repeat the flag for multiple findings. Unlike a CSV flag, each value is taken verbatim, so a finding's own commas and quotes are never split or rejected")
+	cmd.Flags().StringVar(&findingsFile, "findings-file", "", "path to a file with one finding per line, appended after --findings; unlike --findings this is not even split into separate values per flag, so a multi-sentence brief with punctuation survives untouched on its line")
 	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in the worker pane if it has no live agent")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate the rework worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "status poll cadence")
@@ -341,6 +348,39 @@ func startingFindings(worktree string, explicit []string) ([]string, error) {
 		return approval.Reasons, nil
 	}
 	return []string{approval.Summary}, nil
+}
+
+// appendFindingsFile appends --findings-file's lines (one finding each) after
+// the repeated --findings values. --findings-file only ever splits on newlines,
+// so a multi-sentence finding with commas and quotes survives verbatim — the
+// same reason supervise pairs --tasks with --tasks-file. An empty path is a
+// no-op, returning the flag findings unchanged.
+func appendFindingsFile(findings []string, path string) ([]string, error) {
+	if path == "" {
+		return findings, nil
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is the operator-supplied --findings-file, a deliberate local file read, not remote input
+	if err != nil {
+		return nil, &ui.UserError{
+			Err:  fmt.Errorf("reading --findings-file %s: %w", path, err),
+			Hint: "pass a path to a file with one finding per line",
+		}
+	}
+	var fileFindings []string
+	for line := range strings.SplitSeq(strings.TrimRight(string(data), "\n"), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		fileFindings = append(fileFindings, line)
+	}
+	if len(fileFindings) == 0 {
+		return nil, &ui.UserError{
+			Err:  fmt.Errorf("--findings-file %s has no non-empty lines", path),
+			Hint: "each line becomes one finding handed to the worker",
+		}
+	}
+	return append(findings, fileFindings...), nil
 }
 
 // taskFor falls back from an explicit --task to the worker's own last

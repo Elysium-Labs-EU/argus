@@ -457,7 +457,10 @@ This one command does everything the old manual loop required by hand:
 1. Reads the worktree's last recorded verdict (`.claude/argus/verdict.json`) for its
    findings — no need to re-paste them. If you only have findings from a standalone
    `argus review` call (which never persists — see the gap above), pass them
-   explicitly instead: `--findings "finding one" --findings "finding two"`.
+   explicitly instead: `--findings "finding one" --findings "finding two"` (repeat the
+   flag per finding — each value is verbatim, so commas and quotes inside a finding are
+   safe). For a longer, multi-sentence brief, put one finding per line in a file and pass
+   `--findings-file path` instead (appended after any `--findings`).
 2. Re-dispatches the worktree's own worker in place (reusing its live herdr pane the
    same way `argus rebase` does — no `herdr pane run` by hand) with those findings as
    its next brief.
