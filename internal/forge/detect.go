@@ -107,17 +107,19 @@ func credentialHelperToken(host string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), credentialHelperTimeout)
 	defer cancel()
 
-	switch host {
-	case "github.com":
+	if host == "github.com" {
 		if tok := runTrimmed(ctx, "gh", "auth", "token"); tok != "" {
 			return tok
 		}
-	case "gitlab.com":
-		if tok := runTrimmed(ctx, "glab", "auth", "token"); tok != "" {
-			return tok
-		}
+	} else if tok := runTrimmed(ctx, "glab", "config", "get", "token", "--host", host); tok != "" {
+		// glab has no "auth token" subcommand; "config get token --host" is
+		// the documented way to read what "glab auth login" stored. Tried for
+		// every non-GitHub host, not just gitlab.com, since glab logs into
+		// self-hosted GitLab the same way and --host disambiguates.
+		return tok
 	}
-	// Covers Codeberg/Gitea (no standard CLI token-export command) and any
+	// Covers Codeberg/Gitea (no standard CLI token-export command), a glab
+	// login that used --use-keyring (config get won't surface it), and any
 	// other self-hosted forge: ask git's own credential-helper chain
 	// (osxkeychain, libsecret, the store gh/glab themselves register with, ...).
 	return gitCredentialFill(ctx, host)
