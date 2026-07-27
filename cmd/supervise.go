@@ -531,19 +531,8 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 			Hint: "argus supervise --tasks x,y --branches feat-x,feat-y [--repo <path>]  (or --tasks-file path, --issues n,n, --jira-issues KEY,KEY, or --attach --workspace <id>)",
 		}
 	}
-	if in.repo == "" && len(in.panes) == 0 {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("resolving working directory: %w", err)
-		}
-		in.repo = wd
-	}
-	if in.repo != "" {
-		abs, err := supervisor.ResolveWorktree(in.repo)
-		if err != nil {
-			return nil, err
-		}
-		in.repo = abs
+	if err := resolveSpawnRepo(in); err != nil {
+		return nil, err
 	}
 	if in.tasksFile != "" {
 		fileTasks, err := loadTasksFile(in.tasksFile)
@@ -556,6 +545,27 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 		return nil, err
 	}
 	return buildWorkers(ctx, client, in)
+}
+
+// resolveSpawnRepo defaults in.repo to the working directory (only needed
+// when the spawn isn't --panes-attach, which carries its own repo per pane)
+// and resolves whatever repo ends up set to an absolute worktree path.
+func resolveSpawnRepo(in *workerInput) error {
+	if in.repo == "" && len(in.panes) == 0 {
+		wd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("resolving working directory: %w", err)
+		}
+		in.repo = wd
+	}
+	if in.repo != "" {
+		abs, err := supervisor.ResolveWorktree(in.repo)
+		if err != nil {
+			return err
+		}
+		in.repo = abs
+	}
+	return nil
 }
 
 // loadTasksFile reads --tasks-file into one task per line. --tasks goes through

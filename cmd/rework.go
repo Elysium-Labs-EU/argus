@@ -184,17 +184,40 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 		return nil
 	}
 
+	cfg, repoRoot, err := buildReworkConfig(ctx, opts, reviewer, logger)
+	if err != nil {
+		return err
+	}
+
+	for round := 1; round <= opts.maxRounds; round++ {
+		outcome, rerr := runReworkRound(ctx, out, logger, client, cfg, repoRoot, branch, task, findings, round, opts)
+		if rerr != nil {
+			return rerr
+		}
+		if outcome.stop {
+			return nil
+		}
+		findings = outcome.findings
+	}
+	return nil
+}
+
+// buildReworkConfig assembles runRework's per-round supervisor.Config:
+// resolving the repo root, loading its repoconfig, defaulting the reviewer,
+// and reading $HOME — split out so this one-time setup doesn't inflate
+// runRework's own branching.
+func buildReworkConfig(ctx context.Context, opts *reworkOpts, reviewer supervisor.Reviewer, logger *eventlog.Logger) (*supervisor.Config, string, error) {
 	repoRoot, err := supervisor.RepoRoot(ctx, opts.worktree)
 	if err != nil {
-		return fmt.Errorf("resolving repo root for %s: %w", opts.worktree, err)
+		return nil, "", fmt.Errorf("resolving repo root for %s: %w", opts.worktree, err)
 	}
 	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
 	if err != nil {
-		return &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
+		return nil, "", &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("resolving home dir: %w", err)
+		return nil, "", fmt.Errorf("resolving home dir: %w", err)
 	}
 	if reviewer == nil {
 		reviewer = newReviewer(opts.reviewModel, resolveReviewEffort(opts.reviewEffortExplicit, opts.reviewEffort, &rc), logger)
@@ -209,18 +232,7 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 		ReviewNote:    rc.ReviewNote,
 		VerifyCommand: resolveVerifyCommand(opts.verifyCmdExplicit, opts.verifyCmd, &rc),
 	}
-
-	for round := 1; round <= opts.maxRounds; round++ {
-		outcome, rerr := runReworkRound(ctx, out, logger, client, cfg, repoRoot, branch, task, findings, round, opts)
-		if rerr != nil {
-			return rerr
-		}
-		if outcome.stop {
-			return nil
-		}
-		findings = outcome.findings
-	}
-	return nil
+	return cfg, repoRoot, nil
 }
 
 // reworkRoundOutcome is what one dispatch-and-judge round decided: stop is
