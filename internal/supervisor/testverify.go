@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
@@ -42,41 +43,75 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 			continue
 		}
 
-		// Target is a separate field precisely so a worker can report e.g.
-		// {Cmd: "go tool fieldalignment", Target: "./..."} without folding it
-		// into Cmd — the re-run must recompose the same command line the
-		// worker actually ran, or it silently exercises a different (and for
-		// some tools, argument-less and thus meaningless) invocation.
-		cmdStr := t.Cmd
-		if t.Target != "" {
-			cmdStr = t.Cmd + " " + t.Target
-		}
+		for _, cmdStr := range replayCommands(t.Cmd, t.Target) {
+			first := runVerify(ctx, worktree, cmdStr, timeout)
+			if first.ok {
+				continue
+			}
+			if first.timedOut {
+				mismatches = append(mismatches, fmt.Sprintf(
+					"could not verify claimed pass of %q: re-run exceeded %s and was killed", cmdStr, timeout))
+				break
+			}
 
-		first := runVerify(ctx, worktree, cmdStr, timeout)
-		if first.ok {
-			continue
-		}
-		if first.timedOut {
+			second := runVerify(ctx, worktree, cmdStr, timeout)
+			if second.ok {
+				continue
+			}
+			if second.timedOut {
+				mismatches = append(mismatches, fmt.Sprintf(
+					"could not verify claimed pass of %q: re-run exceeded %s and was killed", cmdStr, timeout))
+				break
+			}
+
 			mismatches = append(mismatches, fmt.Sprintf(
-				"could not verify claimed pass of %q: re-run exceeded %s and was killed", cmdStr, timeout))
-			continue
+				"worker claimed %q passed, but re-running it failed twice in a row: %v\n--- attempt 1 output (tail) ---\n%s\n--- attempt 2 output (tail) ---\n%s",
+				cmdStr, second.err, tail(first.output), tail(second.output)))
+			break
 		}
-
-		second := runVerify(ctx, worktree, cmdStr, timeout)
-		if second.ok {
-			continue
-		}
-		if second.timedOut {
-			mismatches = append(mismatches, fmt.Sprintf(
-				"could not verify claimed pass of %q: re-run exceeded %s and was killed", cmdStr, timeout))
-			continue
-		}
-
-		mismatches = append(mismatches, fmt.Sprintf(
-			"worker claimed %q passed, but re-running it failed twice in a row: %v\n--- attempt 1 output (tail) ---\n%s\n--- attempt 2 output (tail) ---\n%s",
-			cmdStr, second.err, tail(first.output), tail(second.output)))
 	}
 	return mismatches
+}
+
+// replayCommands recomposes the exact command line(s) to re-run for a
+// worker's self-reported Cmd/Target, in place of a naive Cmd+" "+Target join
+// that trusts the worker's paraphrase of what it actually typed. That join
+// breaks in three observed ways, each guarded here:
+//
+//   - `make <target>`: make treats every token after the target name as an
+//     additional target to build, never as an argument to the recipe — a
+//     stray word the worker appended (in Cmd or Target) turns into "No rule
+//     to make target". The target is always replayed bare.
+//   - Target already present in Cmd: a worker sometimes folds a path into
+//     Cmd directly and repeats it in Target, so joining hands the tool the
+//     same path twice.
+//   - Target listing several comma-separated paths (mirroring how a task
+//     brief lists target files): joined into one command line this can
+//     overflow a tool that only accepts a single positional argument.
+//     Replaying Cmd once per listed path reproduces what actually happened
+//     without needing to know any given tool's arity.
+func replayCommands(cmd, target string) []string {
+	if fields := strings.Fields(cmd); len(fields) >= 2 && fields[0] == "make" {
+		return []string{"make " + fields[1]}
+	}
+
+	if target == "" || strings.Contains(cmd, target) {
+		return []string{cmd}
+	}
+
+	if strings.Contains(target, ",") {
+		var cmds []string
+		for p := range strings.SplitSeq(target, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				cmds = append(cmds, cmd+" "+p)
+			}
+		}
+		if len(cmds) > 0 {
+			return cmds
+		}
+	}
+
+	return []string{cmd + " " + target}
 }
 
 // verifyCommandTimeout bounds one run of a repo's configured verify_command
