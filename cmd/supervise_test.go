@@ -669,6 +669,29 @@ func TestResolveWorkerPlacementFallsBackToFlagDefault(t *testing.T) {
 	}
 }
 
+func TestResolveReviewEffortExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{ReviewEffort: "max"}
+	got := resolveReviewEffort(true, "low", &rc)
+	if got != "low" {
+		t.Errorf("resolveReviewEffort = %q, want the explicit flag value even with a repo config default", got)
+	}
+}
+
+func TestResolveReviewEffortPrefersRepoConfig(t *testing.T) {
+	rc := repoconfig.Config{ReviewEffort: "max"}
+	got := resolveReviewEffort(false, "", &rc)
+	if got != "max" {
+		t.Errorf("resolveReviewEffort = %q, want the repo config value when the flag was not passed", got)
+	}
+}
+
+func TestResolveReviewEffortFallsBackToFlagDefault(t *testing.T) {
+	got := resolveReviewEffort(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveReviewEffort = %q, want the flag's own default (empty, claude's default) when config sets nothing", got)
+	}
+}
+
 // TestRunSupervisionSpawnDryRunPlumbsRepoAllow checks that superviseOpts.repoAllow
 // (loaded from .argus/config.yml) reaches every worker's generated
 // settings.local.json, the same way --allow always has — the dry-run plan

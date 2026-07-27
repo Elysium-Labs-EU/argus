@@ -62,15 +62,18 @@ type reviewRunner func(ctx context.Context, workdir, stdin string, args ...strin
 // CLIReviewer asks a headless `claude -p` for a verdict. It is the default
 // Milestone-B reviewer: a one-shot, not a session.
 type CLIReviewer struct {
-	run   reviewRunner
-	log   *eventlog.Logger
-	model string
+	run    reviewRunner
+	log    *eventlog.Logger
+	model  string
+	effort string
 }
 
-// NewCLIReviewer returns a reviewer backed by the real claude CLI. model may be
-// empty to use claude's default.
-func NewCLIReviewer(model string) CLIReviewer {
-	return CLIReviewer{run: claudeRunner(), model: model}
+// NewCLIReviewer returns a reviewer backed by the real claude CLI. model and
+// effort may be empty to use claude's own defaults. effort maps to claude
+// -p's --effort flag (low, medium, high, xhigh, max) — the reasoning budget
+// dial that model choice alone doesn't cover.
+func NewCLIReviewer(model, effort string) CLIReviewer {
+	return CLIReviewer{run: claudeRunner(), model: model, effort: effort}
 }
 
 // NewReviewerWithRunner returns a CLIReviewer backed by a caller-supplied runner,
@@ -122,6 +125,9 @@ func (r CLIReviewer) Review(ctx context.Context, req *ReviewRequest) (ReviewResu
 	args := []string{"-p", "--output-format", "json", "--allowedTools", "Read,Grep,Glob"}
 	if r.model != "" {
 		args = append(args, "--model", r.model)
+	}
+	if r.effort != "" {
+		args = append(args, "--effort", r.effort)
 	}
 	out, err := r.run(ctx, req.Worktree, reviewPrompt(req), args...)
 	if err != nil {

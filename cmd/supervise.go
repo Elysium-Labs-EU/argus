@@ -33,6 +33,7 @@ func newSuperviseCmd() *cobra.Command {
 		proofRequiredPaths []string
 		alwaysReviewPaths  []string
 		reviewModel        string
+		reviewEffort       string
 		review             bool
 		maxDiffLines       int
 		verifyCmd          string
@@ -136,7 +137,7 @@ each pane's directory in --panes mode).`,
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
 				base: resolvedBase, launcher: launcher, workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
-				review: review, reviewModel: reviewModel, reviewConcurrency: reviewConcurrency,
+				review: review, reviewModel: reviewModel, reviewEffort: resolveReviewEffort(cmd.Flags().Changed("review-effort"), reviewEffort, &rc), reviewConcurrency: reviewConcurrency,
 				policy: policy, verifyCommand: verifyCommand,
 				allow: allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
 				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
@@ -163,6 +164,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&verifyCmd, "verify-cmd", "", "review gate: shell command re-run in a worker's worktree once it reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing — today's behavior. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
+	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for --review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
 	cmd.Flags().IntVar(&reviewConcurrency, "review-concurrency", 0, "max concurrent claude -p --review calls when the gate escalates several workers at once (0 = supervisor.defaultReviewConcurrency)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan and exit without creating worktrees or spawning workers")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front worker API traffic with the credential proxy; workers inherit the host's real ANTHROPIC_API_KEY")
@@ -183,6 +185,7 @@ each pane's directory in --panes mode).`,
 type superviseOpts struct {
 	credentialEnv     map[string]string
 	reviewModel       string
+	reviewEffort      string
 	base              string
 	launcher          string
 	workerRuntime     string
@@ -300,6 +303,21 @@ func resolveWorkerPlacement(explicit bool, flagValue string, rc *repoconfig.Conf
 	return flagValue
 }
 
+// resolveReviewEffort applies --review-effort > this repo's .argus/config.yml
+// review_effort > the flag's own default (""), the same explicit-flag-wins
+// precedence resolveWorkerPlacement uses. explicit is
+// cmd.Flags().Changed("review-effort"). rc is a pointer solely to avoid
+// copying the struct at the call site.
+func resolveReviewEffort(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.ReviewEffort != "" {
+		return rc.ReviewEffort
+	}
+	return flagValue
+}
+
 // runSupervision builds the *supervisor.Config for an already-resolved worker
 // set, then either hands off to supervisor.Attach (--attach: no isolation is
 // argus's to manage) or starts the credential proxy for a live spawn and hands
@@ -341,7 +359,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		VerifyCommand:     o.verifyCommand,
 	}
 	if o.review {
-		cfg.Reviewer = supervisor.NewCLIReviewer(o.reviewModel).WithLog(logger)
+		cfg.Reviewer = supervisor.NewCLIReviewer(o.reviewModel, o.reviewEffort).WithLog(logger)
 	}
 
 	// --attach only watches workers that are already running; it never calls

@@ -26,6 +26,7 @@ func newReworkCmd() *cobra.Command {
 		launcher           string
 		workerRuntime      string
 		reviewModel        string
+		reviewEffort       string
 		proofRequiredPaths []string
 		alwaysReviewPaths  []string
 		credentialEnv      map[string]string
@@ -57,10 +58,16 @@ outcome instead of retrying forever.`,
 			}
 			logger, closeLog := openRunLog(cmd, "rework")
 			defer closeLog()
-			return runRework(cmd, herdr.New(), newReviewer(reviewModel, logger), logger, &reworkOpts{
+			// reviewer is resolved lazily inside runRework, once this repo's
+			// .argus/config.yml is loaded: review_effort can come from that file,
+			// and the flag/config precedence can't be decided before it's read.
+			return runRework(cmd, herdr.New(), nil, logger, &reworkOpts{
 				worktree: worktree, base: base, task: task, findings: findings,
 				launcher: launcher, workerRuntime: workerRuntime, interval: interval,
 				maxRounds: maxRounds, dryRun: dryRun, noCredProxy: noCredProxy, credentialEnv: overrides,
+				reviewModel:          reviewModel,
+				reviewEffort:         reviewEffort,
+				reviewEffortExplicit: cmd.Flags().Changed("review-effort"),
 				gate: gateFlags{
 					maxDiffLines:          maxDiffLines,
 					proofRequiredPaths:    proofRequiredPaths,
@@ -84,6 +91,7 @@ outcome instead of retrying forever.`,
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "status poll cadence")
 	cmd.Flags().IntVar(&maxRounds, "max-rounds", supervisor.DefaultMaxReworkRounds, "give up and escalate after this many request-changes rounds")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
+	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for the review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
@@ -99,22 +107,25 @@ var reworkCmd = newReworkCmd()
 // reworkOpts carries newReworkCmd's flag values into runRework, mirroring
 // rebaseOpts's split of constructor-flag-registration from RunE logic.
 type reworkOpts struct {
-	credentialEnv     map[string]string
-	verifyCmd         string
-	workerRuntime     string
-	base              string
-	task              string
-	launcher          string
-	worktree          string
-	findings          []string
-	gate              gateFlags
-	livenessTimeout   time.Duration // internal knob, mirrors rebaseOpts; zero = package default
-	maxRounds         int
-	interval          time.Duration
-	livenessInterval  time.Duration
-	dryRun            bool
-	noCredProxy       bool
-	verifyCmdExplicit bool
+	credentialEnv        map[string]string
+	verifyCmd            string
+	workerRuntime        string
+	base                 string
+	task                 string
+	launcher             string
+	worktree             string
+	reviewModel          string
+	reviewEffort         string
+	findings             []string
+	gate                 gateFlags
+	livenessTimeout      time.Duration // internal knob, mirrors rebaseOpts; zero = package default
+	maxRounds            int
+	interval             time.Duration
+	livenessInterval     time.Duration
+	dryRun               bool
+	noCredProxy          bool
+	verifyCmdExplicit    bool
+	reviewEffortExplicit bool
 }
 
 // dispatchTarget builds dispatchIntoPane's input from a reworkOpts, mirroring
@@ -184,6 +195,9 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolving home dir: %w", err)
+	}
+	if reviewer == nil {
+		reviewer = newReviewer(opts.reviewModel, resolveReviewEffort(opts.reviewEffortExplicit, opts.reviewEffort, &rc), logger)
 	}
 	cfg := &supervisor.Config{
 		Now:           time.Now,
