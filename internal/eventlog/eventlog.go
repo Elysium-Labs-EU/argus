@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ type Event struct {
 	Fields  map[string]any `json:"fields,omitempty"`
 	Run     string         `json:"run"`
 	Command string         `json:"command"`
+	Actor   string         `json:"actor,omitempty"`
 	Action  string         `json:"action"`
 	Target  string         `json:"target,omitempty"`
 	Outcome string         `json:"outcome,omitempty"`
@@ -43,6 +45,7 @@ type Logger struct {
 	debug   io.Writer
 	run     string
 	command string
+	actor   string
 	mu      sync.Mutex
 }
 
@@ -64,11 +67,23 @@ func Open(home, command string, debug io.Writer) (logger *Logger, path string, c
 	}
 	name := fmt.Sprintf("%s-%s-%s.jsonl", time.Now().Format("20060102T150405"), command, run)
 	path = filepath.Join(dir, name)
-	f, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644) //nolint:gosec // argus-owned run log under the user's home
+	f, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // path built from home+".argus/runs", not attacker-controlled
 	if openErr != nil {
 		return nil, "", nil, fmt.Errorf("opening run log: %w", openErr)
 	}
-	return New(f, command, run, debug), path, f.Close, nil
+	l := New(f, command, run, debug)
+	l.actor = resolveActor()
+	return l, path, f.Close, nil
+}
+
+// resolveActor identifies who is running argus, for the audit trail. It tries the
+// OS user first since that works even without git configured; $USER covers the
+// rare environment where os/user can't resolve (e.g. no matching /etc/passwd entry).
+func resolveActor() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return os.Getenv("USER")
 }
 
 // Emit records one event. Time, Run, and Command are stamped here so callers only
@@ -82,6 +97,7 @@ func (l *Logger) Emit(e *Event) {
 	e.Time = l.now()
 	e.Run = l.run
 	e.Command = l.command
+	e.Actor = l.actor
 	b, err := json.Marshal(e)
 	if err != nil {
 		return

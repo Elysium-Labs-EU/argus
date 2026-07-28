@@ -165,7 +165,7 @@ func Load(path string) (Status, error) {
 // to avoid copying a heavy struct; Write does not mutate it.
 func Write(path string, s *Status) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // worktree-local status dir, standard perms
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating status dir: %w", err)
 	}
 
