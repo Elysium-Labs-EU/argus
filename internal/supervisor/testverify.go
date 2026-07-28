@@ -75,7 +75,7 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 // replayCommands recomposes the exact command line(s) to re-run for a
 // worker's self-reported Cmd/Target, in place of a naive Cmd+" "+Target join
 // that trusts the worker's paraphrase of what it actually typed. That join
-// breaks in three observed ways, each guarded here:
+// breaks in four observed ways, each guarded here:
 //
 //   - `make <target>`: make treats every token after the target name as an
 //     additional target to build, never as an argument to the recipe — a
@@ -89,6 +89,16 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 //     overflow a tool that only accepts a single positional argument.
 //     Replaying Cmd once per listed path reproduces what actually happened
 //     without needing to know any given tool's arity.
+//   - Target holding a human-readable description of what Cmd exercises
+//     (e.g. Cmd "task frontend:test", Target "frontend unit tests (vitest)")
+//     rather than an argument Cmd expects: the writer brief never tells a
+//     worker which shape Target is, so this is the normal case, not a
+//     misuse. Appending it produces neither valid shell nor a valid
+//     subcommand, and that failure was previously misread as a real
+//     mismatch. A label reads as prose — multiple words — where a
+//     positional argument reported this way is always one shell word, so
+//     Cmd is replayed bare rather than guessing where in the phrase a
+//     shell-safe split would even go.
 func replayCommands(cmd, target string) []string {
 	if fields := strings.Fields(cmd); len(fields) >= 2 && fields[0] == "make" {
 		return []string{"make " + fields[1]}
@@ -108,6 +118,10 @@ func replayCommands(cmd, target string) []string {
 		if len(cmds) > 0 {
 			return cmds
 		}
+	}
+
+	if len(strings.Fields(target)) > 1 {
+		return []string{cmd}
 	}
 
 	return []string{cmd + " " + target}
