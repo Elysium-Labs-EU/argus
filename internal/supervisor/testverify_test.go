@@ -125,6 +125,21 @@ func TestVerifyTestsSplitsCommaSeparatedTargetIntoOneRunEach(t *testing.T) {
 	}
 }
 
+// TestVerifyTestsSkipsLabelShapedTarget is the regression for the gate
+// misreading a human-readable Target as a positional argument: Cmd here
+// takes no arguments, so appending the multi-word label would inflate $# and
+// fail the re-run even though the worker's claimed pass was genuine.
+func TestVerifyTestsSkipsLabelShapedTarget(t *testing.T) {
+	wt := t.TempDir()
+	tests := []protocol.TestRun{
+		{Cmd: `f() { [ "$#" -eq 0 ]; }; f`, Target: "frontend unit tests (vitest)", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — a human-readable label must not be appended to Cmd", mismatches)
+	}
+}
+
 func TestVerifyTestsSkipsFailAndSkippedClaims(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
