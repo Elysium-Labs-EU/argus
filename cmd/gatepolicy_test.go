@@ -103,3 +103,26 @@ func TestResolveVerifyCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) 
 		t.Errorf("resolveVerifyCommand = %q, want empty (no verify command configured anywhere)", got)
 	}
 }
+
+func TestResolveWorktreeSetupCmdExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{WorktreeSetupCmd: "cp ../.env .env"}
+	got := resolveWorktreeSetupCmd(true, "cp ../.env.local .env.local", &rc)
+	if got != "cp ../.env.local .env.local" {
+		t.Errorf("resolveWorktreeSetupCmd = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveWorktreeSetupCmdPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{WorktreeSetupCmd: "cp ../.env .env"}
+	got := resolveWorktreeSetupCmd(false, "", &rc)
+	if got != "cp ../.env .env" {
+		t.Errorf("resolveWorktreeSetupCmd = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveWorktreeSetupCmdFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveWorktreeSetupCmd(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveWorktreeSetupCmd = %q, want empty (no worktree setup command configured anywhere)", got)
+	}
+}

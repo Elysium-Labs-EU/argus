@@ -61,3 +61,20 @@ func resolveVerifyCommand(explicit bool, flagValue string, rc *repoconfig.Config
 	}
 	return flagValue
 }
+
+// resolveWorktreeSetupCmd applies an explicit --worktree-setup-cmd flag over
+// this repo's .argus/config.yml worktree_setup_cmd over "" (no command
+// configured — a bare `git worktree add` with no bootstrap step, the prior
+// behavior), the same explicit-flag-wins precedence resolveVerifyCommand
+// applies for its own source. explicit is
+// cmd.Flags().Changed("worktree-setup-cmd"). rc is a pointer solely to avoid
+// copying the struct at the call site.
+func resolveWorktreeSetupCmd(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.WorktreeSetupCmd != "" {
+		return rc.WorktreeSetupCmd
+	}
+	return flagValue
+}

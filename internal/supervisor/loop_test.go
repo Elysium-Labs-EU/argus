@@ -497,6 +497,94 @@ func TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent(t *testing.T) {
 	}
 }
 
+// worktreeCreateFakeReply is the herdr `worktree create` JSON response used
+// across the worktree_setup_cmd tests below: unlike a real `git worktree
+// add`, the fake herdr runner never actually creates worktreePath on disk, so
+// each test creates it itself first — the same state a real worktree create
+// would have left behind by the time RunWorktreeSetupCmd runs.
+func worktreeCreateFakeReply(worktreePath string) string {
+	return `{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + worktreePath + `"}}}`
+}
+
+// TestPrepareWorktreeRunsConfiguredWorktreeSetupCmd proves a configured
+// worktree_setup_cmd actually runs, with the freshly created worktree as its
+// working directory — the mechanism issue #304 asks for: a repo whose task
+// depends on gitignored per-developer local config (env files, local
+// settings) needs a hook to bootstrap that config into every new worktree,
+// since a bare `git worktree add` never copies it.
+func TestPrepareWorktreeRunsConfiguredWorktreeSetupCmd(t *testing.T) {
+	repo := t.TempDir()
+	worktreePath := filepath.Join(repo, ".claude", "worktrees", "feat-x")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("simulating git worktree add's own directory: %v", err)
+	}
+
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(worktreeCreateFakeReply(worktreePath)), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	}
+	cfg := &Config{
+		Client:           herdr.NewWithRunner(runner),
+		Base:             "main",
+		WorktreeSetupCmd: "pwd > setup-ran.txt",
+	}
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "main", nil, nil)
+
+	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); err != nil {
+		t.Fatalf("prepareWorktree: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(worktreePath, "setup-ran.txt"))
+	if err != nil {
+		t.Fatalf("worktree_setup_cmd should have run with the worktree as cwd and written setup-ran.txt: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != worktreePath {
+		t.Errorf("worktree_setup_cmd ran with cwd %q, want %q", strings.TrimSpace(string(got)), worktreePath)
+	}
+}
+
+// TestExecuteAbortsSpawnWhenWorktreeSetupCmdFails is the regression test for
+// issue #304's other requirement: a non-zero exit from worktree_setup_cmd
+// must fail worktree creation the same way a `git worktree add` failure
+// already does, blocking the worker's agent from ever being spawned.
+func TestExecuteAbortsSpawnWhenWorktreeSetupCmdFails(t *testing.T) {
+	repo := t.TempDir()
+	worktreePath := filepath.Join(repo, ".claude", "worktrees", "feat-x")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("simulating git worktree add's own directory: %v", err)
+	}
+
+	var paneRunCalled bool
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(worktreeCreateFakeReply(worktreePath)), nil
+		}
+		if len(args) >= 2 && args[0] == "pane" && args[1] == "run" {
+			paneRunCalled = true
+		}
+		return []byte(`{"result":{}}`), nil
+	}
+	cfg := &Config{
+		Client:           herdr.NewWithRunner(runner),
+		Now:              time.Now,
+		Base:             "main",
+		Log:              eventlog.New(io.Discard, "supervise", "r", nil),
+		WorktreeSetupCmd: "echo boom >&2; exit 1",
+	}
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "main", nil, nil)
+
+	if _, err := execute(context.Background(), cfg, plans); err == nil {
+		t.Fatal("execute should fail worktree creation when worktree_setup_cmd exits non-zero, got nil error")
+	} else if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error should carry the failing command's captured output, got: %v", err)
+	}
+	if paneRunCalled {
+		t.Error("execute must not spawn the worker's agent once worktree_setup_cmd has failed")
+	}
+}
+
 func TestExecuteWrapsSpawnLineViaRuntimeAdapterWhenConfigured(t *testing.T) {
 	writeFakeAdapter(t, "fake", `echo "ISOLATED: $ARGUS_RUNTIME_CMD"`)
 

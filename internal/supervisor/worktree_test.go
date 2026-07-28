@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -76,6 +77,36 @@ func TestSettingsForAppendsRepoAndExtraAllow(t *testing.T) {
 		if !slices.Contains(s.Permissions.Allow, want) {
 			t.Errorf("allow missing %q; got %v", want, s.Permissions.Allow)
 		}
+	}
+}
+
+func TestRunWorktreeSetupCmdEmptyIsNoop(t *testing.T) {
+	if err := RunWorktreeSetupCmd(context.Background(), t.TempDir(), ""); err != nil {
+		t.Fatalf("empty worktree_setup_cmd should be a no-op, got %v", err)
+	}
+}
+
+func TestRunWorktreeSetupCmdRunsInWorktree(t *testing.T) {
+	wt := t.TempDir()
+	if err := RunWorktreeSetupCmd(context.Background(), wt, "pwd > marker.txt"); err != nil {
+		t.Fatalf("RunWorktreeSetupCmd: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(wt, "marker.txt"))
+	if err != nil {
+		t.Fatalf("reading marker.txt: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != wt {
+		t.Errorf("cmd ran with cwd %q, want %q", strings.TrimSpace(string(got)), wt)
+	}
+}
+
+func TestRunWorktreeSetupCmdFailureCarriesOutput(t *testing.T) {
+	err := RunWorktreeSetupCmd(context.Background(), t.TempDir(), "echo boom >&2; exit 1")
+	if err == nil {
+		t.Fatal("non-zero exit should return an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error should carry the command's captured output, got: %v", err)
 	}
 }
 

@@ -82,6 +82,7 @@ max_diff_lines: 0              # gate: diffs larger than this escalate (0 disabl
 proof_required_paths: []       # gate: paths needing real world proof before auto approval
 always_review_paths: []        # gate: behavior critical paths that always escalate
 verify_command: ""             # gate: shell command re-run in the worktree before approval (e.g. "make lint"); non-zero exit always escalates
+worktree_setup_cmd: ""         # bootstrap: shell command run once in a freshly created worktree, before the worker is spawned (e.g. copying in gitignored local config); non-zero exit fails worktree creation
 ```
 
 **Run**

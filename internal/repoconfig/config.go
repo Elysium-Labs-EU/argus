@@ -43,15 +43,23 @@ import (
 // verdict is recorded, so a failure is an unwaivable escalation the reviewer
 // sees; ShipLint (and EnforceHooks) runs controller-side at ship time, right
 // before commit, as the last backstop regardless of how the verdict was
-// reached.
+// reached. WorktreeSetupCmd is a third, earlier shell command: it runs once
+// in a freshly created worktree, right after `git worktree add` succeeds and
+// before the worker's agent is spawned (see supervisor.RunWorktreeSetupCmd),
+// so a repo whose task depends on gitignored per-developer local config
+// (env files, local settings) that only exists in the original checkout can
+// bootstrap it into every worktree instead of a worker hitting a silent,
+// confusing file-not-found failure. Empty means no command is configured —
+// the prior behavior, a bare `git worktree add` with no bootstrap step.
 type Config struct {
-	BaseBranch      string
-	WorkerPlacement string
-	BriefNote       string
-	ReviewNote      string
-	ShipLint        string
-	VerifyCommand   string
-	ReviewEffort    string
+	BaseBranch       string
+	WorkerPlacement  string
+	BriefNote        string
+	ReviewNote       string
+	ShipLint         string
+	VerifyCommand    string
+	WorktreeSetupCmd string
+	ReviewEffort     string
 	// Launcher is the command started in each spawned worker pane, mirroring
 	// supervise's own --launcher flag. Empty behaves like supervisor.
 	// DefaultLauncher was chosen: the same "not configured, skip" shape as

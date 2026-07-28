@@ -1,12 +1,55 @@
 package supervisor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
+
+// worktreeSetupCmdTimeout bounds one run of a repo's configured
+// worktree_setup_cmd (see repoconfig.Config.WorktreeSetupCmd), so a hung
+// bootstrap script fails worktree creation instead of blocking execute
+// forever.
+const worktreeSetupCmdTimeout = 5 * time.Minute
+
+// RunWorktreeSetupCmd runs a repo's own configured worktree_setup_cmd once,
+// synchronously, inside a freshly created worktree — the hook a repo whose
+// task depends on gitignored per-developer local config (env files, local
+// settings) needs to bootstrap that config into every new worktree, since
+// those files exist only in the original checkout and a bare `git worktree
+// add` never copies them. Called by prepareWorktree right after herdr's
+// WorktreeCreate succeeds and before the worker's agent is spawned.
+//
+// An empty cmdStr means no command is configured, so nothing runs. A
+// non-zero exit (or a run that exceeds worktreeSetupCmdTimeout) is returned
+// as an error carrying the command's combined output, the same way a `git
+// worktree add` failure already fails worktree creation — prepareWorktree's
+// caller treats this identically, aborting before the worker is spawned.
+func RunWorktreeSetupCmd(ctx context.Context, worktree, cmdStr string) error {
+	if cmdStr == "" {
+		return nil
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, worktreeSetupCmdTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, "sh", "-c", cmdStr) //nolint:gosec // repo-owner-configured bootstrap command, run in its own freshly created worktree
+	cmd.Dir = worktree
+	out, err := cmd.CombinedOutput()
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("worktree_setup_cmd %q exceeded %s and was killed", cmdStr, worktreeSetupCmdTimeout)
+	}
+	if err != nil {
+		return fmt.Errorf("worktree_setup_cmd %q failed: %w\n%s", cmdStr, err, tail(out))
+	}
+	return nil
+}
 
 // WriteSettings renders defaultAgent's permission file into worktree. It must
 // run before the worker's agent starts, since settings are read once at

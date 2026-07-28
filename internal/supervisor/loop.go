@@ -86,6 +86,13 @@ type Config struct {
 	// failure ship only discovers at `git commit` time. Empty means no
 	// command is configured — the gate's prior behavior, unchanged.
 	VerifyCommand string
+	// WorktreeSetupCmd is the repo's own .argus/config.yml worktree_setup_cmd
+	// (see internal/repoconfig), run once by prepareWorktree right after
+	// herdr's WorktreeCreate succeeds and before the worker's agent is
+	// spawned (see RunWorktreeSetupCmd). Empty means no command is
+	// configured — a bare `git worktree add` with no bootstrap step, the
+	// prior behavior.
+	WorktreeSetupCmd string
 	// ParentWorkspace, when set, is the herdr workspace id every spawned
 	// worker's worktree pane nests into as a tab instead of staying in its own
 	// new top-level workspace (see prepareWorktree's use of herdr.Client.PaneMove).
@@ -1017,6 +1024,15 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 			return herdr.Worktree{}, fmt.Errorf("nesting worktree pane for %s into workspace %s: %w", p.Task, cfg.ParentWorkspace, err)
 		}
 		wt.RootPaneID = moved.PaneID
+	}
+	// Runs immediately after `git worktree add` succeeds (whether or not
+	// nesting above ran) and before any of argus's own scaffolding below, so
+	// a repo's bootstrap step (e.g. copying in gitignored per-developer local
+	// config) sees the worktree exactly as `git worktree add` left it. A
+	// failure here fails worktree creation the same way a WorktreeCreate
+	// error already does — execute never reaches PaneRun for this worker.
+	if err := RunWorktreeSetupCmd(ctx, p.Worktree, cfg.WorktreeSetupCmd); err != nil {
+		return herdr.Worktree{}, fmt.Errorf("running worktree_setup_cmd for %s: %w", p.Task, err)
 	}
 	// A worktree directory can carry a leftover status.json/verdict.json from an
 	// unrelated prior task — e.g. directory reuse in worktree
