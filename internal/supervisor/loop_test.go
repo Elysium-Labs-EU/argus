@@ -530,7 +530,7 @@ func TestPrepareWorktreeRunsConfiguredWorktreeSetupCmd(t *testing.T) {
 		Base:             "main",
 		WorktreeSetupCmd: "pwd > setup-ran.txt",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "main", nil, nil)
 
 	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); err != nil {
 		t.Fatalf("prepareWorktree: %v", err)
@@ -573,7 +573,7 @@ func TestExecuteAbortsSpawnWhenWorktreeSetupCmdFails(t *testing.T) {
 		Log:              eventlog.New(io.Discard, "supervise", "r", nil),
 		WorktreeSetupCmd: "echo boom >&2; exit 1",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "main", nil, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err == nil {
 		t.Fatal("execute should fail worktree creation when worktree_setup_cmd exits non-zero, got nil error")
