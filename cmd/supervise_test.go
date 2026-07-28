@@ -339,6 +339,112 @@ func TestBuildWorkersRejectsUnsafeBranch(t *testing.T) {
 	}
 }
 
+// TestBuildWorkersTaskBranchCountMismatchErrors pins issue #327: a --tasks-file
+// multi-line brief (or a comma-split --tasks entry) can silently parse into
+// more tasks than --branches has entries for. That used to leave every extra
+// task falling through to defaultBranch's slug of the raw task text instead
+// of erroring, which for a whole brief can exceed git's ref length limit and
+// abort worktree creation. buildWorkers must now refuse the mismatch outright.
+func TestBuildWorkersTaskBranchCountMismatchErrors(t *testing.T) {
+	client := fakeClient()
+	_, err := buildWorkers(context.Background(), client, &workerInput{
+		repo:     "/repo",
+		tasks:    []string{"intro paragraph", "step 1", "step 2"},
+		branches: []string{"only-one-branch"},
+	})
+	if err == nil {
+		t.Fatal("want error for 3 tasks paired with 1 branch, got nil")
+	}
+	if !strings.Contains(err.Error(), "3 tasks but 1 branches") {
+		t.Errorf("error should name the mismatched counts, got: %v", err)
+	}
+}
+
+// TestBuildWorkersTaskBranchCountMatchesNoError is the control for the above:
+// an equal count is still accepted (this is exactly the shape --issues/--jira-issues
+// leave buildWorkers with after mergeFetchedBranches pads to the full task count).
+func TestBuildWorkersTaskBranchCountMatchesNoError(t *testing.T) {
+	client := fakeClient()
+	_, err := buildWorkers(context.Background(), client, &workerInput{
+		repo:     "/repo",
+		tasks:    []string{"task a", "task b"},
+		branches: []string{"branch-a", "branch-b"},
+	})
+	if err != nil {
+		t.Fatalf("buildWorkers with matching counts should succeed, got: %v", err)
+	}
+}
+
+// TestBuildWorkersNoBranchesStillDefaultsWithMismatchedTaskCount proves the
+// mismatch check only fires when --branches is actually given: omitting
+// --branches entirely still auto-names every worker off its task, unchanged.
+func TestBuildWorkersNoBranchesStillDefaultsWithMismatchedTaskCount(t *testing.T) {
+	client := fakeClient()
+	workers, err := buildWorkers(context.Background(), client, &workerInput{
+		repo:  "/repo",
+		tasks: []string{"task a", "task b", "task c"},
+	})
+	if err != nil {
+		t.Fatalf("buildWorkers with no --branches should default, got: %v", err)
+	}
+	if len(workers) != 3 {
+		t.Fatalf("want 3 workers, got %d", len(workers))
+	}
+}
+
+// TestSpawnWorkersTasksFileMultiLineBriefWithSingleBranchErrors is the
+// end-to-end regression for issue #327: passing a multi-line brief via
+// --tasks-file together with a single --branches entry (the natural way to
+// invoke supervise with one worker and a multi-paragraph brief) must produce
+// a clear count-mismatch error, not silently spawn extra workers with
+// unsafe auto-generated branch names.
+func TestSpawnWorkersTasksFileMultiLineBriefWithSingleBranchErrors(t *testing.T) {
+	client := fakeClient()
+	brief := "Fix the parser.\n1. Do the first thing.\n2. Do the second thing.\n"
+	path := filepath.Join(t.TempDir(), "tasks.txt")
+	if err := os.WriteFile(path, []byte(brief), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := spawnWorkers(context.Background(), client, &workerInput{
+		repo: "/pinned", tasksFile: path, branches: []string{"single-branch"},
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
+	if err == nil {
+		t.Fatal("want error: 3 tasks-file lines paired with 1 --branches entry")
+	}
+	if !strings.Contains(err.Error(), "3 tasks but 1 branches") {
+		t.Errorf("error should name the mismatched counts, got: %v", err)
+	}
+}
+
+// TestDefaultBranchTruncatesLongTask proves a very long task string (the
+// whole-brief-as-one-line shape --tasks-file lines and --tasks entries can
+// both produce) no longer slugs into a branch name long enough to blow past
+// filesystem/git ref length limits — the root cause of issue #327's "cannot
+// lock ref ... File name too long" worktree-creation failure.
+func TestDefaultBranchTruncatesLongTask(t *testing.T) {
+	longTask := strings.Repeat("a very long multi sentence brief describing the work in detail ", 20)
+	branch := defaultBranch("", longTask, 0)
+	if len(branch) > maxAutoBranchLen {
+		t.Errorf("branch name too long: %d bytes, want <= %d", len(branch), maxAutoBranchLen)
+	}
+	if !validBranch(branch) {
+		t.Errorf("truncated branch name %q should still be a valid branch name", branch)
+	}
+}
+
+// TestDefaultBranchTruncationStaysDistinct proves two different long task
+// strings that happen to share the same truncated prefix don't collide onto
+// the same auto-generated branch name.
+func TestDefaultBranchTruncationStaysDistinct(t *testing.T) {
+	prefix := strings.Repeat("shared prefix text that is long enough to force truncation ", 5)
+	a := defaultBranch("", prefix+"first ending", 0)
+	b := defaultBranch("", prefix+"second ending", 0)
+	if a == b {
+		t.Errorf("two distinct long tasks with a shared prefix should not collide onto the same branch name, got %q for both", a)
+	}
+}
+
 func TestRunSupervisionAttachWarnsAndSkipsCredProxy(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // openRunLog writes under ~/.argus
 	t.Setenv("ANTHROPIC_API_KEY", "sk-should-not-be-used")

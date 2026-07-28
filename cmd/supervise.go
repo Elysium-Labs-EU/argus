@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -159,7 +161,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&jiraTransitionOnSpawn, "jira-transition-on-spawn", "", "with --jira-issues: transition name or ID to move each issue to at spawn time (e.g. \"In Progress\"); unset skips this step")
 	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated); drives worker count in the default mode")
 	cmd.Flags().StringVar(&tasksFile, "tasks-file", "", "path to a file with one task per line, appended after --tasks; unlike --tasks this is not CSV-parsed, so commas and quotes in a free-text brief are safe")
-	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>)")
+	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>); if given at all, must have exactly one entry per task")
 	cmd.Flags().StringSliceVar(&labels, "labels", nil, "herdr workspace label per worker, paired positionally (default: derived from --tasks, falling back to the branch)")
 	cmd.Flags().StringSliceVar(&panes, "panes", nil, "reuse these existing herdr panes instead of the worktree's own pane")
 	cmd.Flags().StringVar(&repo, "repo", "", "repo root for all workers (default cwd; or each pane's directory in --panes mode)")
@@ -699,6 +701,20 @@ func buildWorkers(ctx context.Context, client herdr.Client, in *workerInput) ([]
 			Hint: "argus supervise --tasks x,y --branches feat-x,feat-y",
 		}
 	}
+	// --tasks is CSV-parsed and --tasks-file splits on newlines, so a stray
+	// comma in free-text prose or a multi-line brief silently produces more
+	// tasks than the operator intended. Left unchecked, every task past the
+	// last --branches entry falls through to defaultBranch's slug of the raw
+	// task text — which for a whole brief can blow past git's ref length
+	// limit and abort worktree creation with an opaque "File name too long".
+	// Requiring an exact pairing whenever --branches is given at all turns
+	// that into a clear, immediate error instead.
+	if len(in.branches) > 0 && len(in.tasks) > 0 && len(in.branches) != len(in.tasks) {
+		return nil, &ui.UserError{
+			Err:  fmt.Errorf("%d tasks but %d branches: --branches must have exactly one entry per task", len(in.tasks), len(in.branches)),
+			Hint: "pass one --branches entry per task (or per --tasks-file line), or omit --branches entirely to auto-name every branch from its task",
+		}
+	}
 
 	cwdByPane, err := paneCwds(ctx, client, in.panes)
 	if err != nil {
@@ -775,10 +791,30 @@ func defaultBranch(pane, task string, i int) string {
 	case pane != "":
 		return "argus-" + strings.ReplaceAll(pane, ":", "-")
 	case task != "":
-		return "argus-" + slug(task)
+		return safeBranchName("argus-" + slug(task))
 	default:
 		return fmt.Sprintf("argus-worker-%d", i+1)
 	}
+}
+
+// maxAutoBranchLen caps an auto-generated branch name well under filesystem
+// path-component limits (typically 255 bytes) and the total worktree path
+// (.claude/worktrees/<branch>) built from it — a multi-line --tasks-file
+// brief or a comma-split --tasks entry can otherwise slug into a name long
+// enough that `git worktree add` aborts with "cannot lock ref ... File name
+// too long".
+const maxAutoBranchLen = 100
+
+// safeBranchName truncates an over-long auto-generated branch name and
+// appends a short content hash so two different long task strings that
+// happen to share the same truncated prefix still land on distinct branches.
+func safeBranchName(name string) string {
+	if len(name) <= maxAutoBranchLen {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := "-" + hex.EncodeToString(sum[:])[:8]
+	return name[:maxAutoBranchLen-len(suffix)] + suffix
 }
 
 func defaultTask(pane string, i int) string {
