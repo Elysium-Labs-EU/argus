@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/Elysium-Labs-EU/argus/internal/svcstatus"
 )
 
 // gitlab implements Forge for GitLab.com's REST v4 API. GitLab differs from the
@@ -116,16 +118,22 @@ func (g *gitlab) do(ctx context.Context, method, reqURL string, payload []byte) 
 
 	resp, err := g.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, reqURL, err)
+		// A network-level failure is exactly when the host may be down; point at
+		// its status page so the operator isn't left guessing it's an argus bug.
+		return nil, fmt.Errorf("%s %s: %w%s", method, reqURL, err, svcstatus.Note(g.host))
 	}
 	if resp == nil {
-		return nil, fmt.Errorf("%s %s: nil response", method, reqURL)
+		return nil, fmt.Errorf("%s %s: nil response%s", method, reqURL, svcstatus.Note(g.host))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s returned %s: %s", g.host, resp.Status, apiMessage(body))
+		msg := apiMessage(body)
+		if svcstatus.WorthMentioning(resp.StatusCode) {
+			msg += svcstatus.Note(g.host)
+		}
+		return nil, fmt.Errorf("%s returned %s: %s", g.host, resp.Status, msg)
 	}
 	return body, nil
 }

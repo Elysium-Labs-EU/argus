@@ -18,6 +18,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/Elysium-Labs-EU/argus/internal/svcstatus"
 )
 
 // PRRequest is the pull request to open. Head and Base are branch names in the
@@ -233,16 +235,22 @@ func (r *rest) do(ctx context.Context, method, url string, payload []byte) ([]by
 
 	resp, err := r.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, url, err)
+		// A network-level failure is exactly when the host may be down; point at
+		// its status page so the operator isn't left guessing it's an argus bug.
+		return nil, fmt.Errorf("%s %s: %w%s", method, url, err, svcstatus.Note(r.host))
 	}
 	if resp == nil {
-		return nil, fmt.Errorf("%s %s: nil response", method, url)
+		return nil, fmt.Errorf("%s %s: nil response%s", method, url, svcstatus.Note(r.host))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s returned %s: %s", r.host, resp.Status, apiMessage(body))
+		msg := apiMessage(body)
+		if svcstatus.WorthMentioning(resp.StatusCode) {
+			msg += svcstatus.Note(r.host)
+		}
+		return nil, fmt.Errorf("%s returned %s: %s", r.host, resp.Status, msg)
 	}
 	return body, nil
 }
