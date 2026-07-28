@@ -25,18 +25,19 @@ import (
 
 func newShipCmd() *cobra.Command {
 	var (
-		worktree       string
-		base           string
-		title          string
-		repo           string
-		issue          int
-		force          bool
-		dryRun         bool
-		credentialEnv  map[string]string
-		jiraIssue      string
-		jiraTransition string
-		jiraAssignee   string
-		forgeKind      string
+		worktree            string
+		base                string
+		title               string
+		repo                string
+		issue               int
+		force               bool
+		dryRun              bool
+		credentialEnv       map[string]string
+		jiraIssue           string
+		jiraTransition      string
+		jiraAssignee        string
+		forgeKind           string
+		titlePrefixTemplate string
 	)
 
 	cmd := &cobra.Command{
@@ -61,6 +62,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 				issue: issue, force: force, dryRun: dryRun, credentialEnv: overrides,
 				jiraIssue: jiraIssue, jiraTransition: jiraTransition, jiraAssignee: jiraAssignee,
 				forgeKind: forgeKind, forgeKindExplicit: cmd.Flags().Changed("forge"),
+				titlePrefixTemplate: titlePrefixTemplate, titlePrefixTemplateExplicit: cmd.Flags().Changed("title-prefix-template"),
 			})
 		},
 	}
@@ -77,6 +79,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 	cmd.Flags().StringVar(&jiraTransition, "jira-transition", "", "with --jira-issue: transition name or ID to move the issue to (e.g. \"In Review\"); no transition is made if unset")
 	cmd.Flags().StringVar(&jiraAssignee, "jira-assignee", "", "with --jira-issue: Jira accountID to assign the issue to; not reassigned if unset")
 	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
+	cmd.Flags().StringVar(&titlePrefixTemplate, "title-prefix-template", "", "required PR/commit title prefix template, e.g. \"TICKET-{issue}: \" ({issue} becomes --jira-issue's key, else \"#<--issue>\", else empty); mechanically prepended to whatever title ship ends up using if missing. Without this flag, this repo's .argus/config.yml title_prefix_template key wins, then no enforcement")
 	return cmd
 }
 
@@ -94,9 +97,20 @@ type shipArgs struct {
 	jiraTransition string
 	jiraAssignee   string
 	forgeKind      string
-	issue          int
-	force          bool
-	dryRun         bool
+	// titlePrefixTemplate starts as the raw --title-prefix-template flag
+	// value and is overwritten in resolveShipContext with the fully
+	// resolved value (flag > repo config > "" no-enforcement), the same
+	// mutate-in-place pattern shipArgs.base uses for baseIsDefault. Callers
+	// building shipArgs directly for a test that wants to skip config
+	// resolution can just set this to the final value they want enforced.
+	titlePrefixTemplate string
+	issue               int
+	force               bool
+	dryRun              bool
+	// titlePrefixTemplateExplicit is true only when --title-prefix-template
+	// was actually passed, the same explicit-flag-wins signal
+	// forgeKindExplicit gives --forge.
+	titlePrefixTemplateExplicit bool
 	// forgeKindExplicit is true only when --forge was actually passed
 	// (cmd.Flags().Changed("forge")): an operator-given flag always wins over
 	// this repo's .argus/config.yml forge key, the same explicit-flag-wins
@@ -165,6 +179,7 @@ func resolveShipContext(ctx context.Context, a *shipArgs) (*shipContext, error) 
 	if verr := checkApproved(ctx, a.worktree, "origin/"+a.base, a.force); verr != nil {
 		return nil, verr
 	}
+	a.titlePrefixTemplate = resolveTitlePrefixTemplateValue(a.titlePrefixTemplateExplicit, a.titlePrefixTemplate, titlePrefixTemplateConfigDefault(ctx, a.worktree))
 	host, owner, name, err := resolveRepo(ctx, a.repo, a.worktree)
 	if err != nil {
 		return nil, err
@@ -454,6 +469,36 @@ func forgeConfigDefault(ctx context.Context, worktree string) string {
 	return rc.Forge
 }
 
+// titlePrefixTemplateConfigDefault reads worktree's repo .argus/config.yml
+// title_prefix_template key, best-effort like forgeConfigDefault: a worktree
+// outside any repo, or with no config file, simply has no default to offer.
+func titlePrefixTemplateConfigDefault(ctx context.Context, worktree string) string {
+	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
+	if err != nil {
+		return ""
+	}
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		return ""
+	}
+	return rc.TitlePrefixTemplate
+}
+
+// resolveTitlePrefixTemplateValue applies --title-prefix-template > this
+// repo's .argus/config.yml title_prefix_template key > the flag's own
+// default (""), the same explicit-flag-wins precedence
+// resolveForgeKindValue uses for --forge. explicit is true only when
+// --title-prefix-template was actually passed on the command line.
+func resolveTitlePrefixTemplateValue(explicit bool, flagValue, configValue string) string {
+	if explicit {
+		return flagValue
+	}
+	if configValue != "" {
+		return configValue
+	}
+	return flagValue
+}
+
 // resolveForgeKindValue applies --forge > this repo's .argus/config.yml
 // forge key > the flag's own default (""), the same explicit-flag-wins
 // precedence resolveWorkerPlacement/resolveReviewEffort (cmd/supervise.go)
@@ -511,16 +556,19 @@ var isStdinInteractive = func() bool {
 
 // resolvePRTitle picks the PR/commit title ship uses to open the PR and to
 // title the commit it makes, in priority order: an explicit --title (exempt
-// from the length rule below — the human asked for exactly this), the
-// worker's own status.Title (internal/protocol.Status, written via `argus
+// from the length rule below — the human asked for exactly this, though not
+// from enforceTitlePrefix below — a repo's title convention applies to a
+// human-typed --title exactly as much as to a worker's self-reported one),
+// the worker's own status.Title (internal/protocol.Status, written via `argus
 // worker report`, informed by the worker's actual diff rather than the issue
 // title verbatim), the linked issue's fetched title (f is nil during
 // --dry-run, which has no forge client yet — the fetch is then simply
 // skipped), and finally the old branch/issue default as a last resort.
-// Whichever of the last three wins is then subject to the 72-char rule.
+// Whichever title wins is then run through enforceTitlePrefix; only the last
+// three are additionally subject to the 72-char rule.
 func resolvePRTitle(ctx context.Context, f forge.Forge, in *bufio.Reader, out io.Writer, a *shipArgs, owner, name, branch string) (string, error) {
 	if a.title != "" {
-		return a.title, nil
+		return enforceTitlePrefix(a, a.title), nil
 	}
 	status, _ := protocol.Load(protocol.StatusPath(a.worktree))
 	title := status.Title
@@ -532,7 +580,45 @@ func resolvePRTitle(ctx context.Context, f forge.Forge, in *bufio.Reader, out io
 	if title == "" {
 		title = defaultPRTitle(a.issue, branch)
 	}
-	return enforceTitleLength(title, in, out)
+	return enforceTitleLength(enforceTitlePrefix(a, title), in, out)
+}
+
+// titlePrefixIssuePlaceholder is the literal template substring
+// enforceTitlePrefix replaces with the resolved issue reference.
+const titlePrefixIssuePlaceholder = "{issue}"
+
+// enforceTitlePrefix mechanically applies this repo's configured
+// title_prefix_template (or --title-prefix-template override, already
+// resolved onto a.titlePrefixTemplate by resolveShipContext) to title,
+// regardless of where title came from — see resolvePRTitle. An empty
+// template means no enforcement, ship's pre-#303 behavior. Otherwise
+// {issue} is substituted with titlePrefixIssueRef, and the rendered prefix
+// is prepended unless title already starts with it — so a worker who
+// already wrote (or copied) the right prefix is left untouched, and one who
+// didn't gets corrected before the PR opens.
+func enforceTitlePrefix(a *shipArgs, title string) string {
+	if a.titlePrefixTemplate == "" {
+		return title
+	}
+	prefix := strings.ReplaceAll(a.titlePrefixTemplate, titlePrefixIssuePlaceholder, titlePrefixIssueRef(a))
+	if strings.HasPrefix(title, prefix) {
+		return title
+	}
+	return prefix + title
+}
+
+// titlePrefixIssueRef resolves the {issue} placeholder: --jira-issue's key
+// (e.g. "PROJ-123") if set, else "#<--issue>" if --issue is set, else empty
+// — the same issue-identifier precedence ship's PR body and Jira post-ship
+// hook already give jiraIssue over the plain --issue number.
+func titlePrefixIssueRef(a *shipArgs) string {
+	if a.jiraIssue != "" {
+		return a.jiraIssue
+	}
+	if a.issue > 0 {
+		return fmt.Sprintf("#%d", a.issue)
+	}
+	return ""
 }
 
 func defaultPRTitle(issue int, branch string) string {

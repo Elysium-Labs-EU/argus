@@ -48,6 +48,11 @@
       "description": "Shell command the gate runs in a worker's worktree before a verdict is recorded. Empty/unset skips this check.",
       "examples": ["make test", "npm test"]
     },
+    "title_prefix_template": {
+      "type": "string",
+      "description": "Required PR/commit title prefix, mechanically enforced by ship on whatever title it ends up using (worker-reported, forge-fetched, branch-derived, or --title), regardless of the worker's self-reported title. \"{issue}\" is replaced with --jira-issue's key if set, else \"#<--issue>\" if set, else empty. A title that already starts with the rendered prefix is left alone; otherwise the prefix is prepended. Empty/unset applies no enforcement.",
+      "examples": ["TICKET-{issue}: ", "[{issue}] "]
+    },
     "review_effort": {
       "type": "string",
       "description": "Reasoning effort for --review. Without this, the review command's own default wins.",
