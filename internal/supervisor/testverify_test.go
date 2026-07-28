@@ -185,6 +185,47 @@ func TestVerifyTestsReportsTimeout(t *testing.T) {
 	}
 }
 
+// writeGoTestFixture drops a minimal go module with two always-passing test
+// functions into a fresh temp dir, for regression tests that need a real
+// `go test` invocation rather than a shell one-liner.
+func writeGoTestFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module fixture\n\ngo 1.21\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testFile := `package fixture
+
+import "testing"
+
+func TestFoo(t *testing.T) {}
+
+func TestBar(t *testing.T) {}
+`
+	if err := os.WriteFile(filepath.Join(dir, "fixture_test.go"), []byte(testFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestVerifyTestsReplaysUnquotedRunAlternationArgvStyle is the regression
+// for the replay path misreading an unquoted `go test -run` regex
+// alternation (e.g. TestFoo|TestBar) as a shell pipeline: sh -c has no way
+// to tell that pipe apart from a real one, so it split the command into
+// `go test -run TestFoo` piped into a nonexistent `TestBar ./...` and failed
+// with exit 127, even though both tests genuinely pass. Argv-style replay
+// hands the whole -run value to `go test` untouched.
+func TestVerifyTestsReplaysUnquotedRunAlternationArgvStyle(t *testing.T) {
+	dir := writeGoTestFixture(t)
+	tests := []protocol.TestRun{
+		{Cmd: "go test -run TestFoo|TestBar ./...", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), dir, tests, 30*time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — an unquoted -run alternation must replay as one go test invocation, not a shell pipeline", mismatches)
+	}
+}
+
 func TestGateEscalatesWhenClaimedTestPassDoesNotReproduce(t *testing.T) {
 	st := &workerState{
 		hasFile:        true,
@@ -340,6 +381,19 @@ func TestRunVerifyCommandRetriesOnceBeforeFlagging(t *testing.T) {
 	cmd := "test -f " + marker + " && exit 0 || { touch " + marker + "; exit 1; }"
 	if m := RunVerifyCommand(context.Background(), wt, cmd); m != "" {
 		t.Fatalf("mismatch = %q, want none — a fail-then-pass pair is a flake, not a real mismatch", m)
+	}
+}
+
+// TestRunVerifyCommandReplaysUnquotedRunAlternationArgvStyle is the
+// verify_command counterpart of
+// TestVerifyTestsReplaysUnquotedRunAlternationArgvStyle: the same unquoted
+// `-run` alternation reported as a repo's verify_command previously produced
+// an unwaivable exit-127 hard-gate failure (see gateVerdict/verifyMismatch),
+// even though the underlying tests genuinely pass.
+func TestRunVerifyCommandReplaysUnquotedRunAlternationArgvStyle(t *testing.T) {
+	dir := writeGoTestFixture(t)
+	if m := RunVerifyCommand(context.Background(), dir, "go test -run TestFoo|TestBar ./..."); m != "" {
+		t.Fatalf("mismatch = %q, want none — an unquoted -run alternation must replay as one go test invocation, not a shell pipeline", m)
 	}
 }
 

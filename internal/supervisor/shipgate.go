@@ -83,7 +83,7 @@ func RunShipLint(ctx context.Context, worktree, command string) error {
 	if strings.TrimSpace(command) == "" {
 		return nil
 	}
-	if err := runGateCommand(ctx, worktree, "sh", "-c", command); err != nil {
+	if err := runGateCommandLine(ctx, worktree, command); err != nil {
 		return fmt.Errorf("ship_lint %q failed: %w", command, err)
 	}
 	return nil
@@ -98,6 +98,27 @@ func runGateCommand(ctx context.Context, worktree, name string, args ...string) 
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, name, args...) //nolint:gosec // name/args are argus-selected (hookManagers) or an operator's own repo-config command, not attacker input
+	cmd.Dir = worktree
+	out, err := runCombinedOutput(cmd)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("exceeded %s and was killed", shipGateTimeout)
+	}
+	return fmt.Errorf("%w\n%s", err, tail(out))
+}
+
+// runGateCommandLine is runGateCommand's counterpart for a repo-owner-chosen
+// command line (ship_lint) rather than an argus-selected binary+args pair:
+// it replays cmdStr via execArgvOrShell instead of a fixed sh -c, for the
+// same reason VerifyTests' re-run does (see execArgvOrShell) — an unquoted
+// metacharacter in the command must not be reinterpreted as shell syntax.
+func runGateCommandLine(ctx context.Context, worktree, cmdStr string) error {
+	runCtx, cancel := context.WithTimeout(ctx, shipGateTimeout)
+	defer cancel()
+
+	cmd := execArgvOrShell(runCtx, cmdStr)
 	cmd.Dir = worktree
 	out, err := runCombinedOutput(cmd)
 	if err == nil {
