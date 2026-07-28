@@ -40,8 +40,8 @@ var httpClient = &http.Client{
 // checked into this repo. Keep this in sync with the identical PEM block in
 // scripts/install.sh; `make check-pubkey-sync` fails CI if they diverge.
 const releaseSigningPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEKixhYiZA8bWtyh5sBs0hLdOhVXj3
-zHHnA3f89l/hPJOQljhWQPOWUcVWnxpVkiIfMPfvxuH4CxnRfFL2azqr8A==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzH6mhj2TebCaVFtf1zMAeCpQ9yg1
+/VTcggLqSs5h5zkIkBbyl6RrXqSjHrHA1MUvqQWj6GDuzIIshcBtSzQH1g==
 -----END PUBLIC KEY-----
 `
 
