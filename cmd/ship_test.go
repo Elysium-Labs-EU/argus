@@ -86,6 +86,58 @@ func TestResolvePRTitleFallsBackToFetchedIssueTitle(t *testing.T) {
 	}
 }
 
+// TestResolvePRTitleEnforcesConfiguredPrefix pins issue #303: a worker's
+// self-reported status.Title that violates the configured
+// title_prefix_template gets corrected — the required prefix mechanically
+// prepended — before ship ever opens a PR with it.
+func TestResolvePRTitleEnforcesConfiguredPrefix(t *testing.T) {
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: "add retry backoff"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader("")), &bytes.Buffer{},
+		&shipArgs{worktree: wt, issue: 42, titlePrefixTemplate: "TICKET-{issue}: "}, "o", "r", "branch")
+	if err != nil {
+		t.Fatalf("resolvePRTitle: %v", err)
+	}
+	if want := "TICKET-#42: add retry backoff"; got != want {
+		t.Errorf("want the worker title corrected with the configured prefix, got %q, want %q", got, want)
+	}
+}
+
+// TestResolvePRTitleAlreadyCorrectPrefixLeftUntouched is the other half of
+// #303: a worker who already wrote the right prefix isn't double-prefixed.
+func TestResolvePRTitleAlreadyCorrectPrefixLeftUntouched(t *testing.T) {
+	wt := t.TempDir()
+	want := "TICKET-#42: add retry backoff"
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: want}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader("")), &bytes.Buffer{},
+		&shipArgs{worktree: wt, issue: 42, titlePrefixTemplate: "TICKET-{issue}: "}, "o", "r", "branch")
+	if err != nil {
+		t.Fatalf("resolvePRTitle: %v", err)
+	}
+	if got != want {
+		t.Errorf("an already-correct prefix should not be duplicated, got %q, want %q", got, want)
+	}
+}
+
+// TestResolvePRTitleEnforcesPrefixEvenOnExplicitTitleOverride pins the other
+// requirement from #303: the configured template applies to an explicit
+// --title override exactly as much as to a worker-reported one (unlike the
+// 72-char rule, which --title is exempt from).
+func TestResolvePRTitleEnforcesPrefixEvenOnExplicitTitleOverride(t *testing.T) {
+	got, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader("")), &bytes.Buffer{},
+		&shipArgs{worktree: t.TempDir(), title: "add retry backoff", issue: 42, titlePrefixTemplate: "TICKET-{issue}: "}, "o", "r", "branch")
+	if err != nil {
+		t.Fatalf("resolvePRTitle: %v", err)
+	}
+	if want := "TICKET-#42: add retry backoff"; got != want {
+		t.Errorf("want --title also corrected with the configured prefix, got %q, want %q", got, want)
+	}
+}
+
 func TestResolvePRTitleFallsBackToDefaultWhenNothingElseAvailable(t *testing.T) {
 	wt := t.TempDir()
 	got, err := resolvePRTitle(context.Background(), nil, bufio.NewReader(strings.NewReader("")), &bytes.Buffer{},
@@ -515,6 +567,69 @@ func TestRunShipExplicitForgeFlagOverridesRepoConfig(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("want an error: explicit --forge bogus should override the repo config's forge:gitea and fail to parse")
+	}
+}
+
+// TestRunShipDryRunCorrectsWorkerTitleAgainstRepoConfigTemplate is the
+// end-to-end regression pin for issue #303: a repo's .argus/config.yml
+// title_prefix_template is applied mechanically to a worker-reported title
+// that violates it, and the corrected title is what the ship plan (and,
+// outside --dry-run, the actual PR) uses — not the worker's raw report.
+func TestRunShipDryRunCorrectsWorkerTitleAgainstRepoConfigTemplate(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{TitlePrefixTemplate: "TICKET-{issue}: "}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: "add retry backoff"}); err != nil {
+		t.Fatalf("seeding worker status: %v", err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{worktree: wt, base: "main", issue: 42, force: true, dryRun: true})
+	if err != nil {
+		t.Fatalf("dry-run ship should not error: %v", err)
+	}
+	if out := buf.String(); !strings.Contains(out, "TICKET-#42: add retry backoff") {
+		t.Errorf("dry-run plan should show the worker's title corrected against the repo's configured prefix, got: %q", out)
+	}
+}
+
+// TestRunShipExplicitTitlePrefixFlagOverridesRepoConfig pins the
+// explicit-flag-wins half: --title-prefix-template always wins over the
+// repo's configured default, the same precedence --forge already has.
+func TestRunShipExplicitTitlePrefixFlagOverridesRepoConfig(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{TitlePrefixTemplate: "TICKET-{issue}: "}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: "add retry backoff"}); err != nil {
+		t.Fatalf("seeding worker status: %v", err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{
+		worktree: wt, base: "main", issue: 42, force: true, dryRun: true,
+		titlePrefixTemplate: "OPS-{issue}: ", titlePrefixTemplateExplicit: true,
+	})
+	if err != nil {
+		t.Fatalf("dry-run ship should not error: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "OPS-#42: add retry backoff") {
+		t.Errorf("dry-run plan should use the explicit --title-prefix-template flag, got: %q", out)
+	}
+	if strings.Contains(out, "TICKET-") {
+		t.Errorf("explicit flag should override the repo config's template entirely, got: %q", out)
 	}
 }
 

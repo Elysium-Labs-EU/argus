@@ -67,11 +67,24 @@ type Config struct {
 	// (e.g. "..") is joined under the repo root — the escape hatch for a repo
 	// whose own convention is a sibling directory next to the checkout rather
 	// than a nested one; an absolute value is used as-is.
-	WorktreeDir        string
-	MaxDiffLines       *int
-	Allow              []string
-	ProofRequiredPaths []string
-	AlwaysReviewPaths  []string
+	WorktreeDir string
+	// TitlePrefixTemplate, when set, is a required prefix ship mechanically
+	// enforces on the PR/commit title it ends up using — worker-reported
+	// (protocol.Status.Title), forge-fetched, branch-derived, or an explicit
+	// --title override — before opening the PR. A repo's own title
+	// convention (e.g. a ticket-key prefix) previously lived only in
+	// brief_note prose a worker could get wrong like any other instruction;
+	// this key gives the same convention a mechanical, unbypassable check.
+	// The literal substring "{issue}" is replaced with --jira-issue's key if
+	// set, else "#<--issue>" if --issue is set, else the empty string. A
+	// title that already starts with the rendered prefix is left alone;
+	// otherwise the prefix is prepended. Empty means no enforcement, the
+	// same "not configured" default every other key here has.
+	TitlePrefixTemplate string
+	MaxDiffLines        *int
+	Allow               []string
+	ProofRequiredPaths  []string
+	AlwaysReviewPaths   []string
 }
 
 // pathEnvVar overrides the default <repo>/.argus/config.yml location for
