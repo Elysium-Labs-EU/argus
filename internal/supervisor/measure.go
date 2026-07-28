@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -116,8 +117,15 @@ func dropControlPlaneNumstat(out string) string {
 }
 
 // countLines returns the number of lines in a file, best-effort (0 if unreadable
-// or binary-ish). It is only a magnitude for the gate, not an exact stat.
+// or binary). It is only a magnitude for the gate, not an exact stat. Binary
+// files report 0 lines, matching how parseNumstat treats tracked binary files
+// (git diff --numstat reports "-" for them, contributing no line counts) —
+// without this, a raw newline scan over a PDF/PNG/font's bytes can produce
+// hundreds of spurious "lines" and trip the gate's unwaivable under-report check.
 func countLines(path string) int {
+	if isBinaryFile(path) {
+		return 0
+	}
 	f, err := os.Open(path) //nolint:gosec // argus-derived worktree path
 	if err != nil {
 		return 0
@@ -131,6 +139,30 @@ func countLines(path string) int {
 	}
 	_ = sc.Err() // best-effort magnitude for the gate; a scan error still keeps the count seen so far
 	return n
+}
+
+// binarySniffLen is how many leading bytes isBinaryFile inspects for a NUL
+// byte, matching git's own is_binary heuristic (git caps its scan at the
+// first 8000 bytes regardless of core.bigFileThreshold).
+const binarySniffLen = 8000
+
+// isBinaryFile reports whether path looks binary using the same heuristic
+// git uses to decide when to print "Binary files differ" / report "-" in
+// --numstat: a NUL byte anywhere in the first binarySniffLen bytes. It
+// fails open (false) on read errors so a missing/unreadable file falls
+// through to countLines' own best-effort handling.
+func isBinaryFile(path string) bool {
+	f, err := os.Open(path) //nolint:gosec // argus-derived worktree path
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	buf := make([]byte, binarySniffLen)
+	n, err := f.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false
+	}
+	return bytes.IndexByte(buf[:n], 0) >= 0
 }
 
 // parseNumstat turns `git diff --numstat` output into a DiffStat and the list of

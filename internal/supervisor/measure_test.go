@@ -82,6 +82,51 @@ func TestMeasureDiffCountsUntrackedFiles(t *testing.T) {
 	}
 }
 
+// TestMeasureDiffExcludesUntrackedBinaryFile guards against MeasureDiff
+// treating a new binary fixture (PDF, PNG, font, ...) as hundreds of spurious
+// inserted "lines": countLines does a raw newline scan with no binary
+// detection, unlike parseNumstat's handling of tracked binary files (git
+// reports "-" for them). An inflated count here can trip the gate's
+// unwaivable under-report hard check even when the worker's own diff_stat
+// was accurate.
+func TestMeasureDiffExcludesUntrackedBinaryFile(t *testing.T) {
+	wt := gitWorktreeWithDiff(t) // has a tracked edit (+2) vs HEAD
+	binPath := filepath.Join(wt, "fixture.bin")
+	data := make([]byte, 8192)
+	for i := range data {
+		// A NUL byte plus a very dense run of '\n' bytes: if countLines ever
+		// regressed to a raw newline scan, this alone would report thousands
+		// of "lines" for a single fixture.
+		if i%2 == 0 {
+			data[i] = '\n'
+		} else {
+			data[i] = 0
+		}
+	}
+	if err := os.WriteFile(binPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	found := false
+	for _, f := range files {
+		if strings.HasSuffix(f, "fixture.bin") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("untracked binary file must still be counted as a touched file: %v", files)
+	}
+	// The tracked edit to f.go contributes 2 insertions; the binary file must
+	// contribute none of the ~4096 newline bytes it contains.
+	if ds.Insertions > 10 {
+		t.Errorf("untracked binary file inflated insertions: got %d, want <=10 (just f.go's real edit)", ds.Insertions)
+	}
+}
+
 // status.json changes on every normal work session, and a repo that never
 // gitignored .claude can carry a tracked copy of it forward from an earlier
 // branch — either way it must not inflate the measured diff, since ship
