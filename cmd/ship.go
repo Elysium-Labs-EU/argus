@@ -19,6 +19,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
+	"github.com/Elysium-Labs-EU/argus/internal/svcstatus"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
@@ -257,7 +258,10 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	}
 	if perr := supervisor.Push(ctx, a.worktree, target.branch); perr != nil {
 		logger.Fail("push", target.branch, perr)
-		return perr
+		// A push can just as easily fail for local reasons (a rejected pre-push
+		// hook, a non-fast-forward) as for the host being down, so this is only a
+		// hint, not a claim.
+		return fmt.Errorf("%w%s", perr, svcstatus.Note(target.host))
 	}
 
 	prBody := buildPRBody(ctx, f, a.worktree, a.base, a.issue, target.owner, target.name)
