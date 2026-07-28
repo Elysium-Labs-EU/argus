@@ -545,7 +545,7 @@ func TestRemoteBranchSHAMissingBranchReturnsEmpty(t *testing.T) {
 
 func TestRebaseBriefCarriesRebaseSteps(t *testing.T) {
 	b := RebaseBrief("feat-x", "main")
-	for _, want := range []string{"feat-x", "git rebase origin/main", "--force-with-lease", protocol.WriterBrief} {
+	for _, want := range []string{"feat-x", "git rebase origin/main", "--force-with-lease", protocol.WriterBrief("origin/main")} {
 		if !strings.Contains(b, want) {
 			t.Errorf("rebase brief missing %q", want)
 		}

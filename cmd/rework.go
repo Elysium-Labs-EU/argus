@@ -432,7 +432,7 @@ func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Lo
 	if ierr := supervisor.InvalidateStatus(opts.worktree); ierr != nil {
 		return protocol.Status{}, "", dispatchedAt, fmt.Errorf("invalidating stale status before rework dispatch: %w", ierr)
 	}
-	brief := supervisor.ReworkBrief(task, branch, findings, round, opts.maxRounds)
+	brief := supervisor.ReworkBrief(task, branch, opts.base, findings, round, opts.maxRounds)
 	if werr := supervisor.WriteBrief(opts.worktree, brief); werr != nil {
 		return protocol.Status{}, "", dispatchedAt, werr
 	}

@@ -12,7 +12,7 @@ import (
 )
 
 func TestReworkBriefIncludesFindingsRoundAndTask(t *testing.T) {
-	brief := ReworkBrief("fix the widget", "feat-x", []string{"nil check missing in foo.go", "no test for bar"}, 2, 3)
+	brief := ReworkBrief("fix the widget", "feat-x", "origin/main", []string{"nil check missing in foo.go", "no test for bar"}, 2, 3)
 
 	for _, want := range []string{
 		"branch feat-x",
@@ -21,7 +21,7 @@ func TestReworkBriefIncludesFindingsRoundAndTask(t *testing.T) {
 		"nil check missing in foo.go",
 		"no test for bar",
 		"awaiting_review",
-		protocol.WriterBrief,
+		protocol.WriterBrief("origin/main"),
 	} {
 		if !strings.Contains(brief, want) {
 			t.Errorf("ReworkBrief missing %q in:\n%s", want, brief)
@@ -34,7 +34,7 @@ func TestReworkBriefIncludesFindingsRoundAndTask(t *testing.T) {
 // describe only that round's fix, since runWorkerReport can only carry a
 // prior title forward when the round's own report doesn't set a new one.
 func TestReworkBriefWarnsAgainstNarrowRetitle(t *testing.T) {
-	brief := ReworkBrief("fix the widget", "feat-x", []string{"finding"}, 1, 3)
+	brief := ReworkBrief("fix the widget", "feat-x", "origin/main", []string{"finding"}, 1, 3)
 	for _, want := range []string{"title", "empty", "deliberately"} {
 		if !strings.Contains(brief, want) {
 			t.Errorf("ReworkBrief missing %q (title-continuity guidance) in:\n%s", want, brief)
@@ -43,7 +43,7 @@ func TestReworkBriefWarnsAgainstNarrowRetitle(t *testing.T) {
 }
 
 func TestReworkBriefOmitsOriginalTaskSectionWhenEmpty(t *testing.T) {
-	brief := ReworkBrief("", "feat-x", []string{"finding"}, 1, 3)
+	brief := ReworkBrief("", "feat-x", "origin/main", []string{"finding"}, 1, 3)
 	if strings.Contains(brief, "Original task:") {
 		t.Errorf("expected no 'Original task:' section for an empty task, got:\n%s", brief)
 	}
