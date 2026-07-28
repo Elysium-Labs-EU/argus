@@ -53,10 +53,14 @@ func DefaultReviewPolicy() ReviewPolicy {
 // diff-vs-git checks in gateVerdict below, where status.json's own claim
 // diverged from what argus measured. A non-empty HardReasons means the final
 // approval must stay false even if --review comes back "approve" — see
-// reviewEscalations in loop.go.
+// reviewEscalations in loop.go. Notes carries informational call-outs that
+// never affect AutoApprove — e.g. a tests[] entry marked as an intentional,
+// expected failure — so a reviewer still sees it happened without it reading
+// as a regression to chase down.
 type Verdict struct {
 	Reasons     []string
 	HardReasons []string
+	Notes       []string
 	AutoApprove bool
 }
 
@@ -71,7 +75,7 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 		p = *policy
 	}
 
-	var reasons []string
+	var reasons, notes []string
 
 	switch s.Phase {
 	case protocol.PhaseAwaitingReview, protocol.PhaseDone:
@@ -84,10 +88,25 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 		reasons = append(reasons, "unknown phase "+string(s.Phase))
 	}
 
+	var hasExpectedFailure, hasCleanPass bool
 	for i := range s.Tests {
-		if s.Tests[i].Result == protocol.ResultFail {
-			reasons = append(reasons, "test failed: "+s.Tests[i].Cmd)
+		t := s.Tests[i]
+		switch {
+		case t.Result == protocol.ResultPass:
+			hasCleanPass = true
+		case t.Result == protocol.ResultFail && t.ExpectedResult == protocol.ResultFail:
+			hasExpectedFailure = true
+			notes = append(notes, "intentional failure (verification proof), not escalated: "+t.Cmd)
+		case t.Result == protocol.ResultFail:
+			reasons = append(reasons, "test failed: "+t.Cmd)
 		}
+	}
+	// An intentional break-then-revert proof is only proof if the revert is
+	// also shown: without this, marking every failing run "expected" would
+	// let a worker skip ever demonstrating the clean state it claims to have
+	// restored, and the gate would have nothing left to catch that.
+	if hasExpectedFailure && !hasCleanPass {
+		reasons = append(reasons, "intentional failure(s) reported with no clean-state passing test to confirm the revert")
 	}
 
 	if lines := s.DiffStat.Insertions + s.DiffStat.Deletions; p.MaxDiffLines > 0 && lines > p.MaxDiffLines {
@@ -106,7 +125,7 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 		}
 	}
 
-	return Verdict{AutoApprove: len(reasons) == 0, Reasons: reasons}
+	return Verdict{AutoApprove: len(reasons) == 0, Reasons: reasons, Notes: notes}
 }
 
 // diffMismatchTolerance is how many more lines the real diff may exceed the

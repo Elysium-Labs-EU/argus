@@ -48,6 +48,14 @@ piping the rest of the status as a JSON body on stdin, in exactly this shape:
     }
     JSON
 
+If a task asks you to prove a check catches a regression (deliberately break
+something, confirm it fails, then revert), report that broken run as its own
+` + "`tests[]`" + ` entry with ` + `"result": "fail", "expected_result": "fail"` + `
+— the gate reports this informationally instead of escalating it as a real
+regression. This only works alongside a normal passing entry for the
+reverted, clean state; an intentional failure with no passing entry to show
+the revert still escalates, since nothing then proves the break was undone.
+
 ` + "`title`" + ` becomes the PR and commit title argus ships with — write it
 yourself, informed by the issue and by what you actually built (your diff),
 not copied verbatim from the issue title. Use whichever conventional-commit
