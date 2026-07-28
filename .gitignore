@@ -4,4 +4,4 @@
 coverage.out
 *.out
 .claude/settings.local.json
-.claude/argus/panes.json
+.claude/argus/
