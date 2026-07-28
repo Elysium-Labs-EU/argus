@@ -588,6 +588,9 @@ func measureReconcileDiffs(ctx context.Context, cfg *Config, states []*workerSta
 			if h, herr := ContentHash(st.plan.Worktree, files); herr == nil {
 				st.contentHash = h
 			}
+			if sha, sherr := HeadSHA(ctx, st.plan.Worktree); sherr == nil {
+				st.headSHA = sha
+			}
 		}
 	}
 }
@@ -873,15 +876,26 @@ type workerState struct {
 	// contentHash digests the round's post-dispatch touched-file bytes (set by
 	// measureReconcileDiffs only when priorContentHash is populated, since
 	// nothing else consumes it), priorContentHash the same digest of the
-	// pre-round state the prior verdict already rejected. Equal terminal hashes
-	// mean the round addressed nothing — see gateVerdict. Both empty outside a
+	// pre-round state the prior verdict already rejected. Both empty outside a
 	// rework round (JudgeOne is the only populator), which disables the check.
+	// Equal terminal hashes alone do NOT mean the round addressed nothing: a
+	// worker can commit content that was already sitting in the worktree
+	// uncommitted before the round started (e.g. a fix applied but never
+	// landed), leaving the on-disk bytes ContentHash reads unchanged while a
+	// genuinely new HEAD commit ships it — headSHA/priorHeadSHA is the git-level
+	// signal that catches that case; see gateVerdict.
 	contentHash      string
 	priorContentHash string
-	plan             *WorkerPlan
-	review           *ReviewResult
-	status           protocol.Status
-	measured         protocol.DiffStat
+	// headSHA / priorHeadSHA are the worktree's HEAD commit before and after a
+	// rework round, populated the same way and under the same gating as
+	// contentHash above. A changed HEAD proves a real, distinct commit landed
+	// during the round even when priorContentHash still matches contentHash.
+	headSHA      string
+	priorHeadSHA string
+	plan         *WorkerPlan
+	review       *ReviewResult
+	status       protocol.Status
+	measured     protocol.DiffStat
 	// priorMeasured is a rework round's pre-dispatch verdict measurement,
 	// set only by JudgeOne (see priorMeasuredOK); gateVerdict subtracts it from
 	// measured so that round is judged on its own delta, not the cumulative
