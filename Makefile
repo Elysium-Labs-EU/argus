@@ -1,4 +1,4 @@
-.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus eventlog-gate check-pubkey-sync check-schema-sync fix setup ci clean release pre-release changelog changelog-preview
+.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus eventlog-gate check-pubkey-sync check-schema-sync govulncheck secrets fix setup ci clean release pre-release changelog changelog-preview
 
 # git exports these into every hook's environment so the hook's own git
 # invocations resolve to the repo/worktree that triggered it. If a recipe
@@ -61,6 +61,14 @@ check-pubkey-sync: ## Fail if the release-signing pubkey differs between cmd/upd
 check-schema-sync: ## Fail if schemas/config.schema.json's keys drift from internal/repoconfig/yaml.go's
 	bash scripts/check-schema-sync.sh .
 
+govulncheck: ## Reachability-aware vulnerability scan (complements OSV-Scanner's lockfile-only scan)
+	@command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck not found. Run: make setup"; exit 1; }
+	govulncheck ./...
+
+secrets: ## Scan full git history + working tree for committed secrets
+	@command -v gitleaks >/dev/null 2>&1 || { echo "gitleaks not found. Run: make setup"; exit 1; }
+	gitleaks detect --source . --no-banner --redact
+
 crap: test-coverage-check ## go-crap change-risk gate on changed functions only (vs origin/main)
 	@command -v go-crap >/dev/null 2>&1 || { echo "go-crap not found. Run: make setup"; exit 1; }
 	bash scripts/go-crap-gate.sh .
@@ -80,10 +88,14 @@ setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same
 	go install go.uber.org/nilaway/cmd/nilaway@latest
 	@echo "Installing go-crap (change-risk analysis)..."
 	go install github.com/padiazg/go-crap@latest
+	@echo "Installing govulncheck..."
+	go install golang.org/x/vuln/cmd/govulncheck@latest
+	@echo "Installing gitleaks..."
+	go install github.com/zricethezav/gitleaks/v8@latest
 	@command -v ast-grep >/dev/null 2>&1 || echo "ast-grep not found — install with: brew install ast-grep (or see https://ast-grep.github.io/guide/quick-start.html)"
 	@echo "Setup complete."
 
-ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync check-schema-sync ## Run all CI checks locally
+ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync check-schema-sync govulncheck secrets ## Run all CI checks locally
 	@echo "All CI checks passed!"
 
 release: ## Update changelog, tag and push a release (requires TAG=v1.2.0)
