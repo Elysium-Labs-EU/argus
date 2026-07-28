@@ -280,6 +280,14 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	// because a non-approved verdict — the only kind rework acts on — never
 	// persisted a ContentHash of its own.
 	priorContentHash := preRoundContentHash(ctx, cfg.Base, opts.worktree)
+	// Same pre-dispatch snapshot, at the git-history level: a worker can commit
+	// content that was already sitting in the worktree uncommitted before this
+	// round even started, which leaves priorContentHash unchanged even though a
+	// real, distinct commit lands — HEAD moving is what proves that isn't a
+	// no-op round. Best-effort like priorContentHash: an unresolvable HEAD (e.g.
+	// no commits yet) leaves this "", which JudgeOne treats like any other
+	// unchanged-HEAD case rather than blocking the round.
+	priorHeadSHA, _ := supervisor.HeadSHA(ctx, opts.worktree)
 
 	status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, out, logger, client, repoRoot, branch, task, findings, round, opts)
 	if derr != nil {
@@ -294,7 +302,7 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	}
 
 	plan := &supervisor.WorkerPlan{Worker: supervisor.Worker{Task: task, Branch: branch, Worktree: opts.worktree}}
-	result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt, prior, priorContentHash)
+	result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt, prior, priorContentHash, priorHeadSHA)
 	approved := result.Gate.AutoApprove || (result.Review != nil && result.Review.Decision == "approve")
 	renderReworkRound(out, round, opts.maxRounds, &result, approved)
 

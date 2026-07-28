@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,7 +81,7 @@ func TestJudgeOneAutoApprovesCleanWorkAndPersists(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "")
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "", "")
 	if !result.Gate.AutoApprove {
 		t.Fatalf("want the gate to auto-approve a clean, well-tested change, got reasons %v", result.Gate.Reasons)
 	}
@@ -111,7 +112,7 @@ func TestJudgeOneEscalatesToReviewerAndPersistsApprove(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "")
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "", "")
 	if result.Gate.AutoApprove {
 		t.Fatal("want the gate to escalate on a failing test")
 	}
@@ -141,7 +142,7 @@ func TestJudgeOneEscalatesToReviewerAndPersistsRequestChanges(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "")
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "", "")
 	if result.Review == nil || result.Review.Decision != "request-changes" {
 		t.Fatalf("want the reviewer's request-changes verdict, got %+v", result.Review)
 	}
@@ -182,8 +183,14 @@ func TestJudgeOneEscalatesReworkThatChangedNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ContentHash: %v", err)
 	}
+	// JudgeOne never commits in-test either, so HEAD is exactly as unchanged as
+	// the content above — a genuine no-op round, on both signals.
+	preRoundHead, err := HeadSHA(context.Background(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, preRound)
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, preRound, preRoundHead)
 	if result.Gate.AutoApprove {
 		t.Fatal("want the gate to escalate a rework round that changed nothing since its rejected state")
 	}
@@ -225,9 +232,95 @@ func TestJudgeOneAllowsReworkThatChangedContent(t *testing.T) {
 
 	// A pre-round hash no post-round measurement can match: the round
 	// demonstrably changed the worktree since this state.
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "0000000000000000000000000000000000000000000000000000000000000000")
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "0000000000000000000000000000000000000000000000000000000000000000", "")
 	if !result.Gate.AutoApprove {
 		t.Fatalf("want a rework round with changed content to auto-approve, got reasons %v", result.Gate.Reasons)
+	}
+}
+
+// gitWorktreeWithFixedBaseAndDirtyEdit makes a temp git repo whose base commit
+// is also tagged "base-ref" — a name that keeps pointing at that commit even
+// after later commits move HEAD, unlike "HEAD" itself. It leaves f.go edited
+// but uncommitted, reproducing "an already-fixed-but-uncommitted change"
+// sitting in the worktree before a rework round ever dispatches.
+func gitWorktreeWithFixedBaseAndDirtyEdit(t *testing.T) string {
+	t.Helper()
+	wt := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "base")
+	run("tag", "base-ref")
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n\nvar Added = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return wt
+}
+
+// TestJudgeOneAllowsReworkThatCommittedPreexistingDirtyContent pins the
+// issue-312 false-positive: a rework round whose only job is to commit and
+// push content that was already sitting uncommitted in the worktree before
+// the round dispatched leaves ContentHash unchanged (same bytes on disk,
+// before and after), but a real, distinct commit lands — HEAD moves. That
+// must clear the zero-delta gate exactly like a content edit does, since the
+// round demonstrably did real, verifiable work (a new commit ships the fix),
+// not nothing.
+func TestJudgeOneAllowsReworkThatCommittedPreexistingDirtyContent(t *testing.T) {
+	wt := gitWorktreeWithFixedBaseAndDirtyEdit(t)
+	home := reworkTestHome(t, wt)
+	policy := DefaultReviewPolicy()
+	cfg := &Config{Now: time.Now, Base: "base-ref", Home: home, Policy: &policy}
+	plan := &WorkerPlan{Worker: Worker{Task: "rework-commit-only", Branch: "b", Worktree: wt}}
+	status := protocol.Status{
+		Phase: protocol.PhaseAwaitingReview,
+		Tests: []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}},
+	}
+
+	_, files, err := MeasureDiff(context.Background(), wt, "base-ref")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	preRound, err := ContentHash(wt, files)
+	if err != nil {
+		t.Fatalf("ContentHash: %v", err)
+	}
+	preRoundHead, err := HeadSHA(context.Background(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	// The round's entire job: commit the already-edited f.go and "push" it —
+	// no further byte edits, so the post-round content hash matches preRound.
+	commit := exec.Command("git", "-C", wt, "commit", "-aq", "-m", "commit the fix")
+	if out, cerr := commit.CombinedOutput(); cerr != nil {
+		t.Fatalf("git commit: %v\n%s", cerr, out)
+	}
+	postRoundHead, err := HeadSHA(context.Background(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA post-commit: %v", err)
+	}
+	if postRoundHead == preRoundHead {
+		t.Fatal("test setup broken: commit did not move HEAD")
+	}
+
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, preRound, preRoundHead)
+	if !result.Gate.AutoApprove {
+		t.Fatalf("want a rework round that committed pre-existing dirty content to auto-approve, got reasons %v", result.Gate.Reasons)
+	}
+	for _, r := range result.Gate.HardReasons {
+		if strings.Contains(r, "changed nothing") {
+			t.Errorf("want no zero-delta hard reason when HEAD moved to a real new commit, got %v", result.Gate.HardReasons)
+		}
 	}
 }
 
@@ -242,7 +335,7 @@ func TestJudgeOneWithNoReviewerLeavesReviewNil(t *testing.T) {
 		Tests: []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultFail}},
 	}
 
-	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "")
+	result := JudgeOne(context.Background(), cfg, plan, &status, "pane-1", time.Now(), nil, "", "")
 	if result.Gate.AutoApprove {
 		t.Fatal("want the gate to escalate on a failing test")
 	}

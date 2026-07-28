@@ -79,8 +79,15 @@ type JudgeResult struct {
 // terminal phase having changed literally nothing. It is not read from prior
 // because a non-approved verdict (the only kind rework acts on) never persisted a
 // ContentHash; "" disables the check for that round.
-func JudgeOne(ctx context.Context, cfg *Config, plan *WorkerPlan, status *protocol.Status, paneID string, dispatchedAt time.Time, prior *protocol.Approval, priorContentHash string) JudgeResult {
-	st := &workerState{plan: plan, paneID: paneID, started: dispatchedAt, status: *status, hasFile: true, priorContentHash: priorContentHash}
+//
+// priorHeadSHA is the worktree's HEAD commit at that same pre-dispatch moment.
+// A worker can commit content that was already sitting in the worktree
+// uncommitted before the round started, leaving priorContentHash and this
+// round's content hash identical while a genuinely new commit ships the fix —
+// gateVerdict only escalates when both the content hash AND HEAD are
+// unchanged, so a real commit is never mistaken for a no-op round.
+func JudgeOne(ctx context.Context, cfg *Config, plan *WorkerPlan, status *protocol.Status, paneID string, dispatchedAt time.Time, prior *protocol.Approval, priorContentHash, priorHeadSHA string) JudgeResult {
+	st := &workerState{plan: plan, paneID: paneID, started: dispatchedAt, status: *status, hasFile: true, priorContentHash: priorContentHash, priorHeadSHA: priorHeadSHA}
 	if prior != nil {
 		st.priorMeasured = prior.MeasuredDiff
 		st.priorMeasuredOK = true

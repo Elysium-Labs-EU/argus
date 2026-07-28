@@ -224,7 +224,15 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 		// unwaivable. priorContentHash is set only on a rework round (see JudgeOne),
 		// so this never fires in the main supervise loop where files legitimately
 		// stay unchanged between polls of a single worker.
-		if terminal && st.priorContentHash != "" && st.contentHash == st.priorContentHash {
+		//
+		// Byte-identical content is not proof of a no-op round on its own: a worker
+		// can commit content that was already sitting in the worktree uncommitted
+		// before the round even started (e.g. a fix applied but never landed), which
+		// leaves ContentHash unchanged while a genuinely new HEAD commit ships it —
+		// git rev-parse HEAD moving to a distinct SHA is real, verifiable progress
+		// no content hash can see. So both signals must agree nothing happened
+		// before this hard-escalates.
+		if terminal && st.priorContentHash != "" && st.contentHash == st.priorContentHash && st.headSHA == st.priorHeadSHA {
 			v.AutoApprove = false
 			reason := fmt.Sprintf("rework round reports phase %q but changed nothing since the state already found wanting — findings not addressed", eff.Phase)
 			v.Reasons = append(v.Reasons, reason)
