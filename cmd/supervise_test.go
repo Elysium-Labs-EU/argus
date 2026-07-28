@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
@@ -51,6 +53,75 @@ func TestFoldIssueSourcesNoop(t *testing.T) {
 	}
 	if len(in.tasks) != 1 || len(in.branches) != 1 {
 		t.Errorf("no issue sources should leave tasks/branches untouched, got %v %v", in.tasks, in.branches)
+	}
+}
+
+// TestMergeFetchedBranchesPartialExplicitBranches pins issue #293: an explicit
+// --branches shorter than the total worker count (covering only earlier
+// manual --tasks workers) used to make foldIssueSources skip merging in the
+// fetched --issues/--jira-issues default branches entirely, because it only
+// merged when in.branches started out completely empty. The issue worker's
+// branch slot must still get its fetched default, not stay missing.
+func TestMergeFetchedBranchesPartialExplicitBranches(t *testing.T) {
+	branches := []string{"manual-branch"} // covers only the first (manual) worker
+	preCount := 1                         // one manual task already in in.tasks
+	got := mergeFetchedBranches(branches, preCount, []string{"widget-fix-issue-7"})
+	want := []string{"manual-branch", "widget-fix-issue-7"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("mergeFetchedBranches(%v, %d, ...) = %v, want %v", branches, preCount, got, want)
+	}
+}
+
+// TestMergeFetchedBranchesExplicitSlotWins covers the other half: an explicit
+// branch already occupying one of the fetched slots (e.g. --branches given
+// for every worker up front, issue workers included) must win over the
+// fetched default at that same position.
+func TestMergeFetchedBranchesExplicitSlotWins(t *testing.T) {
+	branches := []string{"manual-branch", "explicit-issue-branch"}
+	got := mergeFetchedBranches(branches, 1, []string{"widget-fix-issue-7"})
+	want := []string{"manual-branch", "explicit-issue-branch"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("mergeFetchedBranches(%v, 1, ...) = %v, want %v", branches, got, want)
+	}
+}
+
+// TestBuildWorkersIssueBranchSurvivesPartialBranches is the end-to-end
+// regression for issue #293: it drives the real issuesToTasks fetch (via
+// fakeForge, no network) and the fixed merge helper the same way
+// foldIssueSources calls them, then feeds the result into buildWorkers —
+// proving the issue worker lands on its normal <repo>-fix-issue-N branch
+// instead of buildWorkers falling through to defaultBranch and slugging the
+// entire fetched issue body (title+body+tail) into an unusable branch name.
+func TestBuildWorkersIssueBranchSurvivesPartialBranches(t *testing.T) {
+	in := &workerInput{
+		repo:     "/pinned",
+		tasks:    []string{"manual task for an earlier --tasks worker"},
+		branches: []string{"manual-branch"},
+	}
+	f := &fakeForge{issues: map[int]forge.Issue{
+		7: {Number: 7, Title: "t", Body: strings.Repeat("very long issue body ", 200)},
+	}}
+	fetchedTasks, fetchedBranches, err := issuesToTasks(context.Background(), f, "o", "widget", in.repo, []int{7})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	preCount := len(in.tasks)
+	in.tasks = append(in.tasks, fetchedTasks...)
+	in.branches = mergeFetchedBranches(in.branches, preCount, fetchedBranches)
+
+	client := fakeClient()
+	workers, err := buildWorkers(context.Background(), client, in)
+	if err != nil {
+		t.Fatalf("buildWorkers: %v", err)
+	}
+	if len(workers) != 2 {
+		t.Fatalf("want 2 workers, got %d", len(workers))
+	}
+	if workers[0].Branch != "manual-branch" {
+		t.Errorf("manual worker branch: got %q, want manual-branch", workers[0].Branch)
+	}
+	if want := "widget-fix-issue-7"; workers[1].Branch != want {
+		t.Errorf("issue worker branch = %q, want %q (fetched default, not a slug of the issue body)", workers[1].Branch, want)
 	}
 }
 
