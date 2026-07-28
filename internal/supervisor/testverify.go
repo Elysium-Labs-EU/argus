@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -174,7 +173,7 @@ func runVerify(ctx context.Context, worktree, cmdStr string, timeout time.Durati
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, "sh", "-c", cmdStr) //nolint:gosec // re-running the worker's own reported test command, in its own worktree
+	cmd := execArgvOrShell(runCtx, cmdStr)
 	cmd.Dir = worktree
 	out, err := runCombinedOutput(cmd)
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
