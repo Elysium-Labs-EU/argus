@@ -601,10 +601,14 @@ func loadTasksFile(path string) ([]string, error) {
 // foldIssueSources turns --issues and --jira-issues into worker briefs and
 // appends them to in.tasks/in.branches, so the operator never hand-writes a
 // task string for an issue that already has a title and body. Generated
-// branches only fill in.branches when it is still empty, so explicit
-// --branches always wins. Split out of spawnWorkers to keep each source's
-// fetch-and-fold step independently testable and readable. forgeKindFlag/
-// forgeKindExplicit only matter to the --issues path (see resolveIssueForgeKind).
+// branches merge into the positional slots the fetched tasks land at (see
+// mergeFetchedBranches), so an explicit --branches shorter than the total
+// worker count — e.g. covering earlier --tasks workers only — still leaves
+// the issue workers with their normal <repo>-fix-issue-N default instead of
+// falling through to defaultBranch's slug of the entire fetched task body.
+// Split out of spawnWorkers to keep each source's fetch-and-fold step
+// independently testable and readable. forgeKindFlag/forgeKindExplicit only
+// matter to the --issues path (see resolveIssueForgeKind).
 func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) error {
 	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
@@ -616,10 +620,9 @@ func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIs
 		if err != nil {
 			return err
 		}
+		preCount := len(in.tasks)
 		in.tasks = append(in.tasks, fetched...)
-		if len(in.branches) == 0 {
-			in.branches = brs
-		}
+		in.branches = mergeFetchedBranches(in.branches, preCount, brs)
 	}
 	// --jira-issues works the same way but reads from Jira Cloud instead, since
 	// Jira is an issue tracker with no git-host concept to resolve from the
@@ -629,12 +632,33 @@ func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIs
 		if err != nil {
 			return err
 		}
+		preCount := len(in.tasks)
 		in.tasks = append(in.tasks, fetched...)
-		if len(in.branches) == 0 {
-			in.branches = brs
-		}
+		in.branches = mergeFetchedBranches(in.branches, preCount, brs)
 	}
 	return nil
+}
+
+// mergeFetchedBranches merges a fetched issue source's default branches into
+// in.branches at the positional slots its tasks were just appended at
+// (preCount..preCount+len(fetched)), padding with "" as needed rather than
+// only merging when in.branches started out empty. That gate used to mean an
+// explicit --branches covering earlier --tasks workers (so len(in.branches)
+// != 0) silently dropped the fetched defaults for every --issues/--jira-issues
+// worker after it, leaving buildWorkers to fall through to defaultBranch and
+// slug the entire fetched task body into a branch name. A slot that already
+// holds an explicit branch (from --branches covering that same position) is
+// left untouched, so explicit still wins position-for-position.
+func mergeFetchedBranches(branches []string, preCount int, fetched []string) []string {
+	for len(branches) < preCount+len(fetched) {
+		branches = append(branches, "")
+	}
+	for i, b := range fetched {
+		if j := preCount + i; branches[j] == "" {
+			branches[j] = b
+		}
+	}
+	return branches
 }
 
 // buildWorkers resolves the paired flag slices into concrete workers. In the
