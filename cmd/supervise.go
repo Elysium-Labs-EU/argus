@@ -140,7 +140,7 @@ each pane's directory in --panes mode).`,
 
 			return runSupervision(cmd, client, workers, &superviseOpts{
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
-				base: resolvedBase, launcher: launcher, workerRuntime: workerRuntime,
+				base: resolvedBase, launcher: resolveLauncher(cmd.Flags().Changed("launcher"), launcher, &rc), workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewEffort: resolveReviewEffort(cmd.Flags().Changed("review-effort"), reviewEffort, &rc), reviewConcurrency: reviewConcurrency,
 				policy: policy, verifyCommand: verifyCommand,
@@ -162,7 +162,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&panes, "panes", nil, "reuse these existing herdr panes instead of the worktree's own pane")
 	cmd.Flags().StringVar(&repo, "repo", "", "repo root for all workers (default cwd; or each pane's directory in --panes mode)")
 	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref new worktrees branch from; required with --attach (no default applies — argus does not know what an attached worktree actually branched from). Without --base, this repo's .argus/config.yml base_branch wins, then the detected origin/HEAD, then this default")
-	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in each worker pane after cd into its worktree")
+	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in each worker pane after cd into its worktree. Without this flag, this repo's .argus/config.yml launcher wins, then this default")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "how often to poll each worker's status file")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "per-worker wall-clock deadline before argus stops waiting on it (0 = wait indefinitely)")
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
@@ -322,6 +322,21 @@ func resolveReviewEffort(explicit bool, flagValue string, rc *repoconfig.Config)
 	}
 	if rc.ReviewEffort != "" {
 		return rc.ReviewEffort
+	}
+	return flagValue
+}
+
+// resolveLauncher applies --launcher > this repo's .argus/config.yml
+// launcher > the flag's own default (supervisor.DefaultLauncher), the same
+// explicit-flag-wins precedence resolveReviewEffort uses. explicit is
+// cmd.Flags().Changed("launcher"). rc is a pointer solely to avoid copying
+// the struct at the call site.
+func resolveLauncher(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.Launcher != "" {
+		return rc.Launcher
 	}
 	return flagValue
 }

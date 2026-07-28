@@ -52,6 +52,12 @@ type Config struct {
 	ShipLint        string
 	VerifyCommand   string
 	ReviewEffort    string
+	// Launcher is the command started in each spawned worker pane, mirroring
+	// supervise's own --launcher flag. Empty behaves like supervisor.
+	// DefaultLauncher was chosen: the same "not configured, skip" shape as
+	// VerifyCommand/ShipLint, no pointer needed. An explicit --launcher flag
+	// still overrides this.
+	Launcher string
 	// Forge names the API shape ("gitlab" or "gitea") for a repo whose host
 	// isn't one of forge.New's three auto-detected hosts (github.com,
 	// gitlab.com, codeberg.org) — the same ambiguity ship/supervise/worktree
