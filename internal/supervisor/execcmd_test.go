@@ -12,6 +12,8 @@ func TestSplitShellWordsHonorsQuotesAndEscapes(t *testing.T) {
 		{`echo 'a b' c`, []string{"echo", "a b", "c"}},
 		{`echo foo\ bar`, []string{"echo", "foo bar"}},
 		{"  make   check  ", []string{"make", "check"}},
+		{`echo "say \"hi\""`, []string{"echo", `say "hi"`}},
+		{`echo ''`, []string{"echo", ""}},
 		{"", nil},
 	}
 	for _, tc := range cases {

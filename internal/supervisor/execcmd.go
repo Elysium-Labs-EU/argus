@@ -37,52 +37,83 @@ func execArgvOrShell(ctx context.Context, cmdStr string) *exec.Cmd {
 	return exec.CommandContext(ctx, "sh", "-c", cmdStr) //nolint:gosec // cmdStr needs real shell semantics, or its command name isn't a standalone executable
 }
 
+// wordScanner accumulates splitShellWords' current word: the builder holding
+// its bytes so far, and whether any byte (even a quoted empty string) has
+// been assigned to it yet — has is what tells an empty quoted string apart
+// from no word at all.
+type wordScanner struct {
+	cur strings.Builder
+	has bool
+}
+
+// flush appends the current word to words if one is pending, and resets the
+// scanner for the next word.
+func (w *wordScanner) flush(words *[]string) {
+	if !w.has {
+		return
+	}
+	*words = append(*words, w.cur.String())
+	w.cur.Reset()
+	w.has = false
+}
+
+// consumeQuoted processes cmdStr[i], one byte inside an active quote, into
+// w.cur. It returns the still-active quote byte (0 once the quote closes)
+// and how many extra bytes beyond cmdStr[i] were consumed (1 for a
+// recognized double-quote escape, else 0), so the caller's loop index can
+// skip over them.
+func (w *wordScanner) consumeQuoted(cmdStr string, i int, quote byte) (nextQuote byte, extra int) {
+	c := cmdStr[i]
+	if c == quote {
+		return 0, 0
+	}
+	if quote == '"' && c == '\\' && i+1 < len(cmdStr) && (cmdStr[i+1] == '"' || cmdStr[i+1] == '\\') {
+		w.cur.WriteByte(cmdStr[i+1])
+		return quote, 1
+	}
+	w.cur.WriteByte(c)
+	return quote, 0
+}
+
+func isShellQuote(c byte) bool { return c == '\'' || c == '"' }
+
+func isShellSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
 // splitShellWords tokenizes cmdStr the way a POSIX shell would split it into
 // words — honoring single/double quotes and backslash escapes — without
 // treating any operator character as special. ok is false when cmdStr can't
 // be split cleanly (an unterminated quote), so the caller falls back to a
 // real shell rather than mis-split it.
 func splitShellWords(cmdStr string) (words []string, ok bool) {
-	var cur strings.Builder
+	var w wordScanner
 	var quote byte
-	has := false
 	for i := 0; i < len(cmdStr); i++ {
 		c := cmdStr[i]
 		switch {
 		case quote != 0:
-			switch {
-			case c == quote:
-				quote = 0
-			case quote == '"' && c == '\\' && i+1 < len(cmdStr) && (cmdStr[i+1] == '"' || cmdStr[i+1] == '\\'):
-				i++
-				cur.WriteByte(cmdStr[i])
-			default:
-				cur.WriteByte(c)
-			}
-		case c == '\'' || c == '"':
+			var extra int
+			quote, extra = w.consumeQuoted(cmdStr, i, quote)
+			i += extra
+		case isShellQuote(c):
 			quote = c
-			has = true
+			w.has = true
 		case c == '\\' && i+1 < len(cmdStr):
+			w.cur.WriteByte(cmdStr[i+1])
+			w.has = true
 			i++
-			cur.WriteByte(cmdStr[i])
-			has = true
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
-			if has {
-				words = append(words, cur.String())
-				cur.Reset()
-				has = false
-			}
+		case isShellSpace(c):
+			w.flush(&words)
 		default:
-			cur.WriteByte(c)
-			has = true
+			w.cur.WriteByte(c)
+			w.has = true
 		}
 	}
 	if quote != 0 {
 		return nil, false
 	}
-	if has {
-		words = append(words, cur.String())
-	}
+	w.flush(&words)
 	return words, true
 }
 
