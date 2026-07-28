@@ -1,14 +1,28 @@
 package protocol
 
-// WriterBrief is the instruction block argus injects into every worker pane's
-// task brief. It is the writer half of this package's contract: it tells the
-// worker to report exactly the Status shape that Load decodes through the
-// guarded `argus worker report` subcommand, after every phase
-// transition. Keeping the writer spec in the same package as the reader and the
-// transition table (see transition.go) is what stops the three from drifting —
-// if the struct or the legal-transition table changes, this text is right next
-// to them.
-const WriterBrief = `## Status reporting (required)
+import "fmt"
+
+// WriterBrief renders the instruction block argus injects into every worker
+// pane's task brief, against base — the same ref MeasureDiff gates the
+// worker's diff against. It is the writer half of this package's contract: it
+// tells the worker to report exactly the Status shape that Load decodes
+// through the guarded `argus worker report` subcommand, after every phase
+// transition. Keeping the writer spec in the same package as the reader and
+// the transition table (see transition.go) is what stops the three from
+// drifting — if the struct or the legal-transition table changes, this text
+// is right next to them.
+//
+// The diff_stat instruction below must diff against the same base the gate
+// measures against, not HEAD: HEAD only equals base before a worker's first
+// commit, so `git diff --stat HEAD` would silently miss every prior commit's
+// lines on any later report (a rebase, a rework round, or just normal
+// incremental work), causing the gate's unwaivable "worker under-reported
+// diff" check to fire on an honest self-report.
+func WriterBrief(base string) string {
+	return fmt.Sprintf(writerBriefTemplate, base)
+}
+
+const writerBriefTemplate = `## Status reporting (required)
 
 After each phase of your work, report your status by running:
 
@@ -45,7 +59,7 @@ then falls back to the fetched issue title — but a title you write yourself,
 grounded in the actual diff, is almost always more accurate than the issue
 title alone.
 
-Compute ` + "`diff_stat`" + ` the same way argus itself will: ` + "`git diff --stat HEAD`" + `
+Compute ` + "`diff_stat`" + ` the same way argus itself will: ` + "`git diff --stat %s`" + `
 for tracked edits, plus every untracked, non-ignored file (` + "`git ls-files --others --exclude-standard`" + `)
 counted as a touched file with its full line count added to insertions. Plain
 ` + "`git diff`" + ` alone is invisible to files you just created — a new source

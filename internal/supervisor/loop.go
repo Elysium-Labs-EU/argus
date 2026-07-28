@@ -155,7 +155,7 @@ func WorktreePath(repoRoot, dir, branch string) string {
 // can't drift. repoAllow and extraAllow are forwarded to settingsFor so every
 // worker's allowlist reflects the same repo-config and operator-supplied
 // extension the dry-run preview shows.
-func BuildPlan(workers []Worker, repoAllow, extraAllow []string) []WorkerPlan {
+func BuildPlan(workers []Worker, base string, repoAllow, extraAllow []string) []WorkerPlan {
 	plans := make([]WorkerPlan, len(workers))
 	for i := range workers {
 		w := workers[i]
@@ -179,13 +179,13 @@ func BuildPlan(workers []Worker, repoAllow, extraAllow []string) []WorkerPlan {
 		plans[i] = WorkerPlan{
 			Worker:   w,
 			Settings: settingsFor(w.Worktree, repoAllow, extraAllow),
-			Brief:    briefFor(&w),
+			Brief:    briefFor(&w, base),
 		}
 	}
 	return plans
 }
 
-func briefFor(w *Worker) string {
+func briefFor(w *Worker, base string) string {
 	return fmt.Sprintf(`Task: %s
 Branch: %s
 
@@ -197,7 +197,7 @@ handles shipping. When the change is complete and tests pass, set your status
 phase to "awaiting_review" (not "done"); use "blocked" if you need a decision only
 the supervisor can make.
 
-%s`, w.Task, w.Branch, w.Worktree, protocol.WriterBrief)
+%s`, w.Task, w.Branch, w.Worktree, protocol.WriterBrief(base))
 }
 
 // taskLabel is a short, log-friendly identifier for a worker task: the first
@@ -434,7 +434,7 @@ func envMap(env []string) map[string]string {
 // worker, watches and judges each one's status independently until it reaches a
 // terminal phase or ctx is canceled, then prints a metrics report.
 func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error {
-	plans := BuildPlan(workers, cfg.RepoAllow, cfg.ExtraAllow)
+	plans := BuildPlan(workers, cfg.Base, cfg.RepoAllow, cfg.ExtraAllow)
 
 	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
 		return err
@@ -513,7 +513,7 @@ func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 // or grinding on an existing PR branch — under the same deterministic observation
 // instead of eyeballing its pane scrollback.
 func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
-	plans := BuildPlan(workers, cfg.RepoAllow, cfg.ExtraAllow)
+	plans := BuildPlan(workers, cfg.Base, cfg.RepoAllow, cfg.ExtraAllow)
 	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
 		return err
 	}

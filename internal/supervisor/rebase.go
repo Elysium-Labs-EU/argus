@@ -224,7 +224,7 @@ Confirm the checks pass and the branch is mergeable, then set your status phase 
 "awaiting_review". Use "blocked" if the resolution needs a decision only the
 supervisor can make.
 
-%s`, branch, base, base, base, protocol.WriterBrief)
+%s`, branch, base, base, base, protocol.WriterBrief("origin/"+base))
 }
 
 // InvalidateStatus removes a worktree's status and verdict files, if present,

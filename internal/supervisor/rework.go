@@ -20,7 +20,7 @@ const DefaultMaxReworkRounds = 3
 // fixed git recipe, the fix itself is exactly what the worker was already
 // doing — the findings are the only new information — so this stays close to
 // the original task text plus the reviewer's concrete feedback.
-func ReworkBrief(task, branch string, findings []string, round, maxRounds int) string {
+func ReworkBrief(task, branch, base string, findings []string, round, maxRounds int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Task: address review feedback on branch %s (rework round %d/%d)\n\n", branch, round, maxRounds)
 	if task != "" {
@@ -38,7 +38,7 @@ func ReworkBrief(task, branch string, findings []string, round, maxRounds int) s
 	b.WriteString("retitling the whole PR — a title describing only this round's fix (e.g. a\n")
 	b.WriteString("small test-isolation nit) would replace the title that already describes the\n")
 	b.WriteString("entire change. Empty carries the existing title forward unchanged.\n\n")
-	b.WriteString(protocol.WriterBrief)
+	b.WriteString(protocol.WriterBrief(base))
 	return b.String()
 }
 

@@ -91,7 +91,7 @@ func TestTaskLabel(t *testing.T) {
 func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 	plans := BuildPlan([]Worker{
 		{Task: "eos#42", Branch: "feat-x", RepoRoot: "/repo-a"},
-	}, nil, nil)
+	}, "origin/main", nil, nil)
 	if len(plans) != 1 {
 		t.Fatalf("want 1 plan, got %d", len(plans))
 	}
@@ -103,7 +103,7 @@ func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 	if !strings.Contains(p.Brief, "eos#42") {
 		t.Errorf("brief should carry the task")
 	}
-	if !strings.Contains(p.Brief, protocol.WriterBrief) {
+	if !strings.Contains(p.Brief, protocol.WriterBrief("origin/main")) {
 		t.Errorf("brief should embed the shared status-writing contract")
 	}
 	if !strings.Contains(p.Brief, want) {
@@ -148,7 +148,7 @@ func TestWorktreePathAbsoluteDirIgnoresRepoRoot(t *testing.T) {
 func TestBuildPlanHonorsWorktreeDir(t *testing.T) {
 	plans := BuildPlan([]Worker{
 		{Task: "eos#42", Branch: "feat-x", RepoRoot: "/repo-a", WorktreeDir: ".."},
-	}, nil, nil)
+	}, "origin/main", nil, nil)
 	want := "/feat-x"
 	if got := plans[0].Worktree; got != want {
 		t.Errorf("worktree: got %q want %q", got, want)
@@ -161,7 +161,7 @@ func TestBuildPlanExplicitWorktreeWinsOverWorktreeDir(t *testing.T) {
 	// override that.
 	plans := BuildPlan([]Worker{
 		{Branch: "feat-x", RepoRoot: "/repo-a", Worktree: "/pinned/path", WorktreeDir: ".."},
-	}, nil, nil)
+	}, "origin/main", nil, nil)
 	want := "/pinned/path"
 	if got := plans[0].Worktree; got != want {
 		t.Errorf("worktree: got %q want %q", got, want)
@@ -171,7 +171,7 @@ func TestBuildPlanExplicitWorktreeWinsOverWorktreeDir(t *testing.T) {
 func TestBuildPlanLabelExplicitWins(t *testing.T) {
 	plans := BuildPlan([]Worker{
 		{Task: "eos#42", Branch: "feat-x", Label: "my-custom-label", RepoRoot: "/repo-a"},
-	}, nil, nil)
+	}, "origin/main", nil, nil)
 	if got := plans[0].Label; got != "my-custom-label" {
 		t.Errorf("an explicit Label should win over any derived default; got %q", got)
 	}
@@ -184,7 +184,7 @@ func TestBuildPlanLabelDefaultsFromTask(t *testing.T) {
 	// information about what the worker is doing.
 	plans := BuildPlan([]Worker{
 		{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: "/repo-a"},
-	}, nil, nil)
+	}, "origin/main", nil, nil)
 	if got := plans[0].Label; got != "fix bug in parser" {
 		t.Errorf("label should derive from task text; got %q", got)
 	}
@@ -195,7 +195,7 @@ func TestBuildPlanLabelFallsBackToBranchWithNoTask(t *testing.T) {
 	// label; the branch itself is the only thing left to show.
 	plans := BuildPlan([]Worker{
 		{Branch: "argus-worker-1", RepoRoot: "/repo-a"},
-	}, nil, nil)
+	}, "origin/main", nil, nil)
 	if got := plans[0].Label; got != "argus-worker-1" {
 		t.Errorf("label should fall back to branch when there's no task; got %q", got)
 	}
@@ -324,7 +324,7 @@ func TestExecuteWritesSettingsBriefAndSpawnsInRootPane(t *testing.T) {
 		Now:    time.Now,
 		Base:   "main",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil)
 
 	states, err := execute(context.Background(), cfg, plans)
 	if err != nil {
@@ -360,7 +360,7 @@ func TestPrepareWorktreePassesLabelNotBranch(t *testing.T) {
 	// Task differs from Branch so a label equal to Branch (the old default
 	// before task text was folded in) is distinguishable from a label derived
 	// off Task.
-	plans := BuildPlan([]Worker{{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "fix bug in parser", Branch: "argus-fix-bug-in-parser", RepoRoot: repo}}, "origin/main", nil, nil)
 
 	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); err != nil {
 		t.Fatalf("prepareWorktree: %v", err)
@@ -403,7 +403,7 @@ func TestPrepareWorktreeNestsViaPaneMove(t *testing.T) {
 		}
 	}
 	cfg := &Config{Client: herdr.NewWithRunner(runner), Base: "main", ParentWorkspace: "w3X"}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil)
 
 	wt, err := prepareWorktree(context.Background(), cfg, &plans[0])
 	if err != nil {
@@ -444,7 +444,7 @@ func TestPrepareWorktreeFailsClosedWhenNestingFails(t *testing.T) {
 		}
 	}
 	cfg := &Config{Client: herdr.NewWithRunner(runner), Base: "main", ParentWorkspace: "w3X"}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil)
 
 	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); !errors.Is(err, sentinel) {
 		t.Fatalf("prepareWorktree: got %v, want it to wrap the PaneMove error", err)
@@ -483,7 +483,7 @@ func TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent(t *testing.T) {
 		Base:   "main",
 		Log:    eventlog.New(io.Discard, "supervise", "r", nil),
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err == nil {
 		t.Fatal("execute should refuse to spawn into a pane with a live agent session, got nil error")
@@ -514,7 +514,7 @@ func TestExecuteWrapsSpawnLineViaRuntimeAdapterWhenConfigured(t *testing.T) {
 		Base:          "main",
 		WorkerRuntime: "fake",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -602,7 +602,7 @@ func TestExecuteFailsWhenConfiguredRuntimeAdapterIsMissing(t *testing.T) {
 		Base:          "main",
 		WorkerRuntime: "does-not-exist",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err == nil {
 		t.Fatal("want an error when the configured runtime adapter cannot be resolved, got nil")
@@ -616,7 +616,7 @@ func TestRenderPlanNeverExecsAnAdapter(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
 	var buf bytes.Buffer
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: "/repo"}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: "/repo"}}, "origin/main", nil, nil)
 	renderPlan(&buf, "origin/main", "claude", "docker", nil, plans)
 
 	out := buf.String()
@@ -1310,7 +1310,7 @@ func TestExecuteInvalidatesStaleStatusBeforeSpawn(t *testing.T) {
 		Now:    time.Now,
 		Base:   "main",
 	}
-	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, nil, nil)
+	plans := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil)
 
 	if _, err := execute(context.Background(), cfg, plans); err != nil {
 		t.Fatalf("execute: %v", err)
