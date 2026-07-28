@@ -882,6 +882,11 @@ func TestReworkRoundNotBlockedByStaleCumulativeUnderReport(t *testing.T) {
 			DiffStat: protocol.DiffStat{Files: 1, Insertions: 16},
 			Tests:    []protocol.TestRun{{Cmd: "true", Result: protocol.ResultPass}}, // genuinely re-run by VerifyTests (see reconcile)
 		},
+		// A real rework round gets this from JudgeOne's own pre-dispatch
+		// snapshot (see priorMeasuredOK's doc), not from a reconcile-time disk
+		// read — mirror that here rather than relying on reconcile to find it.
+		priorMeasured:   approval.MeasuredDiff,
+		priorMeasuredOK: true,
 	}
 	reconcile(context.Background(), cfg, []*workerState{round2})
 	v := gateVerdict(round2, nil)

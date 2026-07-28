@@ -555,8 +555,16 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 	checkPlanEvidence(cfg, states)
 }
 
-// measureReconcileDiffs also carries forward the prior round's recorded
-// verdict measurement so gateVerdict judges only what changed since then.
+// measureReconcileDiffs measures each worker's real diff from git. priorMeasured
+// is never read back from disk here — only JudgeOne (a rework round) populates
+// it, by passing its own pre-dispatch snapshot straight into workerState. A
+// plain --attach re-run of an already-judged worktree has no such snapshot, so
+// gateVerdict always judges it against the full cumulative diff, not a stale
+// baseline left over from that worktree's last verdict.json — the earlier
+// disk-read fallback here made a plain re-attach silently reuse whatever an
+// unrelated prior round had measured, which could clear (or hide) an
+// under-report verdict without the underlying diff or self-report actually
+// having changed.
 func measureReconcileDiffs(ctx context.Context, cfg *Config, states []*workerState) {
 	for _, st := range states {
 		if !st.hasFile && st.herdrEscalation == "" {
@@ -579,17 +587,6 @@ func measureReconcileDiffs(ctx context.Context, cfg *Config, states []*workerSta
 		if st.priorContentHash != "" {
 			if h, herr := ContentHash(st.plan.Worktree, files); herr == nil {
 				st.contentHash = h
-			}
-		}
-		// A caller (JudgeOne) may have already populated priorMeasured from a
-		// verdict it snapshotted before invalidating the worktree's own
-		// verdict.json for this round — trust that over a disk read, since the
-		// file this would otherwise read may already be gone (rework's
-		// InvalidateStatus deletes it before every round).
-		if !st.priorMeasuredOK {
-			if pm, ok := priorMeasured(st.plan.Worktree); ok {
-				st.priorMeasured = pm
-				st.priorMeasuredOK = true
 			}
 		}
 	}
@@ -703,19 +700,6 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState, 
 		}
 		reviewOne(ctx, cfg, st, &verdict, sem)
 	}
-}
-
-// priorMeasured returns the ground-truth diff argus measured at a worktree's
-// last recorded verdict (whichever way it went), and whether one exists.
-// gateVerdict subtracts this from a fresh measurement so the under-report
-// check judges only what changed since that verdict, not the ever-growing
-// cumulative diff since the original base.
-func priorMeasured(worktree string) (protocol.DiffStat, bool) {
-	prior, found, err := protocol.LoadApproval(worktree)
-	if err != nil || !found {
-		return protocol.DiffStat{}, false
-	}
-	return prior.MeasuredDiff, true
 }
 
 // priorFindings returns the Reasons from a previously recorded, non-approved
@@ -898,9 +882,10 @@ type workerState struct {
 	review           *ReviewResult
 	status           protocol.Status
 	measured         protocol.DiffStat
-	// priorMeasured is the worktree's last recorded verdict measurement, if
-	// any (see the package-level priorMeasured func); gateVerdict subtracts
-	// it from measured so a later round is judged on its own delta.
+	// priorMeasured is a rework round's pre-dispatch verdict measurement,
+	// set only by JudgeOne (see priorMeasuredOK); gateVerdict subtracts it from
+	// measured so that round is judged on its own delta, not the cumulative
+	// diff since base. Zero outside a rework round, same as priorContentHash.
 	priorMeasured protocol.DiffStat
 	// herdrStuckElapsed accumulates poll ticks (in interval-sized steps, not
 	// wall-clock reads) while herdr's own agent_status for this pane reports
