@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -341,6 +342,101 @@ func TestLoadUnknownKeyIgnored(t *testing.T) {
 	}
 	if got.BaseBranch != "main" {
 		t.Errorf("BaseBranch = %q, want main", got.BaseBranch)
+	}
+}
+
+func TestLoadDeprecatedKeyAliasesStillParse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	content := "ship_lint: \"make ci\"\nverify_command: \"make lint\"\nworktree_setup_cmd: \"cp ../.env .env\"\n"
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.ShipLint != "make ci" {
+		t.Errorf("ShipLint = %q, want %q (from deprecated ship_lint)", got.ShipLint, "make ci")
+	}
+	if got.VerifyCommand != "make lint" {
+		t.Errorf("VerifyCommand = %q, want %q (from deprecated verify_command)", got.VerifyCommand, "make lint")
+	}
+	if got.WorktreeSetupCmd != "cp ../.env .env" {
+		t.Errorf("WorktreeSetupCmd = %q, want %q (from deprecated worktree_setup_cmd)", got.WorktreeSetupCmd, "cp ../.env .env")
+	}
+}
+
+func TestLoadDeprecatedKeyUseRecorded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	content := "ship_lint: \"make ci\"\nverify_command: \"make lint\"\nworktree_setup_cmd: \"cp ../.env .env\"\n"
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []DeprecatedKeyUse{
+		{Old: "ship_lint", New: "ship_verify_command"},
+		{Old: "verify_command", New: "gate_verify_command"},
+		{Old: "worktree_setup_cmd", New: "worktree_setup_command"},
+	}
+	if !reflect.DeepEqual(got.Deprecated, want) {
+		t.Errorf("Deprecated = %+v, want %+v", got.Deprecated, want)
+	}
+}
+
+func TestLoadDeprecatedEmptyWhenOnlyNewNamesUsed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	content := "ship_verify_command: \"make ci\"\ngate_verify_command: \"make lint\"\nworktree_setup_command: \"cp ../.env .env\"\n"
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Deprecated) != 0 {
+		t.Errorf("Deprecated = %+v, want empty when only new names are used", got.Deprecated)
+	}
+}
+
+func TestEncodeYAMLNeverEmitsOldKeyNamesAfterLoadingOldNamedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	if err := writeFile(path, "ship_lint: \"make ci\"\nverify_command: \"make lint\"\nworktree_setup_cmd: \"cp ../.env .env\"\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if serr := Save(path, &loaded); serr != nil {
+		t.Fatalf("Save: %v", serr)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		for _, old := range []string{"ship_lint:", "verify_command:", "worktree_setup_cmd:"} {
+			if strings.HasPrefix(line, old) {
+				t.Errorf("saved config line %q starts with deprecated key %q, want only new names", line, old)
+			}
+		}
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load (reload): %v", err)
+	}
+	if reloaded.ShipLint != "make ci" || reloaded.VerifyCommand != "make lint" || reloaded.WorktreeSetupCmd != "cp ../.env .env" {
+		t.Errorf("reloaded values = %+v, want the same values under the new names", reloaded)
+	}
+	if len(reloaded.Deprecated) != 0 {
+		t.Errorf("Deprecated = %+v, want empty on the second load (file now uses new names only)", reloaded.Deprecated)
 	}
 }
 

@@ -206,7 +206,7 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 		return nil
 	}
 
-	cfg, repoRoot, err := buildReworkConfig(ctx, opts, reviewer, logger)
+	cfg, repoRoot, err := buildReworkConfig(ctx, out, opts, reviewer, logger)
 	if err != nil {
 		return err
 	}
@@ -228,7 +228,7 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 // resolving the repo root, loading its repoconfig, defaulting the reviewer,
 // and reading $HOME — split out so this one-time setup doesn't inflate
 // runRework's own branching.
-func buildReworkConfig(ctx context.Context, opts *reworkOpts, reviewer supervisor.Reviewer, logger *eventlog.Logger) (*supervisor.Config, string, error) {
+func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, reviewer supervisor.Reviewer, logger *eventlog.Logger) (*supervisor.Config, string, error) {
 	repoRoot, err := supervisor.RepoRoot(ctx, opts.worktree)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolving repo root for %s: %w", opts.worktree, err)
@@ -237,6 +237,7 @@ func buildReworkConfig(ctx context.Context, opts *reworkOpts, reviewer superviso
 	if err != nil {
 		return nil, "", &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, "", fmt.Errorf("resolving home dir: %w", err)

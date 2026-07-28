@@ -1,0 +1,18 @@
+{
+  "updated_at": "2026-07-28T23:25:29.449976+02:00",
+  "source": "review",
+  "summary": "reviewer said \"request-changes\" (Only Front 2 of the plan's 7 fronts is present, as uncommitted working-tree diffs with zero commits made — Fronts 1, 3, 4, 5, 6, 7 are entirely missing.), but a hard gate check is unwaivable: herdr reports pane w1FJ:p1 agent_status=\"blocked\" for over 2m0s, but status.json is still at phase \"working\" — the worker may be stuck on an unanswered prompt or ended without ever writing a terminal status",
+  "content_hash": "",
+  "reasons": [
+    "Task required 7 fronts, each its own commit; no commits exist at all on this branch for this work",
+    "cmd/init.go (Front 1), internal/supervisor/review.go (Front 4), internal/supervisor/loop.go (Front 6), SKILL.md (Front 3) are untouched — none of those fronts were started",
+    "Front 5 (--worktree-dir flag / resolveWorktreeDir) not implemented anywhere",
+    "The Front 2 code that does exist (key rename + deprecated aliases, warnDeprecatedConfigKeys, schema.json updates, tests) matches the plan and looks correct on its own"
+  ],
+  "measured_diff": {
+    "files": 13,
+    "insertions": 265,
+    "deletions": 68
+  },
+  "approved": false
+}

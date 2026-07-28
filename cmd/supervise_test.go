@@ -38,7 +38,7 @@ func TestSpawnWorkersIssuesOnlyPassesGuard(t *testing.T) {
 	// into tasks/branches. repo is a non-git tempdir so it fails downstream
 	// (resolving the forge) instead — proof the guard itself let it through.
 	client := fakeClient()
-	_, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{repo: t.TempDir()}, []int{1}, nil, nil, jiraSpawnOpts{}, "", false)
+	_, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{repo: t.TempDir()}, []int{1}, nil, nil, jiraSpawnOpts{}, "", false)
 	if err == nil {
 		t.Fatal("want a downstream error resolving the forge for a non-git repo")
 	}
@@ -49,7 +49,7 @@ func TestSpawnWorkersIssuesOnlyPassesGuard(t *testing.T) {
 
 func TestFoldIssueSourcesNoop(t *testing.T) {
 	in := &workerInput{tasks: []string{"existing"}, branches: []string{"existing-branch"}}
-	if err := foldIssueSources(context.Background(), in, nil, nil, nil, jiraSpawnOpts{}, "", false); err != nil {
+	if err := foldIssueSources(context.Background(), io.Discard, in, nil, nil, nil, jiraSpawnOpts{}, "", false); err != nil {
 		t.Fatalf("foldIssueSources: %v", err)
 	}
 	if len(in.tasks) != 1 || len(in.branches) != 1 {
@@ -102,7 +102,7 @@ func TestBuildWorkersIssueBranchSurvivesPartialBranches(t *testing.T) {
 	f := &fakeForge{issues: map[int]forge.Issue{
 		7: {Number: 7, Title: "t", Body: strings.Repeat("very long issue body ", 200)},
 	}}
-	fetchedTasks, fetchedBranches, err := issuesToTasks(context.Background(), f, "o", "widget", in.repo, []int{7})
+	fetchedTasks, fetchedBranches, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", in.repo, []int{7})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestFoldIssueSourcesIssuesError(t *testing.T) {
 	// repo isn't a git checkout, so resolving the origin remote fails before any
 	// network call — exercises the --issues error path without a real forge.
 	in := &workerInput{repo: t.TempDir()}
-	if err := foldIssueSources(context.Background(), in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false); err == nil {
+	if err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false); err == nil {
 		t.Fatal("want error resolving forge for a non-git repo")
 	}
 }
@@ -143,7 +143,7 @@ func TestFoldIssueSourcesJiraError(t *testing.T) {
 	// doesn't accidentally pass on a machine with a real ~/.argus/jira.json.
 	t.Setenv("JIRA_CONFIG_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
 	in := &workerInput{repo: t.TempDir()}
-	if err := foldIssueSources(context.Background(), in, nil, []string{"PROJ-1"}, nil, jiraSpawnOpts{}, "", false); err == nil {
+	if err := foldIssueSources(context.Background(), io.Discard, in, nil, []string{"PROJ-1"}, nil, jiraSpawnOpts{}, "", false); err == nil {
 		t.Fatal("want error building jira client without JIRA_* env vars or a config file")
 	}
 }
@@ -155,7 +155,7 @@ func TestFoldIssueSourcesSelfHostedRequiresForge(t *testing.T) {
 	t.Setenv("FORGE_TOKEN", "tok")
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
 	in := &workerInput{repo: wt}
-	if err := foldIssueSources(context.Background(), in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false); err == nil {
+	if err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false); err == nil {
 		t.Fatal("want error: a self-hosted host with no --forge/config default should refuse")
 	}
 }
@@ -166,7 +166,7 @@ func TestFoldIssueSourcesSelfHostedForgeFlagUnblocks(t *testing.T) {
 	t.Setenv("FORGE_TOKEN", "tok")
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
 	in := &workerInput{repo: wt}
-	err := foldIssueSources(context.Background(), in, []int{1}, nil, nil, jiraSpawnOpts{}, "gitea", true)
+	err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "gitea", true)
 	// The fetch itself still fails (no real forge to talk to), but it must fail
 	// past forge construction, not on the ambiguous-host refusal.
 	if err == nil {
@@ -186,7 +186,7 @@ func TestFoldIssueSourcesSelfHostedForgeConfigUnblocks(t *testing.T) {
 		t.Fatalf("seeding repo config: %v", err)
 	}
 	in := &workerInput{repo: wt}
-	err := foldIssueSources(context.Background(), in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false)
+	err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false)
 	if err == nil {
 		t.Fatal("want a downstream fetch error (no real forge to talk to)")
 	}
@@ -407,7 +407,7 @@ func TestSpawnWorkersTasksFileMultiLineBriefWithSingleBranchErrors(t *testing.T)
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	_, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{
+	_, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: "/pinned", tasksFile: path, branches: []string{"single-branch"},
 	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
 	if err == nil {
@@ -438,7 +438,7 @@ func TestSpawnWorkersTasksFileParagraphNoBranchesErrors(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	_, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{
+	_, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: "/pinned", tasksFile: path,
 	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
 	if err == nil {
@@ -865,7 +865,7 @@ func TestSpawnWorkersTasksFileAppendsToTasks(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	workers, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{
+	workers, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: "/pinned", tasksFile: path,
 	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
 	if err != nil {
@@ -889,7 +889,7 @@ func TestSpawnWorkersRelativeRepoResolvesAbsolute(t *testing.T) {
 	t.Chdir(dir)
 
 	client := fakeClient()
-	workers, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{
+	workers, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: ".", tasks: []string{"eos#1"},
 	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
 	if err != nil {

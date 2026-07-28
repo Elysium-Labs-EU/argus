@@ -109,6 +109,20 @@ type Config struct {
 	Allow              []string
 	ProofRequiredPaths []string
 	AlwaysReviewPaths  []string
+	// Deprecated is populated only by Load/parseYAML reading an old-named key
+	// (see deprecatedKeyAliases) — never set by anything that constructs a
+	// Config directly, such as runInit's own suggested/cfg values.
+	Deprecated []DeprecatedKeyUse
+}
+
+// DeprecatedKeyUse records one old-named .argus/config.yml key parseYAML
+// mapped to its current name, so a caller with access to user-facing output
+// can warn about it — argus is young enough that key names are still being
+// corrected, and an old name that silently keeps working forever gives an
+// operator no signal to migrate off it.
+type DeprecatedKeyUse struct {
+	Old string
+	New string
 }
 
 // pathEnvVar overrides the default <repo>/.argus/config.yml location for

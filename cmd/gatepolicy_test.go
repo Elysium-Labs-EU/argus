@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,5 +178,31 @@ func TestResolveOwnerStaleAfterExplicitFlagSkipsMalformedConfigValue(t *testing.
 	}
 	if got != 5*time.Minute {
 		t.Errorf("resolveOwnerStaleAfter = %v, want the explicit flag value", got)
+	}
+}
+
+func TestWarnDeprecatedConfigKeysWritesOneLinePerKey(t *testing.T) {
+	rc := &repoconfig.Config{Deprecated: []repoconfig.DeprecatedKeyUse{
+		{Old: "ship_lint", New: "ship_verify_command"},
+		{Old: "verify_command", New: "gate_verify_command"},
+	}}
+	var buf bytes.Buffer
+	warnDeprecatedConfigKeys(&buf, rc)
+	got := buf.String()
+	for _, want := range []string{
+		`warning: .argus/config.yml key "ship_lint" is deprecated, use "ship_verify_command" instead (both still work)`,
+		`warning: .argus/config.yml key "verify_command" is deprecated, use "gate_verify_command" instead (both still work)`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q missing line %q", got, want)
+		}
+	}
+}
+
+func TestWarnDeprecatedConfigKeysNoOutputWhenNoneDeprecated(t *testing.T) {
+	var buf bytes.Buffer
+	warnDeprecatedConfigKeys(&buf, &repoconfig.Config{})
+	if buf.Len() != 0 {
+		t.Errorf("output = %q, want empty when Deprecated is empty", buf.String())
 	}
 }

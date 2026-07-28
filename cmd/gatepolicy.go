@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
@@ -103,4 +104,16 @@ func resolveOwnerStaleAfter(explicit bool, flagValue time.Duration, rc *repoconf
 		return 0, &ui.UserError{Err: fmt.Errorf("%s: owner_stale_after: %w", configPath, err)}
 	}
 	return d, nil
+}
+
+// warnDeprecatedConfigKeys prints one line per deprecated .argus/config.yml
+// key Load found, so a repo migrates opportunistically instead of needing a
+// dedicated "check config" pass. Called at every command that loads repo
+// config directly with access to command output; supervisor.ResolveBase's
+// own internal Load stays silent — it has no output channel and is already
+// documented as best-effort.
+func warnDeprecatedConfigKeys(out io.Writer, rc *repoconfig.Config) {
+	for _, d := range rc.Deprecated {
+		_, _ = fmt.Fprintf(out, "warning: .argus/config.yml key %q is deprecated, use %q instead (both still work)\n", d.Old, d.New)
+	}
 }

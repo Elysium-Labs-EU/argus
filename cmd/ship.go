@@ -195,12 +195,12 @@ func resolveShipContext(ctx context.Context, out io.Writer, a *shipArgs) (*shipC
 	if verr := checkApproved(ctx, a.worktree, "origin/"+a.base, a.force); verr != nil {
 		return nil, verr
 	}
-	a.titlePrefixTemplate = resolveTitlePrefixTemplateValue(a.titlePrefixTemplateExplicit, a.titlePrefixTemplate, titlePrefixTemplateConfigDefault(ctx, a.worktree))
+	a.titlePrefixTemplate = resolveTitlePrefixTemplateValue(a.titlePrefixTemplateExplicit, a.titlePrefixTemplate, titlePrefixTemplateConfigDefault(ctx, out, a.worktree))
 	host, owner, name, err := resolveRepo(ctx, a.repo, a.worktree)
 	if err != nil {
 		return nil, err
 	}
-	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, forgeConfigDefault(ctx, a.worktree)))
+	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, forgeConfigDefault(ctx, out, a.worktree)))
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +278,7 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	logger, closeLog := openRunLog(cmd, "ship")
 	defer closeLog()
 
-	if gerr := enforceShipGate(ctx, a.worktree); gerr != nil {
+	if gerr := enforceShipGate(ctx, out, a.worktree); gerr != nil {
 		logger.Fail("ship_gate", target.branch, gerr)
 		return gerr
 	}
@@ -421,7 +421,7 @@ func warnJiraPostShip(out io.Writer, logger *eventlog.Logger, key string, err er
 // close the --no-verify bypass even for a human who has decided to ship an
 // unreviewed change; letting --force also skip this would just relocate the
 // bypass rather than close it.
-func enforceShipGate(ctx context.Context, worktree string) error {
+func enforceShipGate(ctx context.Context, out io.Writer, worktree string) error {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
 		return fmt.Errorf("resolving repo root for ship gate: %w", err)
@@ -433,6 +433,7 @@ func enforceShipGate(ctx context.Context, worktree string) error {
 	if err != nil {
 		return fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	return supervisor.RunShipLint(ctx, worktree, rc.ShipLint)
 }
 
@@ -508,7 +509,7 @@ func resolveRepo(ctx context.Context, override, worktree string) (host, owner, n
 // worktree outside any repo, or with no config file, simply has no default
 // to offer, falling through to whatever the caller does next (an explicit
 // --forge, or auto-detection).
-func forgeConfigDefault(ctx context.Context, worktree string) string {
+func forgeConfigDefault(ctx context.Context, out io.Writer, worktree string) string {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
 		return ""
@@ -517,13 +518,14 @@ func forgeConfigDefault(ctx context.Context, worktree string) string {
 	if err != nil {
 		return ""
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	return rc.Forge
 }
 
 // titlePrefixTemplateConfigDefault reads worktree's repo .argus/config.yml
 // title_prefix_template key, best-effort like forgeConfigDefault: a worktree
 // outside any repo, or with no config file, simply has no default to offer.
-func titlePrefixTemplateConfigDefault(ctx context.Context, worktree string) string {
+func titlePrefixTemplateConfigDefault(ctx context.Context, out io.Writer, worktree string) string {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
 		return ""
@@ -532,6 +534,7 @@ func titlePrefixTemplateConfigDefault(ctx context.Context, worktree string) stri
 	if err != nil {
 		return ""
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	return rc.TitlePrefixTemplate
 }
 

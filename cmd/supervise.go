@@ -104,7 +104,7 @@ each pane's directory in --panes mode).`,
 				}
 				workers, err = attachWorkers(cmd.Context(), client, workspace, worktrees)
 			} else {
-				workers, err = spawnWorkers(cmd.Context(), client, cmd.OutOrStdout(), &workerInput{
+				workers, err = spawnWorkers(cmd.Context(), cmd.OutOrStdout(), client, &workerInput{
 					panes: panes, branches: branches, labels: labels, tasks: tasks, tasksFile: tasksFile, repo: repo,
 				}, issues, jiraIssues, overrides, jiraSpawnOpts{assignToCaller: jiraAssignOnSpawn, transition: jiraTransitionOnSpawn},
 					forgeKind, cmd.Flags().Changed("forge"))
@@ -129,6 +129,7 @@ each pane's directory in --panes mode).`,
 				if err != nil {
 					return &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
 				}
+				warnDeprecatedConfigKeys(cmd.OutOrStdout(), &rc)
 			}
 			applyRepoWorktreeDir(workers, rc.WorktreeDir)
 
@@ -554,7 +555,7 @@ type jiraSpawnOpts struct {
 // value and whether it was actually passed, needed only for --issues (the one
 // forge.New call this path makes, to fetch issue bodies before any worker
 // exists).
-func spawnWorkers(ctx context.Context, client herdr.Client, w io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) ([]supervisor.Worker, error) {
+func spawnWorkers(ctx context.Context, out io.Writer, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) ([]supervisor.Worker, error) {
 	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && in.tasksFile == "" && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
@@ -565,13 +566,13 @@ func spawnWorkers(ctx context.Context, client herdr.Client, w io.Writer, in *wor
 		return nil, err
 	}
 	if in.tasksFile != "" {
-		fileTasks, err := loadTasksFile(w, in.tasksFile)
+		fileTasks, err := loadTasksFile(out, in.tasksFile)
 		if err != nil {
 			return nil, err
 		}
 		in.tasks = append(in.tasks, fileTasks...)
 	}
-	if err := foldIssueSources(ctx, in, issues, jiraIssues, credentialOverrides, jiraSpawn, forgeKindFlag, forgeKindExplicit); err != nil {
+	if err := foldIssueSources(ctx, out, in, issues, jiraIssues, credentialOverrides, jiraSpawn, forgeKindFlag, forgeKindExplicit); err != nil {
 		return nil, err
 	}
 	return buildWorkers(ctx, client, in)
@@ -702,14 +703,14 @@ func warnAnomalousTaskLineLengths(w io.Writer, path string, tasks []string) {
 // Split out of spawnWorkers to keep each source's fetch-and-fold step
 // independently testable and readable. forgeKindFlag/forgeKindExplicit only
 // matter to the --issues path (see resolveIssueForgeKind).
-func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) error {
+func foldIssueSources(ctx context.Context, out io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) error {
 	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
-		kind, err := resolveIssueForgeKind(ctx, in.repo, forgeKindExplicit, forgeKindFlag)
+		kind, err := resolveIssueForgeKind(ctx, out, in.repo, forgeKindExplicit, forgeKindFlag)
 		if err != nil {
 			return err
 		}
-		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues, credentialOverrides, kind)
+		fetched, brs, err := tasksFromIssues(ctx, out, in.repo, issues, credentialOverrides, kind)
 		if err != nil {
 			return err
 		}
@@ -721,7 +722,7 @@ func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIs
 	// Jira is an issue tracker with no git-host concept to resolve from the
 	// origin remote.
 	if len(jiraIssues) > 0 {
-		fetched, brs, err := jiraTasksFromIssues(ctx, in.repo, jiraIssues, jiraSpawn)
+		fetched, brs, err := jiraTasksFromIssues(ctx, out, in.repo, jiraIssues, jiraSpawn)
 		if err != nil {
 			return err
 		}
@@ -926,12 +927,12 @@ func at(s []string, i int) string {
 // each issue and renders it into a worker brief. It works for GitHub, GitLab, and
 // Codeberg/Gitea-family hosts without extra flags, plus a self-hosted GitLab or
 // Gitea/Forgejo host when kind says which shape it is.
-func tasksFromIssues(ctx context.Context, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind) (tasks, branches []string, err error) {
+func tasksFromIssues(ctx context.Context, out io.Writer, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind) (tasks, branches []string, err error) {
 	f, owner, name, err := resolveForge(ctx, repoPath, credentialOverrides, kind)
 	if err != nil {
 		return nil, nil, err
 	}
-	return issuesToTasks(ctx, f, owner, name, repoPath, issues)
+	return issuesToTasks(ctx, out, f, owner, name, repoPath, issues)
 }
 
 // resolveIssueForgeKind applies --forge > this repo's .argus/config.yml forge
@@ -942,10 +943,11 @@ func tasksFromIssues(ctx context.Context, repoPath string, issues []int, credent
 // config here — best-effort, matching supervisor.ResolveBase's own lookup: a
 // repo path that doesn't resolve, or has no config file, just falls through
 // to auto-detect.
-func resolveIssueForgeKind(ctx context.Context, repoPath string, explicit bool, flagValue string) (forge.Kind, error) {
+func resolveIssueForgeKind(ctx context.Context, out io.Writer, repoPath string, explicit bool, flagValue string) (forge.Kind, error) {
 	var configValue string
 	if repoRoot, err := supervisor.RepoRoot(ctx, repoPath); err == nil {
 		if rc, err := repoconfig.Load(repoconfig.Path(repoRoot)); err == nil {
+			warnDeprecatedConfigKeys(out, &rc)
 			configValue = rc.Forge
 		}
 	}
@@ -955,11 +957,12 @@ func resolveIssueForgeKind(ctx context.Context, repoPath string, explicit bool, 
 // repoBriefNote reads this repo's optional .argus/config.yml brief_note (see
 // internal/repoconfig), best-effort: a missing or unreadable config file just
 // means no note to append, not a hard failure of task generation.
-func repoBriefNote(repoPath string) string {
+func repoBriefNote(out io.Writer, repoPath string) string {
 	rc, err := repoconfig.Load(repoconfig.Path(repoPath))
 	if err != nil {
 		return ""
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	return rc.BriefNote
 }
 
@@ -1031,8 +1034,8 @@ func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[
 // network. repoPath resolves this repo's optional brief_note (see
 // repoBriefNote) — argus itself supplies no toolchain-flavored text of its
 // own when no config is present, only the fixed "don't commit" invariant.
-func issuesToTasks(ctx context.Context, f forge.Forge, owner, name, repoPath string, issues []int) (tasks, branches []string, err error) {
-	tail := fixedBriefTail(repoBriefNote(repoPath))
+func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, name, repoPath string, issues []int) (tasks, branches []string, err error) {
+	tail := fixedBriefTail(repoBriefNote(out, repoPath))
 	for _, n := range issues {
 		iss, ferr := f.FetchIssue(ctx, owner, name, n)
 		if ferr != nil {
@@ -1067,7 +1070,7 @@ type jiraSpawnClient interface {
 // JIRA_API_TOKEN and fetches each key. Unlike tasksFromIssues this does not go
 // through internal/forge or the origin remote: Jira is an issue tracker, not a
 // git host, so there is no owner/repo or PR concept to resolve.
-func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
+func jiraTasksFromIssues(ctx context.Context, out io.Writer, repoPath string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
 	c, err := jira.NewFromEnv(nil)
 	if err != nil {
 		return nil, nil, &ui.UserError{
@@ -1075,7 +1078,7 @@ func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string, ji
 			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN, or write them to a JSON config file at $JIRA_CONFIG_FILE or ~/.argus/jira.json, to fetch --jira-issues",
 		}
 	}
-	return jiraIssuesToTasks(ctx, c, repoPath, repoBranchPrefix(ctx, repoPath), keys, jiraSpawn)
+	return jiraIssuesToTasks(ctx, out, c, repoPath, repoBranchPrefix(ctx, repoPath), keys, jiraSpawn)
 }
 
 // repoBranchPrefix names the git repo at repoPath for branch prefixing, so
@@ -1104,8 +1107,8 @@ func repoBranchPrefix(ctx context.Context, repoPath string) string {
 // finding out the claim never took before workers pile onto an
 // apparently-unclaimed ticket. repoPath resolves this repo's optional
 // brief_note the same way issuesToTasks does.
-func jiraIssuesToTasks(ctx context.Context, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
-	tail := fixedBriefTail(repoBriefNote(repoPath))
+func jiraIssuesToTasks(ctx context.Context, out io.Writer, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
+	tail := fixedBriefTail(repoBriefNote(out, repoPath))
 
 	var callerAccountID string
 	if jiraSpawn.assignToCaller {

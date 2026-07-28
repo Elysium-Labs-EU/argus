@@ -43,20 +43,32 @@
       "description": "Free-text note appended verbatim to the reviewer's prompt.",
       "examples": ["Pay extra attention to internal/supervisor changes."]
     },
-    "ship_lint": {
+    "ship_verify_command": {
       "type": "string",
       "description": "Controller-side gate command run before ship commits, in addition to argus's own built-in hook detection. Empty/unset runs no extra command.",
       "examples": ["make lint", "task lint"]
     },
-    "verify_command": {
+    "gate_verify_command": {
       "type": "string",
       "description": "Shell command the gate runs in a worker's worktree before a verdict is recorded. Empty/unset skips this check.",
       "examples": ["make test", "npm test"]
     },
-    "worktree_setup_cmd": {
+    "worktree_setup_command": {
       "type": "string",
       "description": "Shell command run once, synchronously, in a freshly created worktree, right after `git worktree add` succeeds and before the worker's agent is spawned. A non-zero exit fails worktree creation. Use this to bootstrap gitignored per-developer local config (env files, local settings) that only exists in the original checkout. Empty/unset runs no extra command.",
       "examples": ["cp ../.env .env", "cp .env.local.example .env.local"]
+    },
+    "ship_lint": {
+      "type": "string",
+      "description": "Deprecated: renamed to ship_verify_command. Still accepted — argus prints a one-line migration warning when it's read — but new configs should use the new name."
+    },
+    "verify_command": {
+      "type": "string",
+      "description": "Deprecated: renamed to gate_verify_command. Still accepted — argus prints a one-line migration warning when it's read — but new configs should use the new name."
+    },
+    "worktree_setup_cmd": {
+      "type": "string",
+      "description": "Deprecated: renamed to worktree_setup_command. Still accepted — argus prints a one-line migration warning when it's read — but new configs should use the new name."
     },
     "title_prefix_template": {
       "type": "string",

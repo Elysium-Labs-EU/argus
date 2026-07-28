@@ -95,7 +95,7 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 			Reasons:       reasons,
 			Diff:          diff,
 			PriorFindings: priorFindings(worktree),
-			ReviewNote:    repoReviewNote(ctx, worktree),
+			ReviewNote:    repoReviewNote(ctx, out, worktree),
 		})
 		return rerr
 	})
@@ -113,7 +113,7 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 // review_note (see internal/repoconfig), best-effort: an unresolvable repo
 // root or unreadable config just means no repo-specific criteria to append,
 // not a hard failure of a manual one-off review.
-func repoReviewNote(ctx context.Context, worktree string) string {
+func repoReviewNote(ctx context.Context, out io.Writer, worktree string) string {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
 		return ""
@@ -122,6 +122,7 @@ func repoReviewNote(ctx context.Context, worktree string) string {
 	if err != nil {
 		return ""
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	return rc.ReviewNote
 }
 
