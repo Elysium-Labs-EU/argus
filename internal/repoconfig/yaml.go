@@ -56,6 +56,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.VerifyCommand != "" {
 		fmt.Fprintf(&b, "verify_command: %s\n", quoteYAML(cfg.VerifyCommand))
 	}
+	if cfg.WorktreeSetupCmd != "" {
+		fmt.Fprintf(&b, "worktree_setup_cmd: %s\n", quoteYAML(cfg.WorktreeSetupCmd))
+	}
 	if cfg.TitlePrefixTemplate != "" {
 		fmt.Fprintf(&b, "title_prefix_template: %s\n", quoteYAML(cfg.TitlePrefixTemplate))
 	}
@@ -115,10 +118,10 @@ func listFieldFor(cfg *Config, key string) *[]string {
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
 // scalars (base_branch, worker_placement, launcher, forge, worktree_dir,
-// brief_note, review_note, ship_lint, verify_command, title_prefix_template,
-// review_effort, max_diff_lines; value optionally quoted), and a top-level
-// list key (`allow`, `proof_required_paths`, `always_review_paths`) followed
-// by indented `- value` list items. Any
+// brief_note, review_note, ship_lint, verify_command, worktree_setup_cmd,
+// title_prefix_template, review_effort, max_diff_lines; value optionally
+// quoted), and a top-level list key (`allow`, `proof_required_paths`,
+// `always_review_paths`) followed by indented `- value` list items. Any
 // other top-level key is ignored (along with any indented block under it),
 // so a future config key this version doesn't know about doesn't break
 // parsing — the same forward-compatibility internal/config's TOML parser
@@ -175,10 +178,10 @@ func parseYAML(data string) (Config, error) {
 
 // assignScalarField sets cfg's field for one of parseYAML's scalar keys
 // (base_branch, worker_placement, launcher, forge, worktree_dir, brief_note,
-// review_note, ship_lint, verify_command, title_prefix_template,
-// review_effort, max_diff_lines), reporting whether key was recognized so
-// parseYAML can still skip an unrecognized key's indented block. line is the
-// 1-based source line, for error messages.
+// review_note, ship_lint, verify_command, worktree_setup_cmd,
+// title_prefix_template, review_effort, max_diff_lines), reporting whether
+// key was recognized so parseYAML can still skip an unrecognized key's
+// indented block. line is the 1-based source line, for error messages.
 func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 	switch key {
 	case "base_branch":
@@ -199,6 +202,8 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 		cfg.ShipLint = value
 	case "verify_command":
 		cfg.VerifyCommand = value
+	case "worktree_setup_cmd":
+		cfg.WorktreeSetupCmd = value
 	case "title_prefix_template":
 		cfg.TitlePrefixTemplate = value
 	case "review_effort":

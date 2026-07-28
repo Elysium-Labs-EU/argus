@@ -37,6 +37,7 @@ func newSuperviseCmd() *cobra.Command {
 		review                bool
 		maxDiffLines          int
 		verifyCmd             string
+		worktreeSetupCmd      string
 		interval              time.Duration
 		timeout               time.Duration
 		reviewConcurrency     int
@@ -137,13 +138,14 @@ each pane's directory in --panes mode).`,
 				alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
 			}, &rc)
 			verifyCommand := resolveVerifyCommand(cmd.Flags().Changed("verify-cmd"), verifyCmd, &rc)
+			worktreeSetupCommand := resolveWorktreeSetupCmd(cmd.Flags().Changed("worktree-setup-cmd"), worktreeSetupCmd, &rc)
 
 			return runSupervision(cmd, client, workers, &superviseOpts{
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
 				base: resolvedBase, launcher: resolveLauncher(cmd.Flags().Changed("launcher"), launcher, &rc), workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewEffort: resolveReviewEffort(cmd.Flags().Changed("review-effort"), reviewEffort, &rc), reviewConcurrency: reviewConcurrency,
-				policy: policy, verifyCommand: verifyCommand,
+				policy: policy, verifyCommand: verifyCommand, worktreeSetupCmd: worktreeSetupCommand,
 				allow: allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
 				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
 				reviewNote:      rc.ReviewNote,
@@ -169,6 +171,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
 	cmd.Flags().StringVar(&verifyCmd, "verify-cmd", "", "review gate: shell command re-run in a worker's worktree once it reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing — today's behavior. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
+	cmd.Flags().StringVar(&worktreeSetupCmd, "worktree-setup-cmd", "", "shell command run once, synchronously, in a freshly created worktree, right after `git worktree add` succeeds and before the worker's agent is spawned (e.g. copying in gitignored per-developer local config); a non-zero exit fails worktree creation the same way a `git worktree add` failure already does. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml worktree_setup_cmd wins, then this default")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for --review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
@@ -200,6 +203,7 @@ type superviseOpts struct {
 	workerPlacement   string
 	reviewNote        string
 	verifyCommand     string
+	worktreeSetupCmd  string
 	policy            *supervisor.ReviewPolicy
 	allow             []string
 	repoAllow         []string
@@ -395,6 +399,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		Policy:            o.policy,
 		ReviewNote:        o.reviewNote,
 		VerifyCommand:     o.verifyCommand,
+		WorktreeSetupCmd:  o.worktreeSetupCmd,
 	}
 	if o.review {
 		cfg.Reviewer = supervisor.NewCLIReviewer(o.reviewModel, o.reviewEffort).WithLog(logger)

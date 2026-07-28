@@ -77,6 +77,20 @@ All keys are optional; a missing file is equivalent to an empty one.
   Precedence: an explicit `--verify-cmd` flag, then this key, then unset (no
   command runs — today's prior behavior). Unset by default; a repo owner
   opts in.
+- **`worktree_setup_cmd`** — a shell command run once, synchronously, inside
+  a freshly created worktree, right after `git worktree add` succeeds and
+  before the worker's agent is spawned (see `RunWorktreeSetupCmd`). Use this
+  when a repo's tasks depend on gitignored per-developer local config (env
+  files, local settings) that exists only in the original checkout — a plain
+  `git worktree add` never copies it, so without this hook a spawned worker
+  hits a silent, confusing file-not-found failure instead of a clear signal
+  that bootstrap state is expected but missing. A non-zero exit fails
+  worktree creation the same way a `git worktree add` failure already does —
+  no retry, since a bootstrap script is expected to be deterministic, not
+  contend for shared-machine resources the way a build/test command might.
+  Precedence: an explicit `--worktree-setup-cmd` flag, then this key, then
+  unset (no command runs — today's prior behavior). Unset by default; a repo
+  owner opts in.
 
 ## Why this is safe from a worker
 
