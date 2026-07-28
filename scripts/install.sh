@@ -23,8 +23,8 @@ REPO="Elysium-Labs-EU/argus"
 # fails CI if they diverge. The matching private key lives only as the
 # RELEASE_SIGNING_KEY secret in GitHub Actions.
 RELEASE_SIGNING_PUBKEY='-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEKixhYiZA8bWtyh5sBs0hLdOhVXj3
-zHHnA3f89l/hPJOQljhWQPOWUcVWnxpVkiIfMPfvxuH4CxnRfFL2azqr8A==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzH6mhj2TebCaVFtf1zMAeCpQ9yg1
+/VTcggLqSs5h5zkIkBbyl6RrXqSjHrHA1MUvqQWj6GDuzIIshcBtSzQH1g==
 -----END PUBLIC KEY-----'
 
 log() { printf '%s\n' "$*" >&2; }
