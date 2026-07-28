@@ -45,10 +45,18 @@ type DiffStat struct {
 
 // TestRun records one test invocation and its outcome. Cmd is the exact command
 // the worker ran; Target names what it exercised (a package, a VM, a service).
+//
+// ExpectedResult is optional and only meaningful when it equals ResultFail: it
+// marks a run the worker deliberately broke to prove a check catches the
+// break (e.g. proof-required paths ask for "break it, confirm the failure,
+// revert"), so the gate can report it informationally instead of escalating
+// on it like a real regression. Leaving it empty means "this result was
+// meant to pass" — the existing, unmarked behavior.
 type TestRun struct {
-	Cmd    string `json:"cmd"`
-	Target string `json:"target"`
-	Result Result `json:"result"`
+	Cmd            string `json:"cmd"`
+	Target         string `json:"target"`
+	Result         Result `json:"result"`
+	ExpectedResult Result `json:"expected_result,omitempty"`
 }
 
 // Question is a worker's structured ask for a supervisor decision, reported

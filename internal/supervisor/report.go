@@ -106,7 +106,8 @@ func renderReport(ctx context.Context, cfg *Config, states []*workerState) {
 		}
 
 		if st.hasFile || st.herdrEscalation != "" {
-			renderVerdict(out, gateVerdict(st, cfg.Policy))
+			v := gateVerdict(st, cfg.Policy)
+			renderVerdict(out, &v)
 			renderReview(out, st)
 			renderProvenance(out, st.plan.Worktree)
 		}
@@ -276,14 +277,25 @@ func renderReview(out io.Writer, st *workerState) {
 // renderVerdict prints the gate's decision: a one-line auto-approve, or the list
 // of reasons the change needs review. This is where the deterministic gate hands
 // off to a human (and, in Milestone B, to claude -p).
-func renderVerdict(out io.Writer, v Verdict) {
+func renderVerdict(out io.Writer, v *Verdict) {
 	if v.AutoApprove {
 		_, _ = fmt.Fprintf(out, "    gate: %s auto-approve (no review needed)\n", ui.LabelSuccess.Render("✓"))
+		renderNotes(out, v.Notes)
 		return
 	}
 	_, _ = fmt.Fprintf(out, "    gate: %s needs review\n", ui.LabelWarning.Render("○"))
 	for _, r := range v.Reasons {
 		_, _ = fmt.Fprintf(out, "      - %s\n", r)
+	}
+	renderNotes(out, v.Notes)
+}
+
+// renderNotes prints the gate's informational call-outs (e.g. an intentional
+// test failure it did not escalate on) below the verdict line, so a reviewer
+// sees they happened without them reading as an escalation reason.
+func renderNotes(out io.Writer, notes []string) {
+	for _, n := range notes {
+		_, _ = fmt.Fprintf(out, "      · %s\n", n)
 	}
 }
 

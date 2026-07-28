@@ -27,6 +27,7 @@ func TestWriteLoadRoundTrip(t *testing.T) {
 				Tests: []TestRun{
 					{Cmd: "make test", Target: "./internal/...", Result: ResultPass},
 					{Cmd: "make lint", Target: "./...", Result: ResultPass},
+					{Cmd: "make test", Target: "./internal/gate", Result: ResultFail, ExpectedResult: ResultFail},
 				},
 				DiffStat: DiffStat{Files: 2, Insertions: 88, Deletions: 4},
 			},

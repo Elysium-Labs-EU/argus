@@ -37,6 +37,39 @@ func TestAssess(t *testing.T) {
 			reasonHint: "test failed",
 		},
 		{
+			name: "intentional failure alongside a clean pass auto-approves",
+			status: protocol.Status{
+				Phase: protocol.PhaseAwaitingReview,
+				Tests: []protocol.TestRun{
+					{Cmd: "make gate-check", Result: protocol.ResultFail, ExpectedResult: protocol.ResultFail},
+					{Cmd: "make gate-check", Result: protocol.ResultPass},
+				},
+			},
+			approve: true,
+		},
+		{
+			name: "intentional failure with no clean pass still escalates",
+			status: protocol.Status{
+				Phase: protocol.PhaseAwaitingReview,
+				Tests: []protocol.TestRun{
+					{Cmd: "make gate-check", Result: protocol.ResultFail, ExpectedResult: protocol.ResultFail},
+				},
+			},
+			approve:    false,
+			reasonHint: "no clean-state passing test",
+		},
+		{
+			name: "expected_result set to pass does not suppress a real failure",
+			status: protocol.Status{
+				Phase: protocol.PhaseAwaitingReview,
+				Tests: []protocol.TestRun{
+					{Cmd: "make test", Result: protocol.ResultFail, ExpectedResult: protocol.ResultPass},
+				},
+			},
+			approve:    false,
+			reasonHint: "test failed",
+		},
+		{
 			name: "oversized diff escalates",
 			status: protocol.Status{
 				Phase:    protocol.PhaseAwaitingReview,
@@ -129,5 +162,38 @@ func TestAssess(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAssessIntentionalFailureIsNotedNotEscalated pins the fix that lets a
+// worker mark a deliberate break-then-revert test run as expected: the run
+// itself must not appear in Reasons (it would read as a real regression to a
+// reviewer skimming escalations), but it must still surface somewhere so the
+// gate isn't silently swallowing information about what happened.
+func TestAssessIntentionalFailureIsNotedNotEscalated(t *testing.T) {
+	status := protocol.Status{
+		Phase: protocol.PhaseAwaitingReview,
+		Tests: []protocol.TestRun{
+			{Cmd: "make gate-check", Result: protocol.ResultFail, ExpectedResult: protocol.ResultFail},
+			{Cmd: "make gate-check", Result: protocol.ResultPass},
+		},
+	}
+	v := Assess(&status, nil)
+	if !v.AutoApprove {
+		t.Fatalf("want auto-approve, got reasons %v", v.Reasons)
+	}
+	for _, r := range v.Reasons {
+		if strings.Contains(r, "make gate-check") {
+			t.Errorf("intentional failure must not appear in Reasons, got %v", v.Reasons)
+		}
+	}
+	found := false
+	for _, n := range v.Notes {
+		if strings.Contains(n, "make gate-check") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want a note about the intentional failure, got %v", v.Notes)
 	}
 }

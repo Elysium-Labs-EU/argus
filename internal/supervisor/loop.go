@@ -701,7 +701,7 @@ func reviewEscalations(ctx context.Context, cfg *Config, states []*workerState, 
 			recordApproval(cfg, st, false, "gate", "escalated, awaiting human decision", verdict.Reasons)
 			continue
 		}
-		reviewOne(ctx, cfg, st, verdict, sem)
+		reviewOne(ctx, cfg, st, &verdict, sem)
 	}
 }
 
@@ -739,7 +739,7 @@ func priorFindings(worktree string) []string {
 // VerifyTests may already have left its own side effects in the worktree,
 // and a fresh DiffFor call here would show the reviewer those instead of
 // only the worker's actual change.
-func reviewOne(ctx context.Context, cfg *Config, st *workerState, verdict Verdict, sem chan struct{}) {
+func reviewOne(ctx context.Context, cfg *Config, st *workerState, verdict *Verdict, sem chan struct{}) {
 	if sem != nil {
 		sem <- struct{}{}
 		defer func() { <-sem }()
