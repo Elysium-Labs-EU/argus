@@ -829,6 +829,29 @@ func TestResolveReviewEffortFallsBackToFlagDefault(t *testing.T) {
 	}
 }
 
+func TestResolveLauncherExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{Launcher: "codex --full-auto"}
+	got := resolveLauncher(true, "aider --yes", &rc)
+	if got != "aider --yes" {
+		t.Errorf("resolveLauncher = %q, want the explicit flag value even with a repo config default", got)
+	}
+}
+
+func TestResolveLauncherPrefersRepoConfig(t *testing.T) {
+	rc := repoconfig.Config{Launcher: "codex --full-auto"}
+	got := resolveLauncher(false, supervisor.DefaultLauncher, &rc)
+	if got != "codex --full-auto" {
+		t.Errorf("resolveLauncher = %q, want the repo config value when the flag was not passed", got)
+	}
+}
+
+func TestResolveLauncherFallsBackToFlagDefault(t *testing.T) {
+	got := resolveLauncher(false, supervisor.DefaultLauncher, &repoconfig.Config{})
+	if got != supervisor.DefaultLauncher {
+		t.Errorf("resolveLauncher = %q, want the flag's own default when config sets nothing", got)
+	}
+}
+
 // TestRunSupervisionSpawnDryRunPlumbsRepoAllow checks that superviseOpts.repoAllow
 // (loaded from .argus/config.yml) reaches every worker's generated
 // settings.local.json, the same way --allow always has — the dry-run plan

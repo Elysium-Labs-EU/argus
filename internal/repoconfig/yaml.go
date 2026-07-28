@@ -26,6 +26,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.WorkerPlacement != "" {
 		fmt.Fprintf(&b, "worker_placement: %s\n", quoteYAML(cfg.WorkerPlacement))
 	}
+	if cfg.Launcher != "" {
+		fmt.Fprintf(&b, "launcher: %s\n", quoteYAML(cfg.Launcher))
+	}
 	if cfg.Forge != "" {
 		fmt.Fprintf(&b, "forge: %s\n", quoteYAML(cfg.Forge))
 	}
@@ -111,11 +114,11 @@ func listFieldFor(cfg *Config, key string) *[]string {
 
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
-// scalars (base_branch, worker_placement, forge, worktree_dir, brief_note,
-// review_note, ship_lint, verify_command, title_prefix_template,
+// scalars (base_branch, worker_placement, launcher, forge, worktree_dir,
+// brief_note, review_note, ship_lint, verify_command, title_prefix_template,
 // review_effort, max_diff_lines; value optionally quoted), and a top-level
-// list key (`allow`, `proof_required_paths`,
-// `always_review_paths`) followed by indented `- value` list items. Any
+// list key (`allow`, `proof_required_paths`, `always_review_paths`) followed
+// by indented `- value` list items. Any
 // other top-level key is ignored (along with any indented block under it),
 // so a future config key this version doesn't know about doesn't break
 // parsing — the same forward-compatibility internal/config's TOML parser
@@ -171,7 +174,7 @@ func parseYAML(data string) (Config, error) {
 }
 
 // assignScalarField sets cfg's field for one of parseYAML's scalar keys
-// (base_branch, worker_placement, forge, worktree_dir, brief_note,
+// (base_branch, worker_placement, launcher, forge, worktree_dir, brief_note,
 // review_note, ship_lint, verify_command, title_prefix_template,
 // review_effort, max_diff_lines), reporting whether key was recognized so
 // parseYAML can still skip an unrecognized key's indented block. line is the
@@ -182,6 +185,8 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 		cfg.BaseBranch = value
 	case "worker_placement":
 		cfg.WorkerPlacement = value
+	case "launcher":
+		cfg.Launcher = value
 	case "forge":
 		cfg.Forge = value
 	case "worktree_dir":
