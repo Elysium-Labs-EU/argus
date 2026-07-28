@@ -46,13 +46,11 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzH6mhj2TebCaVFtf1zMAeCpQ9yg1
 `
 
 // requireReleaseSignature gates whether a release with no sha256sums.txt.sig
-// asset is refused outright rather than merely warned about. Keep this false
-// until the RELEASE_SIGNING_KEY secret is provisioned in GitHub Actions and
-// the first signed release has shipped — flipping it before then would make
-// every existing (unsigned) release refuse to install. Once a signed release
-// exists, flip to true so an unsigned or signature-stripped release can no
-// longer be installed silently.
-const requireReleaseSignature = false
+// asset is refused outright rather than merely warned about. v0.2.0-rc.10 was
+// the first signed release (verified against releaseSigningPublicKeyPEM), so
+// this is now enforced — any release older than that predates signing and
+// will fail to install; download an rc.10+ build instead.
+const requireReleaseSignature = true
 
 // parseReleaseSigningPublicKey decodes the embedded release signing public
 // key. Pure — no I/O.
@@ -83,10 +81,17 @@ func verifySignature(pub *ecdsa.PublicKey, data, sig []byte) error {
 	return nil
 }
 
-// verifyChecksumsSignature checks sig against checksumsData using the
-// embedded release signing public key. Pure — no I/O.
+// releaseSigningPubKeyFunc resolves the public key verifyChecksumsSignature
+// checks against. A var (not a direct call to parseReleaseSigningPublicKey)
+// so tests can swap in a throwaway keypair and exercise real signature
+// verification without the production private key, which never leaves the
+// RELEASE_SIGNING_KEY GitHub Actions secret.
+var releaseSigningPubKeyFunc = parseReleaseSigningPublicKey
+
+// verifyChecksumsSignature checks sig against checksumsData using
+// releaseSigningPubKeyFunc. Pure — no I/O.
 func verifyChecksumsSignature(checksumsData, sig []byte) error {
-	pub, err := parseReleaseSigningPublicKey()
+	pub, err := releaseSigningPubKeyFunc()
 	if err != nil {
 		return err
 	}

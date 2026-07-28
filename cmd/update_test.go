@@ -299,15 +299,16 @@ func TestVerifyChecksumsSignatureRejectsForgedSignature(t *testing.T) {
 	}
 }
 
-func TestVerifyReleaseSignatureMissingAssetWarnsAndContinues(t *testing.T) {
+func TestVerifyReleaseSignatureMissingAssetFailsNowThatSigningIsEnforced(t *testing.T) {
 	rel := Release{TagName: "v1.0.0"}
 	buf := &bytes.Buffer{}
 
-	if err := verifyReleaseSignature(context.Background(), buf, rel, []byte("checksums"), t.TempDir()); err != nil {
-		t.Fatalf("verifyReleaseSignature: %v", err)
+	err := verifyReleaseSignature(context.Background(), buf, rel, []byte("checksums"), t.TempDir())
+	if err == nil {
+		t.Fatal("verifyReleaseSignature: want error for a release with no sha256sums.txt.sig, got nil")
 	}
-	if !strings.Contains(buf.String(), "has no signature") {
-		t.Errorf("output = %q, want a no-signature warning", buf.String())
+	if !strings.Contains(err.Error(), "no sha256sums.txt.sig") {
+		t.Errorf("err = %q, want a no-signature-asset error", err.Error())
 	}
 }
 
@@ -332,6 +333,63 @@ func TestVerifyReleaseSignaturePresentButInvalidFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "signature verification failed") {
 		t.Errorf("error = %v, want a signature-verification-failed message", err)
+	}
+}
+
+// withTestSigningKey generates a throwaway ECDSA P-256 keypair and points
+// releaseSigningPubKeyFunc at its public half for the test's duration,
+// restoring the real embedded key on cleanup. Lets tests exercise genuine
+// signature verification without the production private key, which only
+// ever lives in the RELEASE_SIGNING_KEY GitHub Actions secret.
+func withTestSigningKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	orig := releaseSigningPubKeyFunc
+	releaseSigningPubKeyFunc = func() (*ecdsa.PublicKey, error) { return &priv.PublicKey, nil }
+	t.Cleanup(func() { releaseSigningPubKeyFunc = orig })
+	return priv
+}
+
+// signChecksums produces an ASN.1 DER ECDSA signature over data's SHA-256
+// digest, the same shape `openssl dgst -sha256 -sign` produces in
+// .github/workflows/release.yml.
+func signChecksums(t *testing.T, priv *ecdsa.PrivateKey, data []byte) []byte {
+	t.Helper()
+	digest := sha256.Sum256(data)
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	if err != nil {
+		t.Fatalf("SignASN1: %v", err)
+	}
+	return sig
+}
+
+func TestVerifyReleaseSignatureValidSucceeds(t *testing.T) {
+	priv := withTestSigningKey(t)
+	checksums := []byte("fake checksums content")
+	sig := signChecksums(t, priv, checksums)
+
+	useHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "sha256sums.txt.sig") {
+			t.Errorf("unexpected request to %s", r.URL.Path)
+			return
+		}
+		_, _ = w.Write(sig)
+	})
+
+	rel := Release{
+		TagName: "v1.0.0",
+		Assets:  []Asset{{Name: "sha256sums.txt.sig", DownloadURL: "https://github.com/x/sha256sums.txt.sig"}},
+	}
+	buf := &bytes.Buffer{}
+
+	if err := verifyReleaseSignature(context.Background(), buf, rel, checksums, t.TempDir()); err != nil {
+		t.Fatalf("verifyReleaseSignature: %v", err)
+	}
+	if !strings.Contains(buf.String(), "signature verified") {
+		t.Errorf("output = %q, want a signature-verified message", buf.String())
 	}
 }
 
@@ -567,10 +625,12 @@ func TestRunUpdateFullSuccess(t *testing.T) {
 	// which resolves completion paths under $HOME; isolate it so this test
 	// can't read or write the real host's completion files.
 	t.Setenv("HOME", t.TempDir())
+	priv := withTestSigningKey(t)
 	assetName := "argus-" + platform
 	binContents := []byte("new argus binary contents")
 	sum := sha256.Sum256(binContents)
 	checksums := hex.EncodeToString(sum[:]) + "  " + assetName + "\n"
+	sig := signChecksums(t, priv, []byte(checksums))
 
 	useHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -578,10 +638,13 @@ func TestRunUpdateFullSuccess(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w, `{"tag_name": "v9.9.9", "assets": [
 				{"name": %q, "browser_download_url": "https://github.com/x/%s"},
-				{"name": "sha256sums.txt", "browser_download_url": "https://github.com/x/sha256sums.txt"}
+				{"name": "sha256sums.txt", "browser_download_url": "https://github.com/x/sha256sums.txt"},
+				{"name": "sha256sums.txt.sig", "browser_download_url": "https://github.com/x/sha256sums.txt.sig"}
 			]}`, assetName, assetName)
 		case strings.HasSuffix(r.URL.Path, "/"+assetName):
 			_, _ = w.Write(binContents)
+		case strings.HasSuffix(r.URL.Path, "/sha256sums.txt.sig"):
+			_, _ = w.Write(sig)
 		case strings.HasSuffix(r.URL.Path, "/sha256sums.txt"):
 			_, _ = w.Write([]byte(checksums))
 		default:
