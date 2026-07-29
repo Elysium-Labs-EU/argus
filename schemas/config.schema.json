@@ -50,7 +50,7 @@
     },
     "gate_verify_command": {
       "type": "string",
-      "description": "Shell command the gate runs in a worker's worktree before a verdict is recorded. Empty/unset skips this check.",
+      "description": "Shell command the gate runs in a worker's worktree once it reaches a terminal phase, before a verdict is recorded. This is also the general-purpose escape hatch for any repo-specific mechanical rule ReviewPolicy has no dedicated field for (max_diff_lines/proof_required_paths/always_review_paths are a closed set): express the rule as a script that exits non-zero on violation and its failure becomes an unwaivable escalation, no argus code change needed. It only fires at that one gate checkpoint, not continuously during planning/working, so a violation surfaces at review time rather than the moment it's introduced. Empty/unset skips this check. (Renamed from verify_command — the old name still works, see Config.Deprecated.)",
       "examples": ["make test", "npm test"]
     },
     "worktree_setup_command": {

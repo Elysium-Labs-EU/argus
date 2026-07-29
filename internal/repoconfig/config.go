@@ -43,7 +43,18 @@ import (
 // verdict is recorded, so a failure is an unwaivable escalation the reviewer
 // sees; ShipLint (and EnforceHooks) runs controller-side at ship time, right
 // before commit, as the last backstop regardless of how the verdict was
-// reached. WorktreeSetupCmd is a third, earlier shell command: it runs once
+// reached.
+// gate_verify_command is also the one general-purpose escape hatch for a
+// repo-specific mechanical rule supervisor.ReviewPolicy has no field for:
+// MaxDiffLines/ProofRequiredPaths/AlwaysReviewPaths are a closed, fixed set
+// argus itself knows how to run, but any rule expressible as a script that
+// exits non-zero on violation — a custom lint, a forbidden-import check, a
+// schema-drift check — becomes an unwaivable HardReason via this one key,
+// with no argus code change. Its one limitation: it only runs once a worker
+// reaches a terminal phase, right before a verdict is recorded — not
+// continuously during planning/working — so a violation surfaces at review
+// time, not the moment the worker introduces it.
+// WorktreeSetupCmd is a third, earlier shell command: it runs once
 // in a freshly created worktree, right after `git worktree add` succeeds and
 // before the worker's agent is spawned (see supervisor.RunWorktreeSetupCmd),
 // so a repo whose task depends on gitignored per-developer local config

@@ -379,6 +379,18 @@ Useful flags (see `argus supervise --help` for all):
   `verify_command` key instead of repeating the flag — an explicitly passed
   flag still wins.
 
+`--verify-cmd`/`gate_verify_command` (renamed from `verify_command`, old name
+still accepted) is also the closest thing argus has to a custom-rule plugin
+point: ReviewPolicy's own checks (`--max-diff-lines`, `--proof-required-path`,
+`--always-review-path`) are a fixed, closed set argus itself knows how to run
+— there's no way to add a new one without a code change. Any other mechanical
+rule a repo wants enforced (a custom lint, a forbidden-import check, a
+required-file check) can be expressed as a script that exits non-zero on
+violation and set here instead; its failure becomes the same unwaivable hard
+reason a reproduced test-claim mismatch gets. The one limitation: it only
+runs once, at the gate, after a worker claims to be done — it can't catch a
+violation live during planning/working, only at review time.
+
 ## 2. React to escalations
 
 The gate is the cheap path: it auto-approves only when the worker is `awaiting_review`,
