@@ -1100,3 +1100,65 @@ func TestValidBranch(t *testing.T) {
 		}
 	}
 }
+
+// TestSuperviseVerifyCmdFlagDeprecatedAliasStillWorks and
+// TestSuperviseWorktreeSetupCmdFlagDeprecatedAliasStillWorks pin the flag
+// rename's backward-compat contract for supervise's two renamed flags:
+// --verify-cmd -> --gate-verify-command and --worktree-setup-cmd ->
+// --worktree-bootstrap-command. Each old name must still parse (bound to
+// the same variable as its replacement) and print a deprecation warning.
+func TestSuperviseVerifyCmdFlagDeprecatedAliasStillWorks(t *testing.T) {
+	cmd := newSuperviseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.ParseFlags([]string{"--verify-cmd", "make lint"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !cmd.Flags().Changed("verify-cmd") {
+		t.Error("Changed(\"verify-cmd\") = false, want true")
+	}
+	if got := cmd.Flags().Lookup("gate-verify-command").Value.String(); got != "make lint" {
+		t.Errorf("--gate-verify-command's bound value = %q, want %q (shared with --verify-cmd)", got, "make lint")
+	}
+	if !strings.Contains(buf.String(), "deprecated") || !strings.Contains(buf.String(), "gate-verify-command") {
+		t.Errorf("output = %q, want a deprecation warning pointing at --gate-verify-command", buf.String())
+	}
+}
+
+func TestSuperviseWorktreeSetupCmdFlagDeprecatedAliasStillWorks(t *testing.T) {
+	cmd := newSuperviseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.ParseFlags([]string{"--worktree-setup-cmd", "cp ../.env .env"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !cmd.Flags().Changed("worktree-setup-cmd") {
+		t.Error("Changed(\"worktree-setup-cmd\") = false, want true")
+	}
+	if got := cmd.Flags().Lookup("worktree-bootstrap-command").Value.String(); got != "cp ../.env .env" {
+		t.Errorf("--worktree-bootstrap-command's bound value = %q, want %q (shared with --worktree-setup-cmd)", got, "cp ../.env .env")
+	}
+	if !strings.Contains(buf.String(), "deprecated") || !strings.Contains(buf.String(), "worktree-bootstrap-command") {
+		t.Errorf("output = %q, want a deprecation warning pointing at --worktree-bootstrap-command", buf.String())
+	}
+}
+
+// TestSuperviseNewFlagNamesNoDeprecationWarning is the other half: the new
+// flag names print no warning and need no old-name involvement.
+func TestSuperviseNewFlagNamesNoDeprecationWarning(t *testing.T) {
+	cmd := newSuperviseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.ParseFlags([]string{"--gate-verify-command", "make lint", "--worktree-bootstrap-command", "cp ../.env .env"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cmd.Flags().Changed("verify-cmd") || cmd.Flags().Changed("worktree-setup-cmd") {
+		t.Error("old flag names should not report Changed when only the new names were passed")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("output = %q, want no deprecation warning for the new flag names", buf.String())
+	}
+}

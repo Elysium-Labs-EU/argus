@@ -368,19 +368,21 @@ Useful flags (see `argus supervise --help` for all):
   duplicate mechanism. That old flag is gone, not renamed — an invocation
   still passing it now fails with an unknown-flag error; use
   `--always-review-path` instead.
-- `--verify-cmd <shell command>` (default: none — runs nothing, matching
-  argus's prior behavior) — closes the gap where the gate's tests/diff/path
-  checks all pass but the target repo's own pre-commit hooks (lint, build,
-  fieldalignment, ...) fail at `ship`'s `git commit`. Once a worker reaches a
-  terminal phase, the gate re-runs this command in its worktree (one retry
-  on failure, to absorb shared-machine flakiness); a non-zero exit is an
-  unwaivable escalation, the same treatment a reproduced test-claim mismatch
-  gets. Can also be set once via this repo's `.argus/config.yml`
-  `gate_verify_command` key instead of repeating the flag — an explicitly
-  passed flag still wins.
+- `--gate-verify-command <shell command>` (renamed from `--verify-cmd`, old
+  flag still accepted as a deprecated alias; default: none — runs nothing,
+  matching argus's prior behavior) — closes the gap where the gate's
+  tests/diff/path checks all pass but the target repo's own pre-commit hooks
+  (lint, build, fieldalignment, ...) fail at `ship`'s `git commit`. Once a
+  worker reaches a terminal phase, the gate re-runs this command in its
+  worktree (one retry on failure, to absorb shared-machine flakiness); a
+  non-zero exit is an unwaivable escalation, the same treatment a
+  reproduced test-claim mismatch gets. Can also be set once via this repo's
+  `.argus/config.yml` `gate_verify_command` key instead of repeating the
+  flag — an explicitly passed flag still wins.
 
-`--verify-cmd`/`gate_verify_command` (renamed from `verify_command`, old name
-still accepted) is also the closest thing argus has to a custom-rule plugin
+`--gate-verify-command`/`gate_verify_command` (both renamed — from
+`--verify-cmd`/`verify_command` respectively, old names still accepted) is
+also the closest thing argus has to a custom-rule plugin
 point: ReviewPolicy's own checks (`--max-diff-lines`, `--proof-required-path`,
 `--always-review-path`) are a fixed, closed set argus itself knows how to run
 — there's no way to add a new one without a code change. Any other mechanical

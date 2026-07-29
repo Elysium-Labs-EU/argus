@@ -40,8 +40,8 @@ func newSuperviseCmd() *cobra.Command {
 		reviewEffort          string
 		review                bool
 		maxDiffLines          int
-		verifyCmd             string
-		worktreeSetupCmd      string
+		gateVerifyCmd         string
+		worktreeBootstrapCmd  string
 		worktreeDir           string
 		interval              time.Duration
 		timeout               time.Duration
@@ -143,15 +143,17 @@ each pane's directory in --panes mode).`,
 				proofRequiredExplicit: cmd.Flags().Changed("proof-required-path"),
 				alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
 			}, &rc)
-			verifyCommand := resolveGateVerifyCommand(cmd.Flags().Changed("verify-cmd"), verifyCmd, &rc)
-			worktreeSetupCommand := resolveWorktreeBootstrapCommand(cmd.Flags().Changed("worktree-setup-cmd"), worktreeSetupCmd, &rc)
+			gateVerifyExplicit := cmd.Flags().Changed("gate-verify-command") || cmd.Flags().Changed("verify-cmd")
+			worktreeBootstrapExplicit := cmd.Flags().Changed("worktree-bootstrap-command") || cmd.Flags().Changed("worktree-setup-cmd")
+			gateVerifyCommand := resolveGateVerifyCommand(gateVerifyExplicit, gateVerifyCmd, &rc)
+			worktreeBootstrapCommand := resolveWorktreeBootstrapCommand(worktreeBootstrapExplicit, worktreeBootstrapCmd, &rc)
 
 			return runSupervision(cmd, client, workers, &superviseOpts{
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
 				base: resolvedBase, launcher: resolveLauncher(cmd.Flags().Changed("launcher"), launcher, &rc), workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewEffort: resolveReviewEffort(cmd.Flags().Changed("review-effort"), reviewEffort, &rc), reviewConcurrency: reviewConcurrency,
-				policy: policy, verifyCommand: verifyCommand, worktreeSetupCmd: worktreeSetupCommand,
+				policy: policy, gateVerifyCommand: gateVerifyCommand, worktreeBootstrapCmd: worktreeBootstrapCommand,
 				allow: allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
 				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
 				reviewNote:      rc.ReviewNote,
@@ -176,8 +178,12 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
-	bindVerifyCmdFlag(cmd, &verifyCmd, "review gate: shell command re-run in a worker's worktree once it reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing — today's behavior. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
-	cmd.Flags().StringVar(&worktreeSetupCmd, "worktree-setup-cmd", "", "shell command run once, synchronously, in a freshly created worktree, right after `git worktree add` succeeds and before the worker's agent is spawned (e.g. copying in gitignored per-developer local config); a non-zero exit fails worktree creation the same way a `git worktree add` failure already does. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml worktree_bootstrap_command wins, then this default. See schemas/config.schema.json's worktree_bootstrap_command for the full cwd/worktree_dir interaction it must respect")
+	cmd.Flags().StringVar(&gateVerifyCmd, "gate-verify-command", "", "review gate: shell command re-run in a worker's worktree once it reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing — today's behavior. Without this flag, this repo's .argus/config.yml gate_verify_command wins, then this default")
+	cmd.Flags().StringVar(&gateVerifyCmd, "verify-cmd", "", "deprecated: renamed to --gate-verify-command")
+	_ = cmd.Flags().MarkDeprecated("verify-cmd", "use --gate-verify-command instead")
+	cmd.Flags().StringVar(&worktreeBootstrapCmd, "worktree-bootstrap-command", "", "shell command run once, synchronously, in a freshly created worktree, right after `git worktree add` succeeds and before the worker's agent is spawned (e.g. copying in gitignored per-developer local config); a non-zero exit fails worktree creation the same way a `git worktree add` failure already does. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml worktree_bootstrap_command wins, then this default. See schemas/config.schema.json's worktree_bootstrap_command for the full cwd/worktree_dir interaction it must respect")
+	cmd.Flags().StringVar(&worktreeBootstrapCmd, "worktree-setup-cmd", "", "deprecated: renamed to --worktree-bootstrap-command")
+	_ = cmd.Flags().MarkDeprecated("worktree-setup-cmd", "use --worktree-bootstrap-command instead")
 	cmd.Flags().StringVar(&worktreeDir, "worktree-dir", "", "where a spawned worker's worktree is created. Empty (default) uses <repo>/.claude/worktrees/<branch>; a relative value is joined under the repo root (\"..\" for a sibling-of-repo layout), an absolute value is used as-is. Without this flag, this repo's .argus/config.yml worktree_dir wins, then this default. If worktree_bootstrap_command hardcodes a relative hop count back to the checkout, changing this can break it (see schemas/config.schema.json)")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
@@ -201,27 +207,27 @@ each pane's directory in --panes mode).`,
 // RunE can pass them through without runSupervision growing a 15-argument
 // signature.
 type superviseOpts struct {
-	credentialEnv     map[string]string
-	reviewModel       string
-	reviewEffort      string
-	base              string
-	launcher          string
-	workerRuntime     string
-	workerPlacement   string
-	reviewNote        string
-	verifyCommand     string
-	worktreeSetupCmd  string
-	policy            *supervisor.ReviewPolicy
-	allow             []string
-	repoAllow         []string
-	interval          time.Duration
-	timeout           time.Duration
-	reviewConcurrency int
-	attach            bool
-	dryRun            bool
-	noCredProxy       bool
-	review            bool
-	repoExplicit      bool
+	credentialEnv        map[string]string
+	reviewModel          string
+	reviewEffort         string
+	base                 string
+	launcher             string
+	workerRuntime        string
+	workerPlacement      string
+	reviewNote           string
+	gateVerifyCommand    string
+	worktreeBootstrapCmd string
+	policy               *supervisor.ReviewPolicy
+	allow                []string
+	repoAllow            []string
+	interval             time.Duration
+	timeout              time.Duration
+	reviewConcurrency    int
+	attach               bool
+	dryRun               bool
+	noCredProxy          bool
+	review               bool
+	repoExplicit         bool
 }
 
 // --worker-placement values. workerPlacementPane is accepted so the flag's
@@ -406,8 +412,8 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		ExtraAllow:               o.allow,
 		Policy:                   o.policy,
 		ReviewNote:               o.reviewNote,
-		GateVerifyCommand:        o.verifyCommand,
-		WorktreeBootstrapCommand: o.worktreeSetupCmd,
+		GateVerifyCommand:        o.gateVerifyCommand,
+		WorktreeBootstrapCommand: o.worktreeBootstrapCmd,
 		// Resolved once for this whole invocation (supervise has no --owner
 		// flag of its own — see ownership.ResolveOwnerID's doc) so every
 		// worker this run spawns shares one lease identity rather than each

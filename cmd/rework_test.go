@@ -753,3 +753,45 @@ func TestAppendFindingsFile(t *testing.T) {
 		t.Error("want an error for a missing file")
 	}
 }
+
+// TestReworkVerifyCmdFlagDeprecatedAliasStillWorks pins the flag rename's
+// backward-compat contract: --verify-cmd was renamed to
+// --gate-verify-command, but the old flag name must still parse (bound to
+// the same variable) and print a deprecation warning rather than either
+// silently doing nothing or hard-erroring as an unknown flag.
+func TestReworkVerifyCmdFlagDeprecatedAliasStillWorks(t *testing.T) {
+	cmd := newReworkCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.ParseFlags([]string{"--verify-cmd", "make lint"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !cmd.Flags().Changed("verify-cmd") {
+		t.Error("Changed(\"verify-cmd\") = false, want true")
+	}
+	if got := cmd.Flags().Lookup("gate-verify-command").Value.String(); got != "make lint" {
+		t.Errorf("--gate-verify-command's bound value = %q, want %q (shared with --verify-cmd)", got, "make lint")
+	}
+	if !strings.Contains(buf.String(), "deprecated") || !strings.Contains(buf.String(), "gate-verify-command") {
+		t.Errorf("output = %q, want a deprecation warning pointing at --gate-verify-command", buf.String())
+	}
+}
+
+// TestReworkGateVerifyCommandFlagNoDeprecationWarning is the other half:
+// the new flag name prints no warning and needs no old-name involvement.
+func TestReworkGateVerifyCommandFlagNoDeprecationWarning(t *testing.T) {
+	cmd := newReworkCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.ParseFlags([]string{"--gate-verify-command", "make lint"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cmd.Flags().Changed("verify-cmd") {
+		t.Error("Changed(\"verify-cmd\") = true, want false — only the new flag was passed")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("output = %q, want no deprecation warning for the new flag name", buf.String())
+	}
+}

@@ -74,9 +74,9 @@ All keys are optional; a missing file is equivalent to an empty one.
   (after one retry, to absorb shared-machine flakiness — see
   `RunGateVerifyCommand`) is an unwaivable escalation: no reviewer verdict can
   approve past it, the same treatment a reproduced test-claim mismatch gets.
-  Precedence: an explicit `--verify-cmd` flag, then this key, then unset (no
-  command runs — today's prior behavior). Unset by default; a repo owner
-  opts in.
+  Precedence: an explicit `--gate-verify-command` flag (`--verify-cmd` still
+  works as a deprecated alias), then this key, then unset (no command runs —
+  today's prior behavior). Unset by default; a repo owner opts in.
 - **`worktree_bootstrap_command`** — a shell command run once, synchronously, inside
   a freshly created worktree, right after `git worktree add` succeeds and
   before the worker's agent is spawned (see `RunWorktreeBootstrapCommand`). Use this
@@ -88,9 +88,10 @@ All keys are optional; a missing file is equivalent to an empty one.
   worktree creation the same way a `git worktree add` failure already does —
   no retry, since a bootstrap script is expected to be deterministic, not
   contend for shared-machine resources the way a build/test command might.
-  Precedence: an explicit `--worktree-setup-cmd` flag, then this key, then
-  unset (no command runs — today's prior behavior). Unset by default; a repo
-  owner opts in.
+  Precedence: an explicit `--worktree-bootstrap-command` flag
+  (`--worktree-setup-cmd` still works as a deprecated alias), then this key,
+  then unset (no command runs — today's prior behavior). Unset by default; a
+  repo owner opts in.
 - **`owner_stale_after`** — how long a worktree's owner-lease heartbeat
   (`.claude/argus/owner.json`, written by `internal/ownership`) may go quiet
   before `rework`/`rebase`/`ship`/`worker answer` let a *mismatched* caller
