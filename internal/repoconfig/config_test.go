@@ -381,8 +381,32 @@ func TestLoadDeprecatedKeyUseRecorded(t *testing.T) {
 	want := []DeprecatedKeyUse{
 		{Old: "ship_lint", New: "ship_verify_command"},
 		{Old: "verify_command", New: "gate_verify_command"},
-		{Old: "worktree_setup_cmd", New: "worktree_setup_command"},
+		{Old: "worktree_setup_cmd", New: "worktree_bootstrap_command"},
 	}
+	if !reflect.DeepEqual(got.Deprecated, want) {
+		t.Errorf("Deprecated = %+v, want %+v", got.Deprecated, want)
+	}
+}
+
+// TestLoadIntermediateWorktreeSetupCommandNameStillParses covers
+// worktree_setup_command specifically: it was briefly the canonical name
+// before worktree_bootstrap_command superseded it, so it's now a second
+// deprecated alias (alongside the original worktree_setup_cmd) pointing at
+// the same final field, not a dead end.
+func TestLoadIntermediateWorktreeSetupCommandNameStillParses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "worktree_setup_command: \"cp ../.env .env\"\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.WorktreeSetupCmd != "cp ../.env .env" {
+		t.Errorf("WorktreeSetupCmd = %q, want %q (from deprecated worktree_setup_command)", got.WorktreeSetupCmd, "cp ../.env .env")
+	}
+	want := []DeprecatedKeyUse{{Old: "worktree_setup_command", New: "worktree_bootstrap_command"}}
 	if !reflect.DeepEqual(got.Deprecated, want) {
 		t.Errorf("Deprecated = %+v, want %+v", got.Deprecated, want)
 	}
@@ -391,7 +415,7 @@ func TestLoadDeprecatedKeyUseRecorded(t *testing.T) {
 func TestLoadDeprecatedEmptyWhenOnlyNewNamesUsed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
-	content := "ship_verify_command: \"make ci\"\ngate_verify_command: \"make lint\"\nworktree_setup_command: \"cp ../.env .env\"\n"
+	content := "ship_verify_command: \"make ci\"\ngate_verify_command: \"make lint\"\nworktree_bootstrap_command: \"cp ../.env .env\"\n"
 	if err := writeFile(path, content); err != nil {
 		t.Fatalf("writeFile: %v", err)
 	}
@@ -422,7 +446,7 @@ func TestEncodeYAMLNeverEmitsOldKeyNamesAfterLoadingOldNamedFile(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	for line := range strings.SplitSeq(string(raw), "\n") {
-		for _, old := range []string{"ship_lint:", "verify_command:", "worktree_setup_cmd:"} {
+		for _, old := range []string{"ship_lint:", "verify_command:", "worktree_setup_cmd:", "worktree_setup_command:"} {
 			if strings.HasPrefix(line, old) {
 				t.Errorf("saved config line %q starts with deprecated key %q, want only new names", line, old)
 			}

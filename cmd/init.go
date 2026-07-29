@@ -102,7 +102,7 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.WorkerPlacement = promptLine(reader, out, "worker_placement (workspace|tab)", suggested.WorkerPlacement)
 		cfg.ShipLint = promptLine(reader, out, "ship_verify_command (controller-side gate command run before commit)", suggested.ShipLint)
 		cfg.VerifyCommand = promptLine(reader, out, "gate_verify_command (gate: shell command re-run in a worker's worktree before a verdict is recorded)", suggested.VerifyCommand)
-		cfg.WorktreeSetupCmd = promptLine(reader, out, "worktree_setup_command (runs once in a fresh worktree, right after git worktree add, before the worker's agent starts)", suggested.WorktreeSetupCmd)
+		cfg.WorktreeSetupCmd = promptLine(reader, out, "worktree_bootstrap_command (runs once in a fresh worktree, right after git worktree add, before the worker's agent starts)", suggested.WorktreeSetupCmd)
 		cfg.ReviewEffort = promptLine(reader, out, "review_effort (low|medium|high|xhigh|max)", suggested.ReviewEffort)
 		cfg.Launcher = promptLine(reader, out, "launcher (command started in each worker pane)", suggested.Launcher)
 		cfg.WorktreeDir = promptLine(reader, out, "worktree_dir (blank for <repo>/.claude/worktrees/<branch>; \"..\" for a sibling-of-repo layout)", suggested.WorktreeDir)

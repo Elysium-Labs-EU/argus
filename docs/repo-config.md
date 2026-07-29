@@ -1,7 +1,7 @@
 # Repo config: .argus/config.yml
 
 argus hardcodes no build/test toolchain — it assumes no default build, test,
-or lint command of its own. `verify_command` below is one such opt-in
+or lint command of its own. `gate_verify_command` below is one such opt-in
 exception: a repo owner sets a specific shell command via the key, and argus
 re-runs exactly that command as part of the gate, alongside `ship`'s
 required approving verdict (see `internal/supervisor/reviewer.go`). The only
@@ -66,7 +66,7 @@ All keys are optional; a missing file is equivalent to an empty one.
   diff-counting guidance that mirrors `MeasureDiff`'s own untracked-file
   handling) always follow it — those are argus's own pipeline invariants, not
   something a repo can opt out of.
-- **`verify_command`** — a shell command the gate re-runs inside a worker's
+- **`gate_verify_command`** — a shell command the gate re-runs inside a worker's
   worktree once it reaches a terminal phase (e.g. `"make lint"`,
   `"golangci-lint run"`), closing the gap where a diff earns a clean gate
   verdict and then fails at `ship`'s `git commit` because the repo's own
@@ -77,7 +77,7 @@ All keys are optional; a missing file is equivalent to an empty one.
   Precedence: an explicit `--verify-cmd` flag, then this key, then unset (no
   command runs — today's prior behavior). Unset by default; a repo owner
   opts in.
-- **`worktree_setup_cmd`** — a shell command run once, synchronously, inside
+- **`worktree_bootstrap_command`** — a shell command run once, synchronously, inside
   a freshly created worktree, right after `git worktree add` succeeds and
   before the worker's agent is spawned (see `RunWorktreeSetupCmd`). Use this
   when a repo's tasks depend on gitignored per-developer local config (env

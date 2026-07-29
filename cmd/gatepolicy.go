@@ -68,7 +68,7 @@ func resolveVerifyCommand(explicit bool, flagValue string, rc *repoconfig.Config
 }
 
 // resolveWorktreeSetupCmd applies an explicit --worktree-setup-cmd flag over
-// this repo's .argus/config.yml worktree_setup_cmd over "" (no command
+// this repo's .argus/config.yml worktree_bootstrap_command over "" (no command
 // configured — a bare `git worktree add` with no bootstrap step, the prior
 // behavior), the same explicit-flag-wins precedence resolveVerifyCommand
 // applies for its own source. explicit is

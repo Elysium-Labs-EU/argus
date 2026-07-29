@@ -18,9 +18,10 @@ const configSchemaHeader = "# yaml-language-server: $schema=https://raw.githubus
 // young enough that names are still being corrected, and support for an old
 // name is expected to be temporary, not permanent API surface.
 var deprecatedKeyAliases = map[string]string{
-	"ship_lint":          "ship_verify_command",
-	"verify_command":     "gate_verify_command",
-	"worktree_setup_cmd": "worktree_setup_command",
+	"ship_lint":              "ship_verify_command",
+	"verify_command":         "gate_verify_command",
+	"worktree_setup_cmd":     "worktree_bootstrap_command",
+	"worktree_setup_command": "worktree_bootstrap_command",
 }
 
 // encodeYAML renders cfg as the minimal YAML document parseYAML can read
@@ -69,7 +70,7 @@ func encodeYAML(cfg *Config) string {
 		fmt.Fprintf(&b, "gate_verify_command: %s\n", quoteYAML(cfg.VerifyCommand))
 	}
 	if cfg.WorktreeSetupCmd != "" {
-		fmt.Fprintf(&b, "worktree_setup_command: %s\n", quoteYAML(cfg.WorktreeSetupCmd))
+		fmt.Fprintf(&b, "worktree_bootstrap_command: %s\n", quoteYAML(cfg.WorktreeSetupCmd))
 	}
 	if cfg.TitlePrefixTemplate != "" {
 		fmt.Fprintf(&b, "title_prefix_template: %s\n", quoteYAML(cfg.TitlePrefixTemplate))
@@ -134,7 +135,7 @@ func listFieldFor(cfg *Config, key string) *[]string {
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
 // scalars (base_branch, worker_placement, launcher, forge, worktree_dir,
 // brief_note, review_note, ship_verify_command, gate_verify_command,
-// worktree_setup_command, title_prefix_template, owner_stale_after,
+// worktree_bootstrap_command, title_prefix_template, owner_stale_after,
 // review_effort, max_diff_lines; value optionally quoted, plus
 // deprecatedKeyAliases' old names), and a top-level list key (`allow`, `proof_required_paths`,
 // `always_review_paths`) followed by indented `- value` list items. Any
@@ -200,7 +201,7 @@ func parseYAML(data string) (Config, error) {
 // assignScalarField sets cfg's field for one of parseYAML's scalar keys
 // (base_branch, worker_placement, launcher, forge, worktree_dir, brief_note,
 // review_note, ship_verify_command, gate_verify_command,
-// worktree_setup_command, title_prefix_template, owner_stale_after,
+// worktree_bootstrap_command, title_prefix_template, owner_stale_after,
 // review_effort, max_diff_lines — key is already the canonical name by the
 // time it reaches here, deprecatedKeyAliases having been applied by the
 // caller), reporting whether key was recognized so parseYAML can still skip
@@ -226,7 +227,7 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 		cfg.ShipLint = value
 	case "gate_verify_command":
 		cfg.VerifyCommand = value
-	case "worktree_setup_command":
+	case "worktree_bootstrap_command":
 		cfg.WorktreeSetupCmd = value
 	case "title_prefix_template":
 		cfg.TitlePrefixTemplate = value

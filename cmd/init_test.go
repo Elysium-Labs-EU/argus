@@ -278,7 +278,7 @@ func TestRunInitInteractivePromptWritesForge(t *testing.T) {
 	cmd.SetContext(context.Background())
 	// base_branch, allow, brief_note, max_diff_lines, proof_required_paths,
 	// always_review_paths, worker_placement, ship_verify_command,
-	// gate_verify_command, worktree_setup_command, review_effort, launcher,
+	// gate_verify_command, worktree_bootstrap_command, review_effort, launcher,
 	// worktree_dir, title_prefix_template, review_note (all bare Enter, 15
 	// prompts), then forge.
 	cmd.SetIn(strings.NewReader("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ngitlab\n"))
@@ -371,7 +371,7 @@ func TestRunInitPromptsSetEveryConfigField(t *testing.T) {
 	// One recognizable answer per prompt, in runInit's own order: base_branch,
 	// allow, brief_note, max_diff_lines, proof_required_paths,
 	// always_review_paths, worker_placement, ship_verify_command,
-	// gate_verify_command, worktree_setup_command, review_effort, launcher,
+	// gate_verify_command, worktree_bootstrap_command, review_effort, launcher,
 	// worktree_dir, title_prefix_template, review_note, forge.
 	answers := []string{
 		"develop", "Bash(task *)", "custom brief", "250", "terraform", "auth",

@@ -376,8 +376,8 @@ Useful flags (see `argus supervise --help` for all):
   on failure, to absorb shared-machine flakiness); a non-zero exit is an
   unwaivable escalation, the same treatment a reproduced test-claim mismatch
   gets. Can also be set once via this repo's `.argus/config.yml`
-  `verify_command` key instead of repeating the flag — an explicitly passed
-  flag still wins.
+  `gate_verify_command` key instead of repeating the flag — an explicitly
+  passed flag still wins.
 
 `--verify-cmd`/`gate_verify_command` (renamed from `verify_command`, old name
 still accepted) is also the closest thing argus has to a custom-rule plugin
