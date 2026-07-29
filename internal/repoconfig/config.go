@@ -52,12 +52,23 @@ import (
 // confusing file-not-found failure. Empty means no command is configured —
 // the prior behavior, a bare `git worktree add` with no bootstrap step.
 type Config struct {
-	BaseBranch       string
-	WorkerPlacement  string
-	BriefNote        string
-	ReviewNote       string
-	ShipLint         string
-	VerifyCommand    string
+	BaseBranch      string
+	WorkerPlacement string
+	BriefNote       string
+	ReviewNote      string
+	ShipLint        string
+	VerifyCommand   string
+	// WorktreeSetupCmd runs once, synchronously, in a freshly created
+	// worktree, right after `git worktree add` succeeds and before the
+	// worker's agent is spawned (see supervisor.RunWorktreeSetupCmd) — with
+	// cwd already at the resolved WorktreeDir location, since `git worktree
+	// add` already succeeded there. It must never attempt to create or
+	// relocate the worktree itself (git will refuse). A script that
+	// hardcodes a relative hop count back to the original checkout (e.g. "cp
+	// ../../.env .env", assuming the default two-levels-deep layout) breaks
+	// if WorktreeDir changes the nesting depth; prefer deriving the repo
+	// root at runtime (`git rev-parse --show-toplevel`) over a hardcoded hop
+	// count.
 	WorktreeSetupCmd string
 	ReviewEffort     string
 	// Launcher is the command started in each spawned worker pane, mirroring
@@ -80,7 +91,10 @@ type Config struct {
 	// argus's default (<repo>/.claude/worktrees/<branch>); a relative value
 	// (e.g. "..") is joined under the repo root — the escape hatch for a repo
 	// whose own convention is a sibling directory next to the checkout rather
-	// than a nested one; an absolute value is used as-is.
+	// than a nested one; an absolute value is used as-is. Changing this
+	// shifts the worktree's nesting depth relative to the original checkout
+	// — see WorktreeSetupCmd's own comment if that command hardcodes a
+	// relative hop count back to it.
 	WorktreeDir string
 	// TitlePrefixTemplate, when set, is a required prefix ship mechanically
 	// enforces on the PR/commit title it ends up using — worker-reported
