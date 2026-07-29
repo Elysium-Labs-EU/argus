@@ -181,6 +181,29 @@ func TestResolveOwnerStaleAfterExplicitFlagSkipsMalformedConfigValue(t *testing.
 	}
 }
 
+func TestResolveWorktreeDirExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{WorktreeDir: ".."}
+	got := resolveWorktreeDir(true, "../worktrees", &rc)
+	if got != "../worktrees" {
+		t.Errorf("resolveWorktreeDir = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveWorktreeDirPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{WorktreeDir: ".."}
+	got := resolveWorktreeDir(false, "", &rc)
+	if got != ".." {
+		t.Errorf("resolveWorktreeDir = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveWorktreeDirFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveWorktreeDir(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveWorktreeDir = %q, want empty (no worktree dir configured anywhere)", got)
+	}
+}
+
 func TestWarnDeprecatedConfigKeysWritesOneLinePerKey(t *testing.T) {
 	rc := &repoconfig.Config{Deprecated: []repoconfig.DeprecatedKeyUse{
 		{Old: "ship_lint", New: "ship_verify_command"},

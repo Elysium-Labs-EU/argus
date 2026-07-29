@@ -38,11 +38,12 @@ type Worker struct {
 	RepoRoot string
 	Worktree string
 	// WorktreeDir overrides where BuildPlan derives a missing Worktree from
-	// (see WorktreePath) — set from the repo's own .argus/config.yml
-	// worktree_dir (internal/repoconfig) so a repo with its own worktree
-	// convention (e.g. sibling directories next to the checkout) doesn't end
-	// up with a second, uncoordinated set of worktrees under argus's default
-	// .claude/worktrees/. Empty keeps that default.
+	// (see WorktreePath) — set from an explicit --worktree-dir flag, else the
+	// repo's own .argus/config.yml worktree_dir (internal/repoconfig), so a
+	// repo with its own worktree convention (e.g. sibling directories next to
+	// the checkout) doesn't end up with a second, uncoordinated set of
+	// worktrees under argus's default .claude/worktrees/. Empty keeps that
+	// default.
 	WorktreeDir string
 	PaneID      string
 }

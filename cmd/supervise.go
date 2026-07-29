@@ -42,6 +42,7 @@ func newSuperviseCmd() *cobra.Command {
 		maxDiffLines          int
 		verifyCmd             string
 		worktreeSetupCmd      string
+		worktreeDir           string
 		interval              time.Duration
 		timeout               time.Duration
 		reviewConcurrency     int
@@ -131,7 +132,7 @@ each pane's directory in --panes mode).`,
 				}
 				warnDeprecatedConfigKeys(cmd.OutOrStdout(), &rc)
 			}
-			applyRepoWorktreeDir(workers, rc.WorktreeDir)
+			applyRepoWorktreeDir(workers, resolveWorktreeDir(cmd.Flags().Changed("worktree-dir"), worktreeDir, &rc))
 
 			resolvedBase := resolveSuperviseBase(cmd.Context(), cmd.Flags().Changed("base"), base, repoRoot, &rc)
 			policy := resolveGatePolicy(gateFlags{
@@ -177,6 +178,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
 	bindVerifyCmdFlag(cmd, &verifyCmd, "review gate: shell command re-run in a worker's worktree once it reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing — today's behavior. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
 	cmd.Flags().StringVar(&worktreeSetupCmd, "worktree-setup-cmd", "", "shell command run once, synchronously, in a freshly created worktree, right after `git worktree add` succeeds and before the worker's agent is spawned (e.g. copying in gitignored per-developer local config); a non-zero exit fails worktree creation the same way a `git worktree add` failure already does. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml worktree_setup_cmd wins, then this default")
+	cmd.Flags().StringVar(&worktreeDir, "worktree-dir", "", "where a spawned worker's worktree is created. Empty (default) uses <repo>/.claude/worktrees/<branch>; a relative value is joined under the repo root (\"..\" for a sibling-of-repo layout), an absolute value is used as-is. Without this flag, this repo's .argus/config.yml worktree_dir wins, then this default. If worktree_setup_command hardcodes a relative hop count back to the checkout, changing this can break it (see schemas/config.schema.json)")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for --review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
@@ -353,10 +355,11 @@ func resolveLauncher(explicit bool, flagValue string, rc *repoconfig.Config) str
 // applyRepoWorktreeDir sets WorktreeDir on every worker that doesn't already
 // carry an explicit Worktree, so BuildPlan's default-worktree derivation
 // (internal/supervisor.WorktreePath, only consulted when Worktree is empty)
-// honors this repo's .argus/config.yml worktree_dir instead of always
-// falling back to .claude/worktrees. --attach's workers already set Worktree
-// explicitly (the existing directory being observed), so they pass through
-// unchanged.
+// honors the already-resolved worktree_dir (an explicit --worktree-dir flag,
+// this repo's .argus/config.yml worktree_dir, or the default — see
+// resolveWorktreeDir) instead of always falling back to .claude/worktrees.
+// --attach's workers already set Worktree explicitly (the existing directory
+// being observed), so they pass through unchanged.
 func applyRepoWorktreeDir(workers []supervisor.Worker, worktreeDir string) {
 	for i := range workers {
 		if workers[i].Worktree == "" {

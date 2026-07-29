@@ -106,6 +106,23 @@ func resolveOwnerStaleAfter(explicit bool, flagValue time.Duration, rc *repoconf
 	return d, nil
 }
 
+// resolveWorktreeDir applies an explicit --worktree-dir flag over this
+// repo's .argus/config.yml worktree_dir over "" (the flag's own default —
+// argus's own <repo>/.claude/worktrees/<branch> convention, see
+// supervisor.WorktreePath), the same explicit-flag-wins precedence
+// resolveWorktreeSetupCmd applies for its own source. explicit is
+// cmd.Flags().Changed("worktree-dir"). rc is a pointer solely to avoid
+// copying the struct at the call site.
+func resolveWorktreeDir(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.WorktreeDir != "" {
+		return rc.WorktreeDir
+	}
+	return flagValue
+}
+
 // warnDeprecatedConfigKeys prints one line per deprecated .argus/config.yml
 // key Load found, so a repo migrates opportunistically instead of needing a
 // dedicated "check config" pass. Called at every command that loads repo
