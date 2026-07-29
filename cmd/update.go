@@ -28,6 +28,11 @@ import (
 
 const argusRepo = "Elysium-Labs-EU/argus"
 
+// signatureRefuseHint points at the install path that verifies
+// checksum+signature independently of this binary, for when this binary's
+// own verification refuses to proceed.
+var signatureRefuseHint = fmt.Sprintf("scripts/install.sh from the %s repo, or download the release asset directly from https://github.com/%s/releases", argusRepo, argusRepo)
+
 var httpClient = &http.Client{
 	Timeout: 15 * time.Second,
 }
@@ -368,7 +373,7 @@ func verifyReleaseSignature(ctx context.Context, out io.Writer, rel Release, che
 	sig, ok := rel.SignatureAsset()
 	if !ok {
 		if requireReleaseSignature {
-			return &ui.UserError{Err: fmt.Errorf("release %s has no sha256sums.txt.sig", rel.TagName)}
+			return &ui.UserError{Err: fmt.Errorf("release %s has no sha256sums.txt.sig", rel.TagName), Hint: signatureRefuseHint}
 		}
 		_, _ = fmt.Fprintf(out, "%s release %s has no signature (sha256sums.txt.sig) — checksum-only integrity\n", ui.LabelWarning.Render("warning"), rel.TagName)
 		return nil
@@ -384,7 +389,7 @@ func verifyReleaseSignature(ctx context.Context, out io.Writer, rel Release, che
 	}
 
 	if verifyErr := verifyChecksumsSignature(checksumsData, sigData); verifyErr != nil {
-		return &ui.UserError{Err: fmt.Errorf("signature verification failed for %s: %w — refusing to install", rel.TagName, verifyErr)}
+		return &ui.UserError{Err: fmt.Errorf("signature verification failed for %s: %w — refusing to install", rel.TagName, verifyErr), Hint: signatureRefuseHint}
 	}
 	_, _ = fmt.Fprintf(out, "%s signature verified\n", ui.LabelSuccess.Render("✓"))
 	return nil
@@ -613,9 +618,17 @@ func downloadAndVerifyUpdate(ctx context.Context, out io.Writer, rel Release, as
 
 func newUpdateCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "update",
-		Short:   "Download and install the latest argus release",
-		Example: "  argus system update        # check and apply latest stable release\n  argus system update --pre  # include pre-releases",
+		Use:   "update",
+		Short: "Download and install the latest argus release",
+		Long: `Update downloads the latest argus release, verifies its checksum and
+signature, and installs it over the running binary.
+
+--pre includes pre-releases as update candidates. A pre-release can be cut
+before its signing step finishes (or from a draft), so it may legitimately
+fail signature verification — that's an expected tradeoff of opting into
+pre-releases, not a broken installation. The refusal message includes a
+recovery hint (scripts/install.sh, or a direct release download) either way.`,
+		Example: "  argus system update        # check and apply latest stable release\n  argus system update --pre  # include pre-releases (may fail signature verification)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			exePath, err := currentBinaryPath()
 			if err != nil {
@@ -628,7 +641,7 @@ func newUpdateCmd() *cobra.Command {
 			return runUpdate(cmd.Context(), cmd.OutOrStdout(), exePath, buildinfo.GetVersionOnly(), includePre)
 		},
 	}
-	cmd.Flags().Bool("pre", false, "include pre-releases in update check")
+	cmd.Flags().Bool("pre", false, "include pre-releases in update check (may lack a signature — see --help)")
 	return cmd
 }
 
