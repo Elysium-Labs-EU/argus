@@ -406,10 +406,13 @@ func TestExecuteReportsOrphansOnPartialFailure(t *testing.T) {
 		Base:   "main",
 		Log:    eventlog.New(&buf, "supervise", "r", nil),
 	}
-	plans := BuildPlan([]Worker{
+	plans, err := BuildPlan([]Worker{
 		{Task: "a", Branch: "feat-a", RepoRoot: t.TempDir()},
 		{Task: "b", Branch: "feat-b", RepoRoot: t.TempDir()},
 	}, "origin/main", nil, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
 	if _, err := execute(context.Background(), cfg, plans); err == nil {
 		t.Fatal("execute should return the spawn error")
 	}

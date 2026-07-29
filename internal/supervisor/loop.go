@@ -151,19 +151,45 @@ const defaultWorktreeDir = ".claude/worktrees"
 
 // WorktreePath resolves a worker's worktree directory from repoRoot, the
 // repo's configured worktree_dir (empty means defaultWorktreeDir), and
-// branch. dir containing ".." (or any other relative climb) is joined under
-// repoRoot rather than resolved against the process cwd, so a repo whose own
-// convention is a sibling directory next to the checkout (dir "..") lands
-// there deterministically regardless of where argus itself runs from. An
-// absolute dir is used as-is, entirely independent of repoRoot.
-func WorktreePath(repoRoot, dir, branch string) string {
+// branch, refusing two shapes that would corrupt or escape the intended
+// checkout: a resolved path identical to repoRoot itself (an absolute
+// worktree_dir combined with an empty or "." branch would point `git
+// worktree add` at the live checkout argus is meant to leave untouched), and
+// a branch containing a ".." path segment (a branch like "../../etc" would
+// climb outside both worktree_dir and repoRoot). dir containing ".." is
+// itself joined under repoRoot rather than resolved against the process cwd
+// — that is the supported escape hatch for a sibling-directory convention,
+// distinct from a *branch* trying to climb.
+func WorktreePath(repoRoot, dir, branch string) (string, error) {
+	if hasTraversalSegment(branch) {
+		return "", fmt.Errorf("branch %q contains a \"..\" path segment, refusing to build a worktree path from it", branch)
+	}
 	if dir == "" {
 		dir = defaultWorktreeDir
 	}
+	var path string
 	if filepath.IsAbs(dir) {
-		return filepath.Join(dir, branch)
+		path = filepath.Join(dir, branch)
+	} else {
+		path = filepath.Join(repoRoot, dir, branch)
 	}
-	return filepath.Join(repoRoot, dir, branch)
+	if filepath.Clean(path) == filepath.Clean(repoRoot) {
+		return "", fmt.Errorf("resolved worktree path %q is the repo root itself: refusing to run git worktree add there", path)
+	}
+	return path, nil
+}
+
+// hasTraversalSegment reports whether s, split on "/", contains a literal
+// ".." segment — not merely the substring ".." — so a legitimate branch name
+// like "fix-..-typo" is not a false positive, while "../../etc" or a bare
+// ".." is caught regardless of how many segments precede it.
+func hasTraversalSegment(s string) bool {
+	for seg := range strings.SplitSeq(filepath.ToSlash(s), "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildPlan resolves each worker into a concrete plan. Missing worktree paths are
@@ -172,12 +198,16 @@ func WorktreePath(repoRoot, dir, branch string) string {
 // can't drift. repoAllow and extraAllow are forwarded to settingsFor so every
 // worker's allowlist reflects the same repo-config and operator-supplied
 // extension the dry-run preview shows.
-func BuildPlan(workers []Worker, base string, repoAllow, extraAllow []string) []WorkerPlan {
+func BuildPlan(workers []Worker, base string, repoAllow, extraAllow []string) ([]WorkerPlan, error) {
 	plans := make([]WorkerPlan, len(workers))
 	for i := range workers {
 		w := workers[i]
 		if w.Worktree == "" {
-			w.Worktree = WorktreePath(w.RepoRoot, w.WorktreeDir, w.Branch)
+			wt, err := WorktreePath(w.RepoRoot, w.WorktreeDir, w.Branch)
+			if err != nil {
+				return nil, fmt.Errorf("resolving worktree path for %q: %w", w.Task, err)
+			}
+			w.Worktree = wt
 		}
 		if w.Label == "" {
 			// Fold in the task text so the herdr-visible label carries actual
@@ -199,7 +229,7 @@ func BuildPlan(workers []Worker, base string, repoAllow, extraAllow []string) []
 			Brief:    briefFor(&w, base),
 		}
 	}
-	return plans
+	return plans, nil
 }
 
 func briefFor(w *Worker, base string) string {
@@ -451,10 +481,13 @@ func envMap(env []string) map[string]string {
 // worker, watches and judges each one's status independently until it reaches a
 // terminal phase or ctx is canceled, then prints a metrics report.
 func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error {
-	plans := BuildPlan(workers, cfg.Base, cfg.RepoAllow, cfg.ExtraAllow)
-
-	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
+	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoAllow, cfg.ExtraAllow)
+	if err != nil {
 		return err
+	}
+
+	if verr := EnsureDistinctWorktrees(worktreePaths(plans)); verr != nil {
+		return verr
 	}
 
 	if dryRun {
@@ -539,7 +572,10 @@ func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 // or grinding on an existing PR branch — under the same deterministic observation
 // instead of eyeballing its pane scrollback.
 func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
-	plans := BuildPlan(workers, cfg.Base, cfg.RepoAllow, cfg.ExtraAllow)
+	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoAllow, cfg.ExtraAllow)
+	if err != nil {
+		return err
+	}
 	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
 		return err
 	}
