@@ -48,38 +48,38 @@ func resolveGatePolicy(f gateFlags, rc *repoconfig.Config) *supervisor.ReviewPol
 	return p
 }
 
-// resolveVerifyCommand applies an explicit --verify-cmd flag over this repo's
+// resolveGateVerifyCommand applies an explicit --verify-cmd flag over this repo's
 // .argus/config.yml verify_command over "" (no command configured — the
 // gate's prior behavior), the same explicit-flag-wins precedence
 // resolveGatePolicy and resolveSuperviseBase apply for their own sources.
 // It is not folded into gateFlags/resolveGatePolicy: unlike ReviewPolicy's
-// fields, VerifyCommand is not consumed by the pure Assess/gateVerdict
+// fields, GateVerifyCommand is not consumed by the pure Assess/gateVerdict
 // policy check, it is a shell command supervisor.Config threads to
-// RunVerifyCommand. explicit is cmd.Flags().Changed("verify-cmd"). rc is a
+// RunGateVerifyCommand. explicit is cmd.Flags().Changed("verify-cmd"). rc is a
 // pointer solely to avoid copying the struct at the call site.
-func resolveVerifyCommand(explicit bool, flagValue string, rc *repoconfig.Config) string {
+func resolveGateVerifyCommand(explicit bool, flagValue string, rc *repoconfig.Config) string {
 	if explicit {
 		return flagValue
 	}
-	if rc.VerifyCommand != "" {
-		return rc.VerifyCommand
+	if rc.GateVerifyCommand != "" {
+		return rc.GateVerifyCommand
 	}
 	return flagValue
 }
 
-// resolveWorktreeSetupCmd applies an explicit --worktree-setup-cmd flag over
+// resolveWorktreeBootstrapCommand applies an explicit --worktree-setup-cmd flag over
 // this repo's .argus/config.yml worktree_bootstrap_command over "" (no command
 // configured — a bare `git worktree add` with no bootstrap step, the prior
-// behavior), the same explicit-flag-wins precedence resolveVerifyCommand
+// behavior), the same explicit-flag-wins precedence resolveGateVerifyCommand
 // applies for its own source. explicit is
 // cmd.Flags().Changed("worktree-setup-cmd"). rc is a pointer solely to avoid
 // copying the struct at the call site.
-func resolveWorktreeSetupCmd(explicit bool, flagValue string, rc *repoconfig.Config) string {
+func resolveWorktreeBootstrapCommand(explicit bool, flagValue string, rc *repoconfig.Config) string {
 	if explicit {
 		return flagValue
 	}
-	if rc.WorktreeSetupCmd != "" {
-		return rc.WorktreeSetupCmd
+	if rc.WorktreeBootstrapCommand != "" {
+		return rc.WorktreeBootstrapCommand
 	}
 	return flagValue
 }
@@ -110,7 +110,7 @@ func resolveOwnerStaleAfter(explicit bool, flagValue time.Duration, rc *repoconf
 // repo's .argus/config.yml worktree_dir over "" (the flag's own default —
 // argus's own <repo>/.claude/worktrees/<branch> convention, see
 // supervisor.WorktreePath), the same explicit-flag-wins precedence
-// resolveWorktreeSetupCmd applies for its own source. explicit is
+// resolveWorktreeBootstrapCommand applies for its own source. explicit is
 // cmd.Flags().Changed("worktree-dir"). rc is a pointer solely to avoid
 // copying the struct at the call site.
 func resolveWorktreeDir(explicit bool, flagValue string, rc *repoconfig.Config) string {

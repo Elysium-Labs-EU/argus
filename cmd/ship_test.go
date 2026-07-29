@@ -960,13 +960,13 @@ func TestShipChangeSkipsDuplicateJiraNotificationOnRetry(t *testing.T) {
 	}
 }
 
-// TestShipChangeFailsWhenShipLintCommandFails covers the .argus/config.yml
+// TestShipChangeFailsWhenShipVerifyCommandCommandFails covers the .argus/config.yml
 // ship_lint gate: a failing command must stop shipChange before anything is
 // committed or pushed, not just get reported alongside a PR that already
 // opened.
-func TestShipChangeFailsWhenShipLintCommandFails(t *testing.T) {
+func TestShipChangeFailsWhenShipVerifyCommandCommandFails(t *testing.T) {
 	wt, cmd, _ := shipChangeTestSetup(t)
-	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipLint: "exit 1"}); err != nil {
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipVerifyCommand: "exit 1"}); err != nil {
 		t.Fatalf("seeding ship_lint config: %v", err)
 	}
 
@@ -991,12 +991,12 @@ func TestShipChangeFailsWhenShipLintCommandFails(t *testing.T) {
 	}
 }
 
-// TestShipChangeRunsPassingShipLintCommand is the success-path counterpart:
+// TestShipChangeRunsPassingShipVerifyCommandCommand is the success-path counterpart:
 // a configured ship_lint that exits zero does not block the normal
 // commit/push/open-PR flow.
-func TestShipChangeRunsPassingShipLintCommand(t *testing.T) {
+func TestShipChangeRunsPassingShipVerifyCommandCommand(t *testing.T) {
 	wt, cmd, _ := shipChangeTestSetup(t)
-	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipLint: "true"}); err != nil {
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipVerifyCommand: "true"}); err != nil {
 		t.Fatalf("seeding ship_lint config: %v", err)
 	}
 
@@ -1040,7 +1040,7 @@ func TestShipChangeFailsWhenConfiguredHookToolMissing(t *testing.T) {
 // --no-verify.
 func TestShipChangeGateRunsEvenWithForce(t *testing.T) {
 	wt, cmd, _ := shipChangeTestSetup(t)
-	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipLint: "exit 1"}); err != nil {
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipVerifyCommand: "exit 1"}); err != nil {
 		t.Fatalf("seeding ship_lint config: %v", err)
 	}
 

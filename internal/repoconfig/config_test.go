@@ -93,10 +93,10 @@ func TestSaveLoadRoundTripGateKeys(t *testing.T) {
 	}
 }
 
-func TestSaveLoadRoundTripShipLint(t *testing.T) {
+func TestSaveLoadRoundTripShipVerifyCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".argus", "config.yml")
-	want := Config{ShipLint: "make ci"}
+	want := Config{ShipVerifyCommand: "make ci"}
 	if err := Save(path, &want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -109,10 +109,10 @@ func TestSaveLoadRoundTripShipLint(t *testing.T) {
 	}
 }
 
-func TestSaveLoadRoundTripVerifyCommand(t *testing.T) {
+func TestSaveLoadRoundTripGateVerifyCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".argus", "config.yml")
-	want := Config{VerifyCommand: "make lint"}
+	want := Config{GateVerifyCommand: "make lint"}
 	if err := Save(path, &want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -173,10 +173,10 @@ func TestSaveLoadRoundTripLauncher(t *testing.T) {
 	}
 }
 
-func TestSaveLoadRoundTripWorktreeSetupCmd(t *testing.T) {
+func TestSaveLoadRoundTripWorktreeBootstrapCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".argus", "config.yml")
-	want := Config{WorktreeSetupCmd: "cp ../.env .env"}
+	want := Config{WorktreeBootstrapCommand: "cp ../.env .env"}
 	if err := Save(path, &want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -356,14 +356,14 @@ func TestLoadDeprecatedKeyAliasesStillParse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.ShipLint != "make ci" {
-		t.Errorf("ShipLint = %q, want %q (from deprecated ship_lint)", got.ShipLint, "make ci")
+	if got.ShipVerifyCommand != "make ci" {
+		t.Errorf("ShipVerifyCommand = %q, want %q (from deprecated ship_lint)", got.ShipVerifyCommand, "make ci")
 	}
-	if got.VerifyCommand != "make lint" {
-		t.Errorf("VerifyCommand = %q, want %q (from deprecated verify_command)", got.VerifyCommand, "make lint")
+	if got.GateVerifyCommand != "make lint" {
+		t.Errorf("GateVerifyCommand = %q, want %q (from deprecated verify_command)", got.GateVerifyCommand, "make lint")
 	}
-	if got.WorktreeSetupCmd != "cp ../.env .env" {
-		t.Errorf("WorktreeSetupCmd = %q, want %q (from deprecated worktree_setup_cmd)", got.WorktreeSetupCmd, "cp ../.env .env")
+	if got.WorktreeBootstrapCommand != "cp ../.env .env" {
+		t.Errorf("WorktreeBootstrapCommand = %q, want %q (from deprecated worktree_setup_cmd)", got.WorktreeBootstrapCommand, "cp ../.env .env")
 	}
 }
 
@@ -403,8 +403,8 @@ func TestLoadIntermediateWorktreeSetupCommandNameStillParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.WorktreeSetupCmd != "cp ../.env .env" {
-		t.Errorf("WorktreeSetupCmd = %q, want %q (from deprecated worktree_setup_command)", got.WorktreeSetupCmd, "cp ../.env .env")
+	if got.WorktreeBootstrapCommand != "cp ../.env .env" {
+		t.Errorf("WorktreeBootstrapCommand = %q, want %q (from deprecated worktree_setup_command)", got.WorktreeBootstrapCommand, "cp ../.env .env")
 	}
 	want := []DeprecatedKeyUse{{Old: "worktree_setup_command", New: "worktree_bootstrap_command"}}
 	if !reflect.DeepEqual(got.Deprecated, want) {
@@ -456,7 +456,7 @@ func TestEncodeYAMLNeverEmitsOldKeyNamesAfterLoadingOldNamedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load (reload): %v", err)
 	}
-	if reloaded.ShipLint != "make ci" || reloaded.VerifyCommand != "make lint" || reloaded.WorktreeSetupCmd != "cp ../.env .env" {
+	if reloaded.ShipVerifyCommand != "make ci" || reloaded.GateVerifyCommand != "make lint" || reloaded.WorktreeBootstrapCommand != "cp ../.env .env" {
 		t.Errorf("reloaded values = %+v, want the same values under the new names", reloaded)
 	}
 	if len(reloaded.Deprecated) != 0 {

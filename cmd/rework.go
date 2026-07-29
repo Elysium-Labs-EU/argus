@@ -246,14 +246,14 @@ func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, rev
 		reviewer = newReviewer(opts.reviewModel, resolveReviewEffort(opts.reviewEffortExplicit, opts.reviewEffort, &rc), logger)
 	}
 	cfg := &supervisor.Config{
-		Now:           time.Now,
-		Log:           logger,
-		Policy:        resolveGatePolicy(opts.gate, &rc),
-		Home:          home,
-		Base:          opts.base,
-		Reviewer:      reviewer,
-		ReviewNote:    rc.ReviewNote,
-		VerifyCommand: resolveVerifyCommand(opts.verifyCmdExplicit, opts.verifyCmd, &rc),
+		Now:               time.Now,
+		Log:               logger,
+		Policy:            resolveGatePolicy(opts.gate, &rc),
+		Home:              home,
+		Base:              opts.base,
+		Reviewer:          reviewer,
+		ReviewNote:        rc.ReviewNote,
+		GateVerifyCommand: resolveGateVerifyCommand(opts.verifyCmdExplicit, opts.verifyCmd, &rc),
 	}
 	return cfg, repoRoot, nil
 }

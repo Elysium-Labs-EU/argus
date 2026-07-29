@@ -577,18 +577,18 @@ func TestExecuteRefusesToSpawnIntoAPaneWithALiveAgent(t *testing.T) {
 // across the worktree_setup_cmd tests below: unlike a real `git worktree
 // add`, the fake herdr runner never actually creates worktreePath on disk, so
 // each test creates it itself first — the same state a real worktree create
-// would have left behind by the time RunWorktreeSetupCmd runs.
+// would have left behind by the time RunWorktreeBootstrapCommand runs.
 func worktreeCreateFakeReply(worktreePath string) string {
 	return `{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + worktreePath + `"}}}`
 }
 
-// TestPrepareWorktreeRunsConfiguredWorktreeSetupCmd proves a configured
+// TestPrepareWorktreeRunsConfiguredWorktreeBootstrapCommand proves a configured
 // worktree_setup_cmd actually runs, with the freshly created worktree as its
 // working directory — the mechanism issue #304 asks for: a repo whose task
 // depends on gitignored per-developer local config (env files, local
 // settings) needs a hook to bootstrap that config into every new worktree,
 // since a bare `git worktree add` never copies it.
-func TestPrepareWorktreeRunsConfiguredWorktreeSetupCmd(t *testing.T) {
+func TestPrepareWorktreeRunsConfiguredWorktreeBootstrapCommand(t *testing.T) {
 	repo := t.TempDir()
 	worktreePath := filepath.Join(repo, ".claude", "worktrees", "feat-x")
 	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
@@ -602,9 +602,9 @@ func TestPrepareWorktreeRunsConfiguredWorktreeSetupCmd(t *testing.T) {
 		return []byte(`{"result":{}}`), nil
 	}
 	cfg := &Config{
-		Client:           herdr.NewWithRunner(runner),
-		Base:             "main",
-		WorktreeSetupCmd: "pwd > setup-ran.txt",
+		Client:                   herdr.NewWithRunner(runner),
+		Base:                     "main",
+		WorktreeBootstrapCommand: "pwd > setup-ran.txt",
 	}
 	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "main", nil, nil)
 	if err != nil {
@@ -624,11 +624,11 @@ func TestPrepareWorktreeRunsConfiguredWorktreeSetupCmd(t *testing.T) {
 	}
 }
 
-// TestExecuteAbortsSpawnWhenWorktreeSetupCmdFails is the regression test for
+// TestExecuteAbortsSpawnWhenWorktreeBootstrapCommandFails is the regression test for
 // issue #304's other requirement: a non-zero exit from worktree_setup_cmd
 // must fail worktree creation the same way a `git worktree add` failure
 // already does, blocking the worker's agent from ever being spawned.
-func TestExecuteAbortsSpawnWhenWorktreeSetupCmdFails(t *testing.T) {
+func TestExecuteAbortsSpawnWhenWorktreeBootstrapCommandFails(t *testing.T) {
 	repo := t.TempDir()
 	worktreePath := filepath.Join(repo, ".claude", "worktrees", "feat-x")
 	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
@@ -646,11 +646,11 @@ func TestExecuteAbortsSpawnWhenWorktreeSetupCmdFails(t *testing.T) {
 		return []byte(`{"result":{}}`), nil
 	}
 	cfg := &Config{
-		Client:           herdr.NewWithRunner(runner),
-		Now:              time.Now,
-		Base:             "main",
-		Log:              eventlog.New(io.Discard, "supervise", "r", nil),
-		WorktreeSetupCmd: "echo boom >&2; exit 1",
+		Client:                   herdr.NewWithRunner(runner),
+		Now:                      time.Now,
+		Base:                     "main",
+		Log:                      eventlog.New(io.Discard, "supervise", "r", nil),
+		WorktreeBootstrapCommand: "echo boom >&2; exit 1",
 	}
 	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "main", nil, nil)
 	if err != nil {

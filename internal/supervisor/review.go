@@ -181,7 +181,7 @@ func underReportReason(st *workerState) string {
 // escalates too via st.testUnverifiable, but only as a waivable reason: it
 // is not proof the claim is false, just that this gate couldn't confirm it),
 // when this repo's own configured verify command fails to reproduce clean
-// (st.verifyMismatch, from RunVerifyCommand — the same bar `argus ship`'s
+// (st.verifyMismatch, from RunGateVerifyCommand — the same bar `argus ship`'s
 // `git commit` enforces via the repo's own hooks), and when herdr's own
 // agent_status — not status.json — is the only evidence of the worker's real
 // state (checkHerdrStuck in loop.go), which forces escalation even if

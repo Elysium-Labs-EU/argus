@@ -90,20 +90,20 @@ type Config struct {
 	// reviewOne's prompt carries it. Empty means no repo-specific review
 	// criteria, today's behavior.
 	ReviewNote string
-	// VerifyCommand, when set, is a shell command the gate runs in a
-	// worker's worktree (via RunVerifyCommand) once it reaches a terminal
+	// GateVerifyCommand, when set, is a shell command the gate runs in a
+	// worker's worktree (via RunGateVerifyCommand) once it reaches a terminal
 	// phase, mirroring the same bar `argus ship` enforces (a repo's own
 	// lint/build/pre-commit) so a clean verdict can't be undone by a hook
 	// failure ship only discovers at `git commit` time. Empty means no
 	// command is configured — the gate's prior behavior, unchanged.
-	VerifyCommand string
-	// WorktreeSetupCmd is the repo's own .argus/config.yml worktree_setup_cmd
+	GateVerifyCommand string
+	// WorktreeBootstrapCommand is the repo's own .argus/config.yml worktree_setup_cmd
 	// (see internal/repoconfig), run once by prepareWorktree right after
 	// herdr's WorktreeCreate succeeds and before the worker's agent is
-	// spawned (see RunWorktreeSetupCmd). Empty means no command is
+	// spawned (see RunWorktreeBootstrapCommand). Empty means no command is
 	// configured — a bare `git worktree add` with no bootstrap step, the
 	// prior behavior.
-	WorktreeSetupCmd string
+	WorktreeBootstrapCommand string
 	// ParentWorkspace, when set, is the herdr workspace id every spawned
 	// worker's worktree pane nests into as a tab instead of staying in its own
 	// new top-level workspace (see prepareWorktree's use of herdr.Client.PaneMove).
@@ -600,7 +600,7 @@ func reconcile(ctx context.Context, cfg *Config, states []*workerState) {
 	measureReconcileDiffs(ctx, cfg, states)
 	captureReviewDiffs(ctx, cfg, states)
 	verifyClaimedTests(ctx, states)
-	runConfiguredVerifyCommand(ctx, cfg, states)
+	runConfiguredGateVerifyCommand(ctx, cfg, states)
 
 	// Non-default --launcher never produces a Claude Code transcript, so
 	// checkPlanEvidence would only ever report false — leave plan evidence
@@ -651,7 +651,7 @@ func measureReconcileDiffs(ctx context.Context, cfg *Config, states []*workerSta
 	}
 }
 
-// captureReviewDiffs must run before verifyClaimedTests/runConfiguredVerifyCommand:
+// captureReviewDiffs must run before verifyClaimedTests/runConfiguredGateVerifyCommand:
 // those execute worker-supplied commands that can dirty the worktree
 // (coverage files, regenerated lockfiles), and the reviewer must never see
 // that noise.
@@ -682,12 +682,12 @@ func verifyClaimedTests(ctx context.Context, states []*workerState) {
 	}
 }
 
-// runConfiguredVerifyCommand mirrors the bar `argus ship`'s `git commit`
-// hooks enforce (Config.VerifyCommand), so a failure surfaces here instead
+// runConfiguredGateVerifyCommand mirrors the bar `argus ship`'s `git commit`
+// hooks enforce (Config.GateVerifyCommand), so a failure surfaces here instead
 // of at ship time; it runs after captureReviewDiffs for the same reason —
 // its own worktree side effects must not leak into the diff already shown
 // to the reviewer.
-func runConfiguredVerifyCommand(ctx context.Context, cfg *Config, states []*workerState) {
+func runConfiguredGateVerifyCommand(ctx context.Context, cfg *Config, states []*workerState) {
 	for _, st := range states {
 		if !st.hasFile && st.herdrEscalation == "" {
 			continue
@@ -695,7 +695,7 @@ func runConfiguredVerifyCommand(ctx context.Context, cfg *Config, states []*work
 		if st.status.Phase != protocol.PhaseAwaitingReview && st.status.Phase != protocol.PhaseDone {
 			continue
 		}
-		st.verifyMismatch = RunVerifyCommand(ctx, st.plan.Worktree, cfg.VerifyCommand)
+		st.verifyMismatch = RunGateVerifyCommand(ctx, st.plan.Worktree, cfg.GateVerifyCommand)
 	}
 }
 
@@ -908,8 +908,8 @@ type workerState struct {
 	// so gateVerdict folds it into Reasons only, not HardReasons: a reviewer
 	// can waive it, where a reproduced mismatch cannot be.
 	testUnverifiable []string
-	// verifyMismatch holds the RunVerifyCommand failure reason once the repo's
-	// configured verify command (Config.VerifyCommand) has been re-run against
+	// verifyMismatch holds the RunGateVerifyCommand failure reason once the repo's
+	// configured verify command (Config.GateVerifyCommand) has been re-run against
 	// a terminal-phase worker — empty means either no command is configured,
 	// it has not run yet, or it ran clean.
 	verifyMismatch string
@@ -1122,7 +1122,7 @@ func provisionWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) error {
 	// config) sees the worktree exactly as `git worktree add` left it. A
 	// failure here fails worktree creation the same way a WorktreeCreate
 	// error already does — execute never reaches PaneRun for this worker.
-	if err := RunWorktreeSetupCmd(ctx, p.Worktree, cfg.WorktreeSetupCmd); err != nil {
+	if err := RunWorktreeBootstrapCommand(ctx, p.Worktree, cfg.WorktreeBootstrapCommand); err != nil {
 		return fmt.Errorf("running worktree_setup_cmd for %s: %w", p.Task, err)
 	}
 	// A worktree directory can carry a leftover status.json/verdict.json from an

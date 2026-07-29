@@ -84,49 +84,49 @@ func TestResolveGatePolicyRepoConfigMaxDiffLinesZeroIsMeaningful(t *testing.T) {
 	}
 }
 
-func TestResolveVerifyCommandExplicitFlagWinsOutright(t *testing.T) {
-	rc := repoconfig.Config{VerifyCommand: "make ci"}
-	got := resolveVerifyCommand(true, "make lint", &rc)
+func TestResolveGateVerifyCommandExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{GateVerifyCommand: "make ci"}
+	got := resolveGateVerifyCommand(true, "make lint", &rc)
 	if got != "make lint" {
-		t.Errorf("resolveVerifyCommand = %q, want the explicit flag value", got)
+		t.Errorf("resolveGateVerifyCommand = %q, want the explicit flag value", got)
 	}
 }
 
-func TestResolveVerifyCommandPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
-	rc := repoconfig.Config{VerifyCommand: "make ci"}
-	got := resolveVerifyCommand(false, "", &rc)
+func TestResolveGateVerifyCommandPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{GateVerifyCommand: "make ci"}
+	got := resolveGateVerifyCommand(false, "", &rc)
 	if got != "make ci" {
-		t.Errorf("resolveVerifyCommand = %q, want the repo config value", got)
+		t.Errorf("resolveGateVerifyCommand = %q, want the repo config value", got)
 	}
 }
 
-func TestResolveVerifyCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
-	got := resolveVerifyCommand(false, "", &repoconfig.Config{})
+func TestResolveGateVerifyCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveGateVerifyCommand(false, "", &repoconfig.Config{})
 	if got != "" {
-		t.Errorf("resolveVerifyCommand = %q, want empty (no verify command configured anywhere)", got)
+		t.Errorf("resolveGateVerifyCommand = %q, want empty (no verify command configured anywhere)", got)
 	}
 }
 
-func TestResolveWorktreeSetupCmdExplicitFlagWinsOutright(t *testing.T) {
-	rc := repoconfig.Config{WorktreeSetupCmd: "cp ../.env .env"}
-	got := resolveWorktreeSetupCmd(true, "cp ../.env.local .env.local", &rc)
+func TestResolveWorktreeBootstrapCommandExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{WorktreeBootstrapCommand: "cp ../.env .env"}
+	got := resolveWorktreeBootstrapCommand(true, "cp ../.env.local .env.local", &rc)
 	if got != "cp ../.env.local .env.local" {
-		t.Errorf("resolveWorktreeSetupCmd = %q, want the explicit flag value", got)
+		t.Errorf("resolveWorktreeBootstrapCommand = %q, want the explicit flag value", got)
 	}
 }
 
-func TestResolveWorktreeSetupCmdPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
-	rc := repoconfig.Config{WorktreeSetupCmd: "cp ../.env .env"}
-	got := resolveWorktreeSetupCmd(false, "", &rc)
+func TestResolveWorktreeBootstrapCommandPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{WorktreeBootstrapCommand: "cp ../.env .env"}
+	got := resolveWorktreeBootstrapCommand(false, "", &rc)
 	if got != "cp ../.env .env" {
-		t.Errorf("resolveWorktreeSetupCmd = %q, want the repo config value", got)
+		t.Errorf("resolveWorktreeBootstrapCommand = %q, want the repo config value", got)
 	}
 }
 
-func TestResolveWorktreeSetupCmdFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
-	got := resolveWorktreeSetupCmd(false, "", &repoconfig.Config{})
+func TestResolveWorktreeBootstrapCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveWorktreeBootstrapCommand(false, "", &repoconfig.Config{})
 	if got != "" {
-		t.Errorf("resolveWorktreeSetupCmd = %q, want empty (no worktree setup command configured anywhere)", got)
+		t.Errorf("resolveWorktreeBootstrapCommand = %q, want empty (no worktree setup command configured anywhere)", got)
 	}
 }
 

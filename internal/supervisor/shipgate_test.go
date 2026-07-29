@@ -107,17 +107,17 @@ func TestEnforceHooksRunsPreCommitFramework(t *testing.T) {
 	}
 }
 
-func TestRunShipLintEmptyCommandIsNoop(t *testing.T) {
-	if err := RunShipLint(context.Background(), t.TempDir(), ""); err != nil {
-		t.Fatalf("RunShipLint with no command: %v", err)
+func TestRunShipVerifyCommandEmptyCommandIsNoop(t *testing.T) {
+	if err := RunShipVerifyCommand(context.Background(), t.TempDir(), ""); err != nil {
+		t.Fatalf("RunShipVerifyCommand with no command: %v", err)
 	}
-	if err := RunShipLint(context.Background(), t.TempDir(), "   "); err != nil {
-		t.Fatalf("RunShipLint with a blank command: %v", err)
+	if err := RunShipVerifyCommand(context.Background(), t.TempDir(), "   "); err != nil {
+		t.Fatalf("RunShipVerifyCommand with a blank command: %v", err)
 	}
 }
 
-func TestRunShipLintFailingCommandErrors(t *testing.T) {
-	err := RunShipLint(context.Background(), t.TempDir(), "echo boom; exit 1")
+func TestRunShipVerifyCommandFailingCommandErrors(t *testing.T) {
+	err := RunShipVerifyCommand(context.Background(), t.TempDir(), "echo boom; exit 1")
 	if err == nil {
 		t.Fatal("want error when ship_lint exits non-zero")
 	}
@@ -126,8 +126,8 @@ func TestRunShipLintFailingCommandErrors(t *testing.T) {
 	}
 }
 
-func TestRunShipLintPassingCommandSucceeds(t *testing.T) {
-	if err := RunShipLint(context.Background(), t.TempDir(), "true"); err != nil {
-		t.Fatalf("RunShipLint with a passing command: %v", err)
+func TestRunShipVerifyCommandPassingCommandSucceeds(t *testing.T) {
+	if err := RunShipVerifyCommand(context.Background(), t.TempDir(), "true"); err != nil {
+		t.Fatalf("RunShipVerifyCommand with a passing command: %v", err)
 	}
 }

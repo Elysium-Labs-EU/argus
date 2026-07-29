@@ -72,14 +72,14 @@ All keys are optional; a missing file is equivalent to an empty one.
   verdict and then fails at `ship`'s `git commit` because the repo's own
   pre-commit hooks ran a check the gate never reproduced. A non-zero exit
   (after one retry, to absorb shared-machine flakiness — see
-  `RunVerifyCommand`) is an unwaivable escalation: no reviewer verdict can
+  `RunGateVerifyCommand`) is an unwaivable escalation: no reviewer verdict can
   approve past it, the same treatment a reproduced test-claim mismatch gets.
   Precedence: an explicit `--verify-cmd` flag, then this key, then unset (no
   command runs — today's prior behavior). Unset by default; a repo owner
   opts in.
 - **`worktree_bootstrap_command`** — a shell command run once, synchronously, inside
   a freshly created worktree, right after `git worktree add` succeeds and
-  before the worker's agent is spawned (see `RunWorktreeSetupCmd`). Use this
+  before the worker's agent is spawned (see `RunWorktreeBootstrapCommand`). Use this
   when a repo's tasks depend on gitignored per-developer local config (env
   files, local settings) that exists only in the original checkout — a plain
   `git worktree add` never copies it, so without this hook a spawned worker

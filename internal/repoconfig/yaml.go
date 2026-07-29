@@ -63,14 +63,14 @@ func encodeYAML(cfg *Config) string {
 	if cfg.ReviewNote != "" {
 		fmt.Fprintf(&b, "review_note: %s\n", quoteYAML(cfg.ReviewNote))
 	}
-	if cfg.ShipLint != "" {
-		fmt.Fprintf(&b, "ship_verify_command: %s\n", quoteYAML(cfg.ShipLint))
+	if cfg.ShipVerifyCommand != "" {
+		fmt.Fprintf(&b, "ship_verify_command: %s\n", quoteYAML(cfg.ShipVerifyCommand))
 	}
-	if cfg.VerifyCommand != "" {
-		fmt.Fprintf(&b, "gate_verify_command: %s\n", quoteYAML(cfg.VerifyCommand))
+	if cfg.GateVerifyCommand != "" {
+		fmt.Fprintf(&b, "gate_verify_command: %s\n", quoteYAML(cfg.GateVerifyCommand))
 	}
-	if cfg.WorktreeSetupCmd != "" {
-		fmt.Fprintf(&b, "worktree_bootstrap_command: %s\n", quoteYAML(cfg.WorktreeSetupCmd))
+	if cfg.WorktreeBootstrapCommand != "" {
+		fmt.Fprintf(&b, "worktree_bootstrap_command: %s\n", quoteYAML(cfg.WorktreeBootstrapCommand))
 	}
 	if cfg.TitlePrefixTemplate != "" {
 		fmt.Fprintf(&b, "title_prefix_template: %s\n", quoteYAML(cfg.TitlePrefixTemplate))
@@ -224,11 +224,11 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 	case "review_note":
 		cfg.ReviewNote = value
 	case "ship_verify_command":
-		cfg.ShipLint = value
+		cfg.ShipVerifyCommand = value
 	case "gate_verify_command":
-		cfg.VerifyCommand = value
+		cfg.GateVerifyCommand = value
 	case "worktree_bootstrap_command":
-		cfg.WorktreeSetupCmd = value
+		cfg.WorktreeBootstrapCommand = value
 	case "title_prefix_template":
 		cfg.TitlePrefixTemplate = value
 	case "owner_stale_after":

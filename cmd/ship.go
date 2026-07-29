@@ -416,7 +416,7 @@ func warnJiraPostShip(out io.Writer, logger *eventlog.Logger, key string, err er
 // enforceShipGate runs this repo's hook/lint enforcement before shipChange
 // commits anything: any lefthook/pre-commit-framework config found in the
 // worktree (supervisor.EnforceHooks), then the repo's own optional ship_lint
-// command from .argus/config.yml (supervisor.RunShipLint). It is unconditional
+// command from .argus/config.yml (supervisor.RunShipVerifyCommand). It is unconditional
 // — unlike checkApproved, --force does not skip it — because the point is to
 // close the --no-verify bypass even for a human who has decided to ship an
 // unreviewed change; letting --force also skip this would just relocate the
@@ -434,7 +434,7 @@ func enforceShipGate(ctx context.Context, out io.Writer, worktree string) error 
 		return fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)
 	}
 	warnDeprecatedConfigKeys(out, &rc)
-	return supervisor.RunShipLint(ctx, worktree, rc.ShipLint)
+	return supervisor.RunShipVerifyCommand(ctx, worktree, rc.ShipVerifyCommand)
 }
 
 // checkApproved refuses to ship a worktree that argus never cleared. supervise

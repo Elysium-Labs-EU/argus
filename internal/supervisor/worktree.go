@@ -13,12 +13,12 @@ import (
 )
 
 // worktreeSetupCmdTimeout bounds one run of a repo's configured
-// worktree_setup_cmd (see repoconfig.Config.WorktreeSetupCmd), so a hung
+// worktree_setup_cmd (see repoconfig.Config.WorktreeBootstrapCommand), so a hung
 // bootstrap script fails worktree creation instead of blocking execute
 // forever.
 const worktreeSetupCmdTimeout = 5 * time.Minute
 
-// RunWorktreeSetupCmd runs a repo's own configured worktree_setup_cmd once,
+// RunWorktreeBootstrapCommand runs a repo's own configured worktree_setup_cmd once,
 // synchronously, inside a freshly created worktree — the hook a repo whose
 // task depends on gitignored per-developer local config (env files, local
 // settings) needs to bootstrap that config into every new worktree, since
@@ -31,7 +31,7 @@ const worktreeSetupCmdTimeout = 5 * time.Minute
 // as an error carrying the command's combined output, the same way a `git
 // worktree add` failure already fails worktree creation — prepareWorktree's
 // caller treats this identically, aborting before the worker is spawned.
-func RunWorktreeSetupCmd(ctx context.Context, worktree, cmdStr string) error {
+func RunWorktreeBootstrapCommand(ctx context.Context, worktree, cmdStr string) error {
 	if cmdStr == "" {
 		return nil
 	}

@@ -31,19 +31,19 @@ import (
 // WorkerPlacement stays a plain string (not a pointer) because its empty
 // value already means "unset" — supervise treats "" identically to the
 // --worker-placement default "workspace", so there is nothing to
-// distinguish an absent key from. ShipLint is likewise a plain string: an
-// empty value means ship runs no extra command, just its built-in hook
-// detection (see supervisor.EnforceHooks/RunShipLint).
-// VerifyCommand is not part of ReviewPolicy: it is not a pure policy check
-// like the others, it is a shell command the gate executes in the worker's
-// worktree (see supervisor.Config.VerifyCommand) — an empty string means the
-// same "not configured, skip" as an absent key, so it needs no pointer
-// either. VerifyCommand and ShipLint are deliberately distinct checks at
-// different points in the pipeline: VerifyCommand runs in the gate, before a
-// verdict is recorded, so a failure is an unwaivable escalation the reviewer
-// sees; ShipLint (and EnforceHooks) runs controller-side at ship time, right
-// before commit, as the last backstop regardless of how the verdict was
-// reached.
+// distinguish an absent key from. ShipVerifyCommand is likewise a plain
+// string: an empty value means ship runs no extra command, just its
+// built-in hook detection (see supervisor.EnforceHooks/RunShipVerifyCommand).
+// GateVerifyCommand is not part of ReviewPolicy: it is not a pure policy
+// check like the others, it is a shell command the gate executes in the
+// worker's worktree (see supervisor.Config.GateVerifyCommand) — an empty
+// string means the same "not configured, skip" as an absent key, so it
+// needs no pointer either. GateVerifyCommand and ShipVerifyCommand are
+// deliberately distinct checks at different points in the pipeline:
+// GateVerifyCommand runs in the gate, before a verdict is recorded, so a
+// failure is an unwaivable escalation the reviewer sees; ShipVerifyCommand
+// (and EnforceHooks) runs controller-side at ship time, right before
+// commit, as the last backstop regardless of how the verdict was reached.
 // gate_verify_command is also the one general-purpose escape hatch for a
 // repo-specific mechanical rule supervisor.ReviewPolicy has no field for:
 // MaxDiffLines/ProofRequiredPaths/AlwaysReviewPaths are a closed, fixed set
@@ -54,24 +54,25 @@ import (
 // reaches a terminal phase, right before a verdict is recorded — not
 // continuously during planning/working — so a violation surfaces at review
 // time, not the moment the worker introduces it.
-// WorktreeSetupCmd is a third, earlier shell command: it runs once
-// in a freshly created worktree, right after `git worktree add` succeeds and
-// before the worker's agent is spawned (see supervisor.RunWorktreeSetupCmd),
-// so a repo whose task depends on gitignored per-developer local config
-// (env files, local settings) that only exists in the original checkout can
-// bootstrap it into every worktree instead of a worker hitting a silent,
-// confusing file-not-found failure. Empty means no command is configured —
-// the prior behavior, a bare `git worktree add` with no bootstrap step.
+// WorktreeBootstrapCommand is a third, earlier shell command: it runs once
+// in a freshly created worktree, right after `git worktree add` succeeds
+// and before the worker's agent is spawned (see
+// supervisor.RunWorktreeBootstrapCommand), so a repo whose task depends on
+// gitignored per-developer local config (env files, local settings) that
+// only exists in the original checkout can bootstrap it into every
+// worktree instead of a worker hitting a silent, confusing file-not-found
+// failure. Empty means no command is configured — the prior behavior, a
+// bare `git worktree add` with no bootstrap step.
 type Config struct {
-	BaseBranch      string
-	WorkerPlacement string
-	BriefNote       string
-	ReviewNote      string
-	ShipLint        string
-	VerifyCommand   string
-	// WorktreeSetupCmd runs once, synchronously, in a freshly created
+	BaseBranch        string
+	WorkerPlacement   string
+	BriefNote         string
+	ReviewNote        string
+	ShipVerifyCommand string
+	GateVerifyCommand string
+	// WorktreeBootstrapCommand runs once, synchronously, in a freshly created
 	// worktree, right after `git worktree add` succeeds and before the
-	// worker's agent is spawned (see supervisor.RunWorktreeSetupCmd) — with
+	// worker's agent is spawned (see supervisor.RunWorktreeBootstrapCommand) — with
 	// cwd already at the resolved WorktreeDir location, since `git worktree
 	// add` already succeeded there. It must never attempt to create or
 	// relocate the worktree itself (git will refuse). A script that
@@ -80,12 +81,12 @@ type Config struct {
 	// if WorktreeDir changes the nesting depth; prefer deriving the repo
 	// root at runtime (`git rev-parse --show-toplevel`) over a hardcoded hop
 	// count.
-	WorktreeSetupCmd string
-	ReviewEffort     string
+	WorktreeBootstrapCommand string
+	ReviewEffort             string
 	// Launcher is the command started in each spawned worker pane, mirroring
 	// supervise's own --launcher flag. Empty behaves like supervisor.
 	// DefaultLauncher was chosen: the same "not configured, skip" shape as
-	// VerifyCommand/ShipLint, no pointer needed. An explicit --launcher flag
+	// GateVerifyCommand/ShipVerifyCommand, no pointer needed. An explicit --launcher flag
 	// still overrides this.
 	Launcher string
 	// Forge names the API shape ("gitlab" or "gitea") for a repo whose host
@@ -104,7 +105,7 @@ type Config struct {
 	// whose own convention is a sibling directory next to the checkout rather
 	// than a nested one; an absolute value is used as-is. Changing this
 	// shifts the worktree's nesting depth relative to the original checkout
-	// — see WorktreeSetupCmd's own comment if that command hardcodes a
+	// — see WorktreeBootstrapCommand's own comment if that command hardcodes a
 	// relative hop count back to it.
 	WorktreeDir string
 	// TitlePrefixTemplate, when set, is a required prefix ship mechanically

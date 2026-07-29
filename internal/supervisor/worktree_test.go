@@ -80,16 +80,16 @@ func TestSettingsForAppendsRepoAndExtraAllow(t *testing.T) {
 	}
 }
 
-func TestRunWorktreeSetupCmdEmptyIsNoop(t *testing.T) {
-	if err := RunWorktreeSetupCmd(context.Background(), t.TempDir(), ""); err != nil {
+func TestRunWorktreeBootstrapCommandEmptyIsNoop(t *testing.T) {
+	if err := RunWorktreeBootstrapCommand(context.Background(), t.TempDir(), ""); err != nil {
 		t.Fatalf("empty worktree_setup_cmd should be a no-op, got %v", err)
 	}
 }
 
-func TestRunWorktreeSetupCmdRunsInWorktree(t *testing.T) {
+func TestRunWorktreeBootstrapCommandRunsInWorktree(t *testing.T) {
 	wt := t.TempDir()
-	if err := RunWorktreeSetupCmd(context.Background(), wt, "pwd > marker.txt"); err != nil {
-		t.Fatalf("RunWorktreeSetupCmd: %v", err)
+	if err := RunWorktreeBootstrapCommand(context.Background(), wt, "pwd > marker.txt"); err != nil {
+		t.Fatalf("RunWorktreeBootstrapCommand: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(wt, "marker.txt"))
 	if err != nil {
@@ -100,8 +100,8 @@ func TestRunWorktreeSetupCmdRunsInWorktree(t *testing.T) {
 	}
 }
 
-func TestRunWorktreeSetupCmdFailureCarriesOutput(t *testing.T) {
-	err := RunWorktreeSetupCmd(context.Background(), t.TempDir(), "echo boom >&2; exit 1")
+func TestRunWorktreeBootstrapCommandFailureCarriesOutput(t *testing.T) {
+	err := RunWorktreeBootstrapCommand(context.Background(), t.TempDir(), "echo boom >&2; exit 1")
 	if err == nil {
 		t.Fatal("non-zero exit should return an error, got nil")
 	}

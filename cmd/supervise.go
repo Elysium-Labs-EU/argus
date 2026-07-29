@@ -143,8 +143,8 @@ each pane's directory in --panes mode).`,
 				proofRequiredExplicit: cmd.Flags().Changed("proof-required-path"),
 				alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
 			}, &rc)
-			verifyCommand := resolveVerifyCommand(cmd.Flags().Changed("verify-cmd"), verifyCmd, &rc)
-			worktreeSetupCommand := resolveWorktreeSetupCmd(cmd.Flags().Changed("worktree-setup-cmd"), worktreeSetupCmd, &rc)
+			verifyCommand := resolveGateVerifyCommand(cmd.Flags().Changed("verify-cmd"), verifyCmd, &rc)
+			worktreeSetupCommand := resolveWorktreeBootstrapCommand(cmd.Flags().Changed("worktree-setup-cmd"), worktreeSetupCmd, &rc)
 
 			return runSupervision(cmd, client, workers, &superviseOpts{
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
@@ -389,25 +389,25 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 	}
 
 	cfg := &supervisor.Config{
-		Out:               cmd.OutOrStdout(),
-		Now:               time.Now,
-		Client:            client,
-		Log:               logger,
-		Base:              o.base,
-		Home:              home,
-		Launcher:          o.launcher,
-		ParentWorkspace:   parentWS,
-		ScrubEnv:          append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
-		Interval:          o.interval,
-		Timeout:           o.timeout,
-		ReviewConcurrency: o.reviewConcurrency,
-		WorkerRuntime:     o.workerRuntime,
-		RepoAllow:         o.repoAllow,
-		ExtraAllow:        o.allow,
-		Policy:            o.policy,
-		ReviewNote:        o.reviewNote,
-		VerifyCommand:     o.verifyCommand,
-		WorktreeSetupCmd:  o.worktreeSetupCmd,
+		Out:                      cmd.OutOrStdout(),
+		Now:                      time.Now,
+		Client:                   client,
+		Log:                      logger,
+		Base:                     o.base,
+		Home:                     home,
+		Launcher:                 o.launcher,
+		ParentWorkspace:          parentWS,
+		ScrubEnv:                 append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
+		Interval:                 o.interval,
+		Timeout:                  o.timeout,
+		ReviewConcurrency:        o.reviewConcurrency,
+		WorkerRuntime:            o.workerRuntime,
+		RepoAllow:                o.repoAllow,
+		ExtraAllow:               o.allow,
+		Policy:                   o.policy,
+		ReviewNote:               o.reviewNote,
+		GateVerifyCommand:        o.verifyCommand,
+		WorktreeBootstrapCommand: o.worktreeSetupCmd,
 		// Resolved once for this whole invocation (supervise has no --owner
 		// flag of its own — see ownership.ResolveOwnerID's doc) so every
 		// worker this run spawns shares one lease identity rather than each
@@ -980,7 +980,7 @@ func repoBriefNote(out io.Writer, repoPath string) string {
 //
 // The lint/build/pre-commit sentence below closes the other half of the same
 // gap a configured verify_command closes on the gate side (see
-// resolveVerifyCommand): `argus ship`'s `git commit` runs whatever hooks the
+// resolveGateVerifyCommand): `argus ship`'s `git commit` runs whatever hooks the
 // target repo has wired up (e.g. lefthook running golangci-lint), so a diff
 // that never ran them locally can earn a clean gate verdict and still fail
 // at commit time. It stays deliberately toolchain-agnostic — argus has no
