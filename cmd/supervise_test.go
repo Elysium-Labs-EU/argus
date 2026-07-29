@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,7 +38,7 @@ func TestSpawnWorkersIssuesOnlyPassesGuard(t *testing.T) {
 	// into tasks/branches. repo is a non-git tempdir so it fails downstream
 	// (resolving the forge) instead — proof the guard itself let it through.
 	client := fakeClient()
-	_, err := spawnWorkers(context.Background(), client, &workerInput{repo: t.TempDir()}, []int{1}, nil, nil, jiraSpawnOpts{}, "", false)
+	_, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{repo: t.TempDir()}, []int{1}, nil, nil, jiraSpawnOpts{}, "", false)
 	if err == nil {
 		t.Fatal("want a downstream error resolving the forge for a non-git repo")
 	}
@@ -406,7 +407,7 @@ func TestSpawnWorkersTasksFileMultiLineBriefWithSingleBranchErrors(t *testing.T)
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	_, err := spawnWorkers(context.Background(), client, &workerInput{
+	_, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{
 		repo: "/pinned", tasksFile: path, branches: []string{"single-branch"},
 	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
 	if err == nil {
@@ -414,6 +415,37 @@ func TestSpawnWorkersTasksFileMultiLineBriefWithSingleBranchErrors(t *testing.T)
 	}
 	if !strings.Contains(err.Error(), "3 tasks but 1 branches") {
 		t.Errorf("error should name the mismatched counts, got: %v", err)
+	}
+}
+
+// TestSpawnWorkersTasksFileParagraphNoBranchesErrors is the end-to-end
+// regression for issue #334: the count-mismatch check above (issue #327)
+// only fires once --branches is given at all, so a --tasks-file paragraph
+// brief passed with no --branches — the actual live-session repro, where a
+// multi-paragraph brief with blank lines between paragraphs was intended as
+// a single worker — sailed straight through buildWorkers' auto-default path
+// (TestBuildWorkersNoBranchesStillDefaultsWithMismatchedTaskCount) and
+// silently produced one worker per line. The blank-line check inside
+// loadTasksFile must catch it before that default path is ever reached, with
+// no --branches involved at all.
+func TestSpawnWorkersTasksFileParagraphNoBranchesErrors(t *testing.T) {
+	client := fakeClient()
+	brief := "Fix the parser so it handles nested quotes.\n\n" +
+		"It should also handle escaped delimiters and trailing commas,\n" +
+		"and emit a clear error message when the input is malformed.\n"
+	path := filepath.Join(t.TempDir(), "tasks.txt")
+	if err := os.WriteFile(path, []byte(brief), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{
+		repo: "/pinned", tasksFile: path,
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
+	if err == nil {
+		t.Fatal("want error: a paragraph-shaped --tasks-file brief must be refused even with no --branches given")
+	}
+	if !strings.Contains(err.Error(), "blank line") {
+		t.Errorf("error should name the blank line, got: %v", err)
 	}
 }
 
@@ -708,7 +740,7 @@ func TestLoadTasksFileSurvivesCommasAndQuotes(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	tasks, err := loadTasksFile(path)
+	tasks, err := loadTasksFile(io.Discard, path)
 	if err != nil {
 		t.Fatalf("loadTasksFile: %v", err)
 	}
@@ -717,20 +749,91 @@ func TestLoadTasksFileSurvivesCommasAndQuotes(t *testing.T) {
 	}
 }
 
-func TestLoadTasksFileMultipleLinesSkipsBlank(t *testing.T) {
+// TestLoadTasksFileInteriorBlankLineErrors pins issue #334: a blank line
+// between two non-blank lines is the paragraph-separator shape a
+// multi-paragraph brief pasted into --tasks-file by mistake actually
+// produces. Before this, loadTasksFile silently dropped the blank line and
+// treated the two paragraphs' worth of sentences as separate one-line tasks
+// — with no --branches count-mismatch to catch it when --branches was never
+// given at all (see TestSpawnWorkersTasksFileParagraphNoBranchesErrors for
+// the end-to-end regression). It must now refuse outright instead.
+func TestLoadTasksFileInteriorBlankLineErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.txt")
 	content := "first task, with a comma\n\nsecond task \"quoted\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	tasks, err := loadTasksFile(path)
+	if _, err := loadTasksFile(io.Discard, path); err == nil {
+		t.Fatal("want error for a blank line between non-blank lines, got nil")
+	} else if !strings.Contains(err.Error(), "blank line") {
+		t.Errorf("error should name the blank line, got: %v", err)
+	}
+}
+
+// TestLoadTasksFileTrailingNewlinesOK is the control for the above: a
+// trailing blank line (or several) at end of file — the normal shape of any
+// file written with a final newline, or a few extra out of habit — is not a
+// paragraph separator and must not error.
+func TestLoadTasksFileTrailingNewlinesOK(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.txt")
+	content := "first task\nsecond task\n\n\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tasks, err := loadTasksFile(io.Discard, path)
 	if err != nil {
 		t.Fatalf("loadTasksFile: %v", err)
 	}
-	want := []string{"first task, with a comma", `second task "quoted"`}
+	want := []string{"first task", "second task"}
 	if len(tasks) != len(want) || tasks[0] != want[0] || tasks[1] != want[1] {
 		t.Errorf("got %#v, want %#v", tasks, want)
+	}
+}
+
+// TestLoadTasksFileWarnsAnomalousLineLengths covers the second-order signal:
+// a paragraph broken one sentence per line, with no blank lines at all, so
+// the hard blank-line check above never fires. Wildly varying line lengths
+// (several short fragments next to one long line) is a softer, fuzzier
+// signal, so it only warns — it must not block a run that might genuinely
+// be a mixed-granularity task list.
+func TestLoadTasksFileWarnsAnomalousLineLengths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.txt")
+	content := "Fix the parser.\n1. Do the first thing.\n2. Do the second thing in more detail than the others, spelling out every step along the way.\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var buf bytes.Buffer
+	tasks, err := loadTasksFile(&buf, path)
+	if err != nil {
+		t.Fatalf("loadTasksFile: %v", err)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("want 3 tasks, got %d", len(tasks))
+	}
+	if !strings.Contains(buf.String(), "--tasks-file") {
+		t.Errorf("want a warning about wildly varying line lengths, got %q", buf.String())
+	}
+}
+
+// TestLoadTasksFileNoWarningForSimilarLengths is the control for the above:
+// same-length-ish one-line tasks, the normal shape of an intentional
+// multi-worker --tasks-file, produce no warning at all.
+func TestLoadTasksFileNoWarningForSimilarLengths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.txt")
+	content := "fix the login bug\nadd retry to the uploader\nupdate the readme\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := loadTasksFile(&buf, path); err != nil {
+		t.Fatalf("loadTasksFile: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("want no warning for similarly-sized lines, got %q", buf.String())
 	}
 }
 
@@ -739,13 +842,13 @@ func TestLoadTasksFileEmptyErrors(t *testing.T) {
 	if err := os.WriteFile(path, []byte("\n\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if _, err := loadTasksFile(path); err == nil {
+	if _, err := loadTasksFile(io.Discard, path); err == nil {
 		t.Fatal("want error for a tasks file with no non-empty lines, got nil")
 	}
 }
 
 func TestLoadTasksFileMissingErrors(t *testing.T) {
-	if _, err := loadTasksFile(filepath.Join(t.TempDir(), "missing.txt")); err == nil {
+	if _, err := loadTasksFile(io.Discard, filepath.Join(t.TempDir(), "missing.txt")); err == nil {
 		t.Fatal("want error for a missing --tasks-file, got nil")
 	}
 }
@@ -762,7 +865,7 @@ func TestSpawnWorkersTasksFileAppendsToTasks(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	workers, err := spawnWorkers(context.Background(), client, &workerInput{
+	workers, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{
 		repo: "/pinned", tasksFile: path,
 	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
 	if err != nil {
@@ -786,7 +889,7 @@ func TestSpawnWorkersRelativeRepoResolvesAbsolute(t *testing.T) {
 	t.Chdir(dir)
 
 	client := fakeClient()
-	workers, err := spawnWorkers(context.Background(), client, &workerInput{
+	workers, err := spawnWorkers(context.Background(), client, io.Discard, &workerInput{
 		repo: ".", tasks: []string{"eos#1"},
 	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
 	if err != nil {
