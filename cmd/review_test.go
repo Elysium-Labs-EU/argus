@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -67,7 +68,7 @@ func testCmd() (*cobra.Command, *bytes.Buffer) {
 
 func TestRunReviewNoWorktree(t *testing.T) {
 	cmd, _ := testCmd()
-	err := runReview(cmd, "", "HEAD", "task", nil, fakeReviewer{}, nil)
+	err := runReview(cmd, "", "HEAD", "task", nil, "", false, fakeReviewer{}, nil)
 	var uerr *ui.UserError
 	if !errors.As(err, &uerr) {
 		t.Fatalf("expected *ui.UserError, got %v", err)
@@ -79,7 +80,7 @@ func TestRunReviewNoWorktree(t *testing.T) {
 
 func TestRunReviewDiffError(t *testing.T) {
 	cmd, _ := testCmd()
-	err := runReview(cmd, t.TempDir(), "HEAD", "task", nil, fakeReviewer{}, nil)
+	err := runReview(cmd, t.TempDir(), "HEAD", "task", nil, "", false, fakeReviewer{}, nil)
 	if err == nil {
 		t.Fatal("expected an error diffing a non-git worktree")
 	}
@@ -88,7 +89,7 @@ func TestRunReviewDiffError(t *testing.T) {
 func TestRunReviewNoDiff(t *testing.T) {
 	dir := reviewGitRepo(t, false)
 	cmd, _ := testCmd()
-	err := runReview(cmd, dir, "HEAD", "task", nil, fakeReviewer{}, nil)
+	err := runReview(cmd, dir, "HEAD", "task", nil, "", false, fakeReviewer{}, nil)
 	var uerr *ui.UserError
 	if !errors.As(err, &uerr) {
 		t.Fatalf("expected *ui.UserError, got %v", err)
@@ -102,7 +103,7 @@ func TestRunReviewReviewerError(t *testing.T) {
 	dir := reviewGitRepo(t, true)
 	cmd, _ := testCmd()
 	wantErr := errors.New("reviewer blew up")
-	err := runReview(cmd, dir, "HEAD", "task", nil, fakeReviewer{err: wantErr}, nil)
+	err := runReview(cmd, dir, "HEAD", "task", nil, "", false, fakeReviewer{err: wantErr}, nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -235,7 +236,7 @@ func TestRunReviewDecisions(t *testing.T) {
 			Summary:  "a summary",
 			Findings: []string{"finding one"},
 		}}
-		if err := runReview(cmd, dir, "HEAD", "task", []string{"reason"}, reviewer, nil); err != nil {
+		if err := runReview(cmd, dir, "HEAD", "task", []string{"reason"}, "", false, reviewer, nil); err != nil {
 			t.Fatalf("decision %q: %v", c.decision, err)
 		}
 		out := buf.String()
@@ -245,4 +246,55 @@ func TestRunReviewDecisions(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRunReviewReviewNoteFlagOverridesConfig pins the new --review-note
+// flag's explicit-flag-wins precedence: an explicit reviewNote/explicit=true
+// pair must reach the reviewer's request even when the worktree's own repo
+// config sets a different review_note.
+func TestRunReviewReviewNoteFlagOverridesConfig(t *testing.T) {
+	dir := reviewGitRepo(t, true)
+	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{ReviewNote: "from config"}); err != nil {
+		t.Fatalf("seeding review_note config: %v", err)
+	}
+
+	var captured supervisor.ReviewRequest
+	reviewer := capturingRequestReviewer{got: &captured}
+	cmd, _ := testCmd()
+	if err := runReview(cmd, dir, "HEAD", "task", nil, "from flag", true, reviewer, nil); err != nil {
+		t.Fatalf("runReview: %v", err)
+	}
+	if captured.ReviewNote != "from flag" {
+		t.Errorf("ReviewNote = %q, want the explicit --review-note flag value to win over repo config", captured.ReviewNote)
+	}
+}
+
+// TestRunReviewReviewNoteFallsBackToConfigWhenFlagNotPassed is the other
+// half: with no explicit --review-note, the worktree's own repo config
+// value reaches the reviewer.
+func TestRunReviewReviewNoteFallsBackToConfigWhenFlagNotPassed(t *testing.T) {
+	dir := reviewGitRepo(t, true)
+	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{ReviewNote: "from config"}); err != nil {
+		t.Fatalf("seeding review_note config: %v", err)
+	}
+
+	var captured supervisor.ReviewRequest
+	reviewer := capturingRequestReviewer{got: &captured}
+	cmd, _ := testCmd()
+	if err := runReview(cmd, dir, "HEAD", "task", nil, "", false, reviewer, nil); err != nil {
+		t.Fatalf("runReview: %v", err)
+	}
+	if captured.ReviewNote != "from config" {
+		t.Errorf("ReviewNote = %q, want the repo config value when no flag was passed", captured.ReviewNote)
+	}
+}
+
+// capturingRequestReviewer is a supervisor.Reviewer test double that records
+// the whole ReviewRequest it received, for assertions beyond just Worktree
+// (see capturingReviewer above).
+type capturingRequestReviewer struct{ got *supervisor.ReviewRequest }
+
+func (c capturingRequestReviewer) Review(_ context.Context, req *supervisor.ReviewRequest) (supervisor.ReviewResult, error) {
+	*c.got = *req
+	return supervisor.ReviewResult{Decision: "approve", Summary: "ok"}, nil
 }

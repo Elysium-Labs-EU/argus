@@ -43,6 +43,7 @@ func newShipCmd() *cobra.Command {
 		owner               string
 		forceForeignOwner   bool
 		ownerStaleAfter     time.Duration
+		shipVerifyCmd       string
 	)
 
 	cmd := &cobra.Command{
@@ -72,6 +73,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 					owner: owner, forceForeignOwner: forceForeignOwner,
 					ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
 				},
+				shipVerifyCmd: shipVerifyCmd, shipVerifyCmdExplicit: cmd.Flags().Changed("ship-verify-command"),
 			})
 		},
 	}
@@ -92,6 +94,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 	cmd.Flags().StringVar(&owner, "owner", "", ownerFlagHelp)
 	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
 	cmd.Flags().DurationVar(&ownerStaleAfter, "owner-stale-after", ownership.DefaultStaleAfter, ownerStaleAfterFlagHelp)
+	cmd.Flags().StringVar(&shipVerifyCmd, "ship-verify-command", "", "controller-side gate command run before ship commits, in addition to argus's own built-in hook detection (lefthook/pre-commit-framework). Empty (default) runs no extra command. Without this flag, this repo's .argus/config.yml ship_verify_command key wins, then this default")
 	return cmd
 }
 
@@ -117,6 +120,7 @@ type shipArgs struct {
 	// resolution can just set this to the final value they want enforced.
 	titlePrefixTemplate string
 	owner               ownerFlags
+	shipVerifyCmd       string
 	issue               int
 	force               bool
 	dryRun              bool
@@ -124,6 +128,10 @@ type shipArgs struct {
 	// was actually passed, the same explicit-flag-wins signal
 	// forgeKindExplicit gives --forge.
 	titlePrefixTemplateExplicit bool
+	// shipVerifyCmdExplicit is true only when --ship-verify-command was
+	// actually passed, the same explicit-flag-wins signal
+	// forgeKindExplicit gives --forge.
+	shipVerifyCmdExplicit bool
 	// forgeKindExplicit is true only when --forge was actually passed
 	// (cmd.Flags().Changed("forge")): an operator-given flag always wins over
 	// this repo's .argus/config.yml forge key, the same explicit-flag-wins
@@ -278,7 +286,7 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	logger, closeLog := openRunLog(cmd, "ship")
 	defer closeLog()
 
-	if gerr := enforceShipGate(ctx, out, a.worktree); gerr != nil {
+	if gerr := enforceShipGate(ctx, out, a.worktree, a.shipVerifyCmdExplicit, a.shipVerifyCmd); gerr != nil {
 		logger.Fail("ship_gate", target.branch, gerr)
 		return gerr
 	}
@@ -415,13 +423,14 @@ func warnJiraPostShip(out io.Writer, logger *eventlog.Logger, key string, err er
 
 // enforceShipGate runs this repo's hook/lint enforcement before shipChange
 // commits anything: any lefthook/pre-commit-framework config found in the
-// worktree (supervisor.EnforceHooks), then the repo's own optional ship_lint
-// command from .argus/config.yml (supervisor.RunShipVerifyCommand). It is unconditional
-// — unlike checkApproved, --force does not skip it — because the point is to
-// close the --no-verify bypass even for a human who has decided to ship an
-// unreviewed change; letting --force also skip this would just relocate the
-// bypass rather than close it.
-func enforceShipGate(ctx context.Context, out io.Writer, worktree string) error {
+// worktree (supervisor.EnforceHooks), then the repo's own optional
+// ship_verify_command from .argus/config.yml, or an explicit
+// --ship-verify-command flag override (supervisor.RunShipVerifyCommand). It
+// is unconditional — unlike checkApproved, --force does not skip it —
+// because the point is to close the --no-verify bypass even for a human who
+// has decided to ship an unreviewed change; letting --force also skip this
+// would just relocate the bypass rather than close it.
+func enforceShipGate(ctx context.Context, out io.Writer, worktree string, shipVerifyExplicit bool, shipVerifyFlag string) error {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
 		return fmt.Errorf("resolving repo root for ship gate: %w", err)
@@ -434,7 +443,7 @@ func enforceShipGate(ctx context.Context, out io.Writer, worktree string) error 
 		return fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)
 	}
 	warnDeprecatedConfigKeys(out, &rc)
-	return supervisor.RunShipVerifyCommand(ctx, worktree, rc.ShipVerifyCommand)
+	return supervisor.RunShipVerifyCommand(ctx, worktree, resolveShipVerifyCommand(shipVerifyExplicit, shipVerifyFlag, &rc))
 }
 
 // checkApproved refuses to ship a worktree that argus never cleared. supervise

@@ -43,7 +43,7 @@ func TestIssuesToTasks(t *testing.T) {
 		142: {Number: 142, Title: "daemon down warning", Body: "warn when down"},
 		145: {Number: 145, Title: "log backoff", Body: "back off on EACCES"},
 	}}
-	tasks, branches, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142, 145})
+	tasks, branches, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142, 145}, briefNoteOverride{})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestIssuesToTasksAppendsRepoBriefNote(t *testing.T) {
 		t.Fatalf("seeding repo config: %v", err)
 	}
 	f := &fakeForge{issues: map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}}}
-	tasks, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", repo, []int{142})
+	tasks, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", repo, []int{142}, briefNoteOverride{})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestIssuesToTasksAppendsRepoBriefNote(t *testing.T) {
 // defaults.
 func TestIssuesToTasksNoRepoConfigOmitsToolchainText(t *testing.T) {
 	f := &fakeForge{issues: map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}}}
-	tasks, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142})
+	tasks, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142}, briefNoteOverride{})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestJiraIssuesToTasks(t *testing.T) {
 		"PROJ-142": {Title: "daemon down warning", Body: "warn when down"},
 		"PROJ-145": {Title: "log backoff", Body: "back off on EACCES"},
 	}}
-	tasks, branches, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"PROJ-142", "PROJ-145"}, jiraSpawnOpts{})
+	tasks, branches, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"PROJ-142", "PROJ-145"}, jiraSpawnOpts{}, briefNoteOverride{})
 	if err != nil {
 		t.Fatalf("jiraIssuesToTasks: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestJiraIssuesToTasksAssignsAndTransitionsOnSpawn(t *testing.T) {
 		myselfID: "acc-caller",
 	}
 	_, _, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"PROJ-142", "PROJ-145"},
-		jiraSpawnOpts{assignToCaller: true, transition: "In Progress"})
+		jiraSpawnOpts{assignToCaller: true, transition: "In Progress"}, briefNoteOverride{})
 	if err != nil {
 		t.Fatalf("jiraIssuesToTasks: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestJiraIssuesToTasksAbortsOnAssignFailure(t *testing.T) {
 		myselfID:  "acc-caller",
 		assignErr: errors.New("boom"),
 	}
-	_, _, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"PROJ-1"}, jiraSpawnOpts{assignToCaller: true})
+	_, _, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"PROJ-1"}, jiraSpawnOpts{assignToCaller: true}, briefNoteOverride{})
 	if err == nil {
 		t.Fatal("want error when Assign fails")
 	}
@@ -246,7 +246,7 @@ func TestJiraIssuesToTasksAbortsOnMyselfFailure(t *testing.T) {
 		issues:    map[string]forge.Issue{"PROJ-1": {Title: "t", Body: "b"}},
 		myselfErr: errors.New("not authenticated"),
 	}
-	_, _, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"PROJ-1"}, jiraSpawnOpts{assignToCaller: true})
+	_, _, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"PROJ-1"}, jiraSpawnOpts{assignToCaller: true}, briefNoteOverride{})
 	if err == nil {
 		t.Fatal("want error when Myself fails")
 	}
@@ -262,7 +262,7 @@ func TestJiraIssuesToTasksAbortsOnTransitionFailure(t *testing.T) {
 		issues:        map[string]forge.Issue{"PROJ-1": {Title: "t", Body: "b"}},
 		transitionErr: errors.New("no such transition"),
 	}
-	_, _, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"PROJ-1"}, jiraSpawnOpts{transition: "Bogus"})
+	_, _, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"PROJ-1"}, jiraSpawnOpts{transition: "Bogus"}, briefNoteOverride{})
 	if err == nil {
 		t.Fatal("want error when Transition fails")
 	}

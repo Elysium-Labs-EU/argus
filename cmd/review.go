@@ -22,6 +22,7 @@ func newReviewCmd() *cobra.Command {
 		reasons      []string
 		reviewModel  string
 		reviewEffort string
+		reviewNote   string
 	)
 
 	cmd := &cobra.Command{
@@ -36,7 +37,7 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 			defer closeLog()
 
 			reviewer := newReviewer(reviewModel, reviewEffort, logger)
-			return runReview(cmd, worktree, base, task, reasons, reviewer, logger)
+			return runReview(cmd, worktree, base, task, reasons, reviewNote, cmd.Flags().Changed("review-note"), reviewer, logger)
 		},
 	}
 
@@ -46,6 +47,7 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 	cmd.Flags().StringSliceVar(&reasons, "reasons", nil, "why this needs review (context for the reviewer)")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for the review (low, medium, high, xhigh, max; default: claude's default)")
+	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
 	return cmd
 }
 
@@ -61,7 +63,7 @@ var newReviewer = func(model, effort string, logger *eventlog.Logger) supervisor
 
 // runReview is newReviewCmd's RunE body, pulled out so tests can drive it
 // directly with a fake supervisor.Reviewer instead of shelling out to claude.
-func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string, reviewer supervisor.Reviewer, logger *eventlog.Logger) error {
+func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string, reviewNote string, reviewNoteExplicit bool, reviewer supervisor.Reviewer, logger *eventlog.Logger) error {
 	if worktree == "" {
 		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus review --worktree <path>"}
 	}
@@ -95,7 +97,7 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 			Reasons:       reasons,
 			Diff:          diff,
 			PriorFindings: priorFindings(worktree),
-			ReviewNote:    repoReviewNote(ctx, out, worktree),
+			ReviewNote:    repoReviewNote(ctx, out, worktree, reviewNoteExplicit, reviewNote),
 		})
 		return rerr
 	})
@@ -109,21 +111,22 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 	return nil
 }
 
-// repoReviewNote reads this worktree's repo's optional .argus/config.yml
-// review_note (see internal/repoconfig), best-effort: an unresolvable repo
-// root or unreadable config just means no repo-specific criteria to append,
-// not a hard failure of a manual one-off review.
-func repoReviewNote(ctx context.Context, out io.Writer, worktree string) string {
+// repoReviewNote resolves an explicit --review-note flag over this
+// worktree's repo's optional .argus/config.yml review_note (see
+// internal/repoconfig) over "" (no repo-specific criteria), best-effort: an
+// unresolvable repo root or unreadable config just means the repo config
+// source is unavailable, not a hard failure of a manual one-off review.
+func repoReviewNote(ctx context.Context, out io.Writer, worktree string, explicit bool, flagValue string) string {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
-		return ""
+		return flagValue
 	}
 	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
 	if err != nil {
-		return ""
+		return flagValue
 	}
 	warnDeprecatedConfigKeys(out, &rc)
-	return rc.ReviewNote
+	return resolveReviewNote(explicit, flagValue, &rc)
 }
 
 // priorFindings returns the Reasons from a previously recorded, non-approved

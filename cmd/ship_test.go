@@ -960,11 +960,11 @@ func TestShipChangeSkipsDuplicateJiraNotificationOnRetry(t *testing.T) {
 	}
 }
 
-// TestShipChangeFailsWhenShipVerifyCommandCommandFails covers the .argus/config.yml
+// TestShipChangeFailsWhenShipVerifyCommandFails covers the .argus/config.yml
 // ship_lint gate: a failing command must stop shipChange before anything is
 // committed or pushed, not just get reported alongside a PR that already
 // opened.
-func TestShipChangeFailsWhenShipVerifyCommandCommandFails(t *testing.T) {
+func TestShipChangeFailsWhenShipVerifyCommandFails(t *testing.T) {
 	wt, cmd, _ := shipChangeTestSetup(t)
 	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipVerifyCommand: "exit 1"}); err != nil {
 		t.Fatalf("seeding ship_lint config: %v", err)
@@ -991,10 +991,10 @@ func TestShipChangeFailsWhenShipVerifyCommandCommandFails(t *testing.T) {
 	}
 }
 
-// TestShipChangeRunsPassingShipVerifyCommandCommand is the success-path counterpart:
+// TestShipChangeRunsPassingShipVerifyCommand is the success-path counterpart:
 // a configured ship_lint that exits zero does not block the normal
 // commit/push/open-PR flow.
-func TestShipChangeRunsPassingShipVerifyCommandCommand(t *testing.T) {
+func TestShipChangeRunsPassingShipVerifyCommand(t *testing.T) {
 	wt, cmd, _ := shipChangeTestSetup(t)
 	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipVerifyCommand: "true"}); err != nil {
 		t.Fatalf("seeding ship_lint config: %v", err)
@@ -1053,3 +1053,24 @@ func TestShipChangeGateRunsEvenWithForce(t *testing.T) {
 }
 
 var _ forge.Forge = (*fakeForge)(nil)
+
+// TestShipChangeShipVerifyCommandFlagOverridesConfig pins the new
+// --ship-verify-command flag's explicit-flag-wins precedence: a repo config
+// with a failing ship_verify_command must not block ship when an explicit
+// flag override supplies a passing command instead.
+func TestShipChangeShipVerifyCommandFlagOverridesConfig(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipVerifyCommand: "exit 1"}); err != nil {
+		t.Fatalf("seeding ship_verify_command config: %v", err)
+	}
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	err := shipChange(cmd, f, &shipArgs{
+		worktree: wt, base: "main", force: true,
+		shipVerifyCmd: "true", shipVerifyCmdExplicit: true,
+	}, target)
+	if err != nil {
+		t.Fatalf("want the explicit --ship-verify-command flag (a passing command) to win over the failing repo config, got: %v", err)
+	}
+}

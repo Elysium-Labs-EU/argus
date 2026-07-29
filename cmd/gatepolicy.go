@@ -111,6 +111,59 @@ func resolveOwnerStaleAfter(explicit bool, flagValue time.Duration, rc *repoconf
 	return d, nil
 }
 
+// resolveShipVerifyCommand applies an explicit --ship-verify-command flag
+// over this repo's .argus/config.yml ship_verify_command over "" (no
+// extra command — ship's built-in hook detection is still enforced
+// regardless), the same explicit-flag-wins precedence resolveGateVerifyCommand
+// applies for its own source. explicit is
+// cmd.Flags().Changed("ship-verify-command"). rc is a pointer solely to
+// avoid copying the struct at the call site.
+func resolveShipVerifyCommand(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.ShipVerifyCommand != "" {
+		return rc.ShipVerifyCommand
+	}
+	return flagValue
+}
+
+// resolveReviewNote applies an explicit --review-note flag over this
+// repo's .argus/config.yml review_note over "" (no repo-specific criteria
+// appended to the reviewer's prompt), the same explicit-flag-wins
+// precedence resolveGateVerifyCommand applies for its own source. explicit
+// is cmd.Flags().Changed("review-note"). rc is a pointer solely to avoid
+// copying the struct at the call site.
+func resolveReviewNote(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.ReviewNote != "" {
+		return rc.ReviewNote
+	}
+	return flagValue
+}
+
+// resolveBriefNote applies an explicit --brief-note flag over this repo's
+// .argus/config.yml brief_note over "" (no note appended), the same
+// explicit-flag-wins precedence resolveGateVerifyCommand applies for its
+// own source. explicit is cmd.Flags().Changed("brief-note"). rc is a
+// pointer solely to avoid copying the struct at the call site.
+//
+// Note brief_note's own scope limitation, unrelated to this resolver: it
+// (and therefore this flag) currently only reaches workers spawned from
+// --issues/--jira-issues (see repoBriefNote's callers, issuesToTasks and
+// jiraIssuesToTasks) — a plain --tasks worker's brief never consults it.
+func resolveBriefNote(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.BriefNote != "" {
+		return rc.BriefNote
+	}
+	return flagValue
+}
+
 // resolveWorktreeDir applies an explicit --worktree-dir flag over this
 // repo's .argus/config.yml worktree_dir over "" (the flag's own default —
 // argus's own <repo>/.claude/worktrees/<branch> convention, see

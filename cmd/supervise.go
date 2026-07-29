@@ -38,6 +38,8 @@ func newSuperviseCmd() *cobra.Command {
 		alwaysReviewPaths     []string
 		reviewModel           string
 		reviewEffort          string
+		reviewNote            string
+		briefNote             string
 		review                bool
 		maxDiffLines          int
 		gateVerifyCmd         string
@@ -108,7 +110,8 @@ each pane's directory in --panes mode).`,
 				workers, err = spawnWorkers(cmd.Context(), cmd.OutOrStdout(), client, &workerInput{
 					panes: panes, branches: branches, labels: labels, tasks: tasks, tasksFile: tasksFile, repo: repo,
 				}, issues, jiraIssues, overrides, jiraSpawnOpts{assignToCaller: jiraAssignOnSpawn, transition: jiraTransitionOnSpawn},
-					forgeKind, cmd.Flags().Changed("forge"))
+					forgeKind, cmd.Flags().Changed("forge"),
+					briefNoteOverride{explicit: cmd.Flags().Changed("brief-note"), value: briefNote})
 			}
 			if err != nil {
 				return err
@@ -156,7 +159,7 @@ each pane's directory in --panes mode).`,
 				policy: policy, gateVerifyCommand: gateVerifyCommand, worktreeBootstrapCmd: worktreeBootstrapCommand,
 				allow: allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
 				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
-				reviewNote:      rc.ReviewNote,
+				reviewNote:      resolveReviewNote(cmd.Flags().Changed("review-note"), reviewNote, &rc),
 			})
 		},
 	}
@@ -188,6 +191,8 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for --review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
+	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
+	cmd.Flags().StringVar(&briefNote, "brief-note", "", "free-text note appended verbatim to a generated worker brief. Currently only reaches workers spawned from --issues/--jira-issues, not plain --tasks workers. Without this flag, this repo's .argus/config.yml brief_note wins, then this default (no note)")
 	cmd.Flags().IntVar(&reviewConcurrency, "review-concurrency", 0, "max concurrent claude -p --review calls when the gate escalates several workers at once (0 = supervisor.defaultReviewConcurrency)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan and exit without creating worktrees or spawning workers")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front worker API traffic with the credential proxy; workers inherit the host's real ANTHROPIC_API_KEY")
@@ -564,7 +569,7 @@ type jiraSpawnOpts struct {
 // value and whether it was actually passed, needed only for --issues (the one
 // forge.New call this path makes, to fetch issue bodies before any worker
 // exists).
-func spawnWorkers(ctx context.Context, out io.Writer, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) ([]supervisor.Worker, error) {
+func spawnWorkers(ctx context.Context, out io.Writer, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool, bn briefNoteOverride) ([]supervisor.Worker, error) {
 	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && in.tasksFile == "" && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
@@ -581,7 +586,7 @@ func spawnWorkers(ctx context.Context, out io.Writer, client herdr.Client, in *w
 		}
 		in.tasks = append(in.tasks, fileTasks...)
 	}
-	if err := foldIssueSources(ctx, out, in, issues, jiraIssues, credentialOverrides, jiraSpawn, forgeKindFlag, forgeKindExplicit); err != nil {
+	if err := foldIssueSources(ctx, out, in, issues, jiraIssues, credentialOverrides, jiraSpawn, forgeKindFlag, forgeKindExplicit, bn); err != nil {
 		return nil, err
 	}
 	return buildWorkers(ctx, client, in)
@@ -712,14 +717,14 @@ func warnAnomalousTaskLineLengths(w io.Writer, path string, tasks []string) {
 // Split out of spawnWorkers to keep each source's fetch-and-fold step
 // independently testable and readable. forgeKindFlag/forgeKindExplicit only
 // matter to the --issues path (see resolveIssueForgeKind).
-func foldIssueSources(ctx context.Context, out io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) error {
+func foldIssueSources(ctx context.Context, out io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool, bn briefNoteOverride) error {
 	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
 		kind, err := resolveIssueForgeKind(ctx, out, in.repo, forgeKindExplicit, forgeKindFlag)
 		if err != nil {
 			return err
 		}
-		fetched, brs, err := tasksFromIssues(ctx, out, in.repo, issues, credentialOverrides, kind)
+		fetched, brs, err := tasksFromIssues(ctx, out, in.repo, issues, credentialOverrides, kind, bn)
 		if err != nil {
 			return err
 		}
@@ -731,7 +736,7 @@ func foldIssueSources(ctx context.Context, out io.Writer, in *workerInput, issue
 	// Jira is an issue tracker with no git-host concept to resolve from the
 	// origin remote.
 	if len(jiraIssues) > 0 {
-		fetched, brs, err := jiraTasksFromIssues(ctx, out, in.repo, jiraIssues, jiraSpawn)
+		fetched, brs, err := jiraTasksFromIssues(ctx, out, in.repo, jiraIssues, jiraSpawn, bn)
 		if err != nil {
 			return err
 		}
@@ -936,12 +941,12 @@ func at(s []string, i int) string {
 // each issue and renders it into a worker brief. It works for GitHub, GitLab, and
 // Codeberg/Gitea-family hosts without extra flags, plus a self-hosted GitLab or
 // Gitea/Forgejo host when kind says which shape it is.
-func tasksFromIssues(ctx context.Context, out io.Writer, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind) (tasks, branches []string, err error) {
+func tasksFromIssues(ctx context.Context, out io.Writer, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind, bn briefNoteOverride) (tasks, branches []string, err error) {
 	f, owner, name, err := resolveForge(ctx, repoPath, credentialOverrides, kind)
 	if err != nil {
 		return nil, nil, err
 	}
-	return issuesToTasks(ctx, out, f, owner, name, repoPath, issues)
+	return issuesToTasks(ctx, out, f, owner, name, repoPath, issues, bn)
 }
 
 // resolveIssueForgeKind applies --forge > this repo's .argus/config.yml forge
@@ -963,16 +968,29 @@ func resolveIssueForgeKind(ctx context.Context, out io.Writer, repoPath string, 
 	return parseForgeKind(resolveForgeKindValue(explicit, flagValue, configValue))
 }
 
-// repoBriefNote reads this repo's optional .argus/config.yml brief_note (see
-// internal/repoconfig), best-effort: a missing or unreadable config file just
-// means no note to append, not a hard failure of task generation.
-func repoBriefNote(out io.Writer, repoPath string) string {
+// briefNoteOverride carries an explicit --brief-note flag value through the
+// --issues/--jira-issues fetch chain (spawnWorkers -> foldIssueSources ->
+// tasksFromIssues/jiraTasksFromIssues -> issuesToTasks/jiraIssuesToTasks) to
+// repoBriefNote, the same explicit-flag-wins shape resolveBriefNote applies
+// for its own (unthreaded) callers. Bundled into one value instead of two
+// bare parameters threaded through every function in that chain.
+type briefNoteOverride struct {
+	value    string
+	explicit bool
+}
+
+// repoBriefNote resolves bn (an explicit --brief-note flag) over this repo's
+// optional .argus/config.yml brief_note (see internal/repoconfig) over ""
+// (no note to append), best-effort: a missing or unreadable config file
+// just means the repo-config source is unavailable, not a hard failure of
+// task generation.
+func repoBriefNote(out io.Writer, repoPath string, bn briefNoteOverride) string {
 	rc, err := repoconfig.Load(repoconfig.Path(repoPath))
 	if err != nil {
-		return ""
+		return bn.value
 	}
 	warnDeprecatedConfigKeys(out, &rc)
-	return rc.BriefNote
+	return resolveBriefNote(bn.explicit, bn.value, &rc)
 }
 
 // fixedBriefTail appends argus's own non-negotiable ship-pipeline invariants
@@ -1043,8 +1061,8 @@ func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[
 // network. repoPath resolves this repo's optional brief_note (see
 // repoBriefNote) — argus itself supplies no toolchain-flavored text of its
 // own when no config is present, only the fixed "don't commit" invariant.
-func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, name, repoPath string, issues []int) (tasks, branches []string, err error) {
-	tail := fixedBriefTail(repoBriefNote(out, repoPath))
+func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, name, repoPath string, issues []int, bn briefNoteOverride) (tasks, branches []string, err error) {
+	tail := fixedBriefTail(repoBriefNote(out, repoPath, bn))
 	for _, n := range issues {
 		iss, ferr := f.FetchIssue(ctx, owner, name, n)
 		if ferr != nil {
@@ -1079,7 +1097,7 @@ type jiraSpawnClient interface {
 // JIRA_API_TOKEN and fetches each key. Unlike tasksFromIssues this does not go
 // through internal/forge or the origin remote: Jira is an issue tracker, not a
 // git host, so there is no owner/repo or PR concept to resolve.
-func jiraTasksFromIssues(ctx context.Context, out io.Writer, repoPath string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
+func jiraTasksFromIssues(ctx context.Context, out io.Writer, repoPath string, keys []string, jiraSpawn jiraSpawnOpts, bn briefNoteOverride) (tasks, branches []string, err error) {
 	c, err := jira.NewFromEnv(nil)
 	if err != nil {
 		return nil, nil, &ui.UserError{
@@ -1087,7 +1105,7 @@ func jiraTasksFromIssues(ctx context.Context, out io.Writer, repoPath string, ke
 			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN, or write them to a JSON config file at $JIRA_CONFIG_FILE or ~/.argus/jira.json, to fetch --jira-issues",
 		}
 	}
-	return jiraIssuesToTasks(ctx, out, c, repoPath, repoBranchPrefix(ctx, repoPath), keys, jiraSpawn)
+	return jiraIssuesToTasks(ctx, out, c, repoPath, repoBranchPrefix(ctx, repoPath), keys, jiraSpawn, bn)
 }
 
 // repoBranchPrefix names the git repo at repoPath for branch prefixing, so
@@ -1116,8 +1134,8 @@ func repoBranchPrefix(ctx context.Context, repoPath string) string {
 // finding out the claim never took before workers pile onto an
 // apparently-unclaimed ticket. repoPath resolves this repo's optional
 // brief_note the same way issuesToTasks does.
-func jiraIssuesToTasks(ctx context.Context, out io.Writer, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
-	tail := fixedBriefTail(repoBriefNote(out, repoPath))
+func jiraIssuesToTasks(ctx context.Context, out io.Writer, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts, bn briefNoteOverride) (tasks, branches []string, err error) {
+	tail := fixedBriefTail(repoBriefNote(out, repoPath, bn))
 
 	var callerAccountID string
 	if jiraSpawn.assignToCaller {

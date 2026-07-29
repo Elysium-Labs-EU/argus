@@ -229,3 +229,72 @@ func TestWarnDeprecatedConfigKeysNoOutputWhenNoneDeprecated(t *testing.T) {
 		t.Errorf("output = %q, want empty when Deprecated is empty", buf.String())
 	}
 }
+
+func TestResolveShipVerifyCommandExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{ShipVerifyCommand: "make ci"}
+	got := resolveShipVerifyCommand(true, "make lint", &rc)
+	if got != "make lint" {
+		t.Errorf("resolveShipVerifyCommand = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveShipVerifyCommandPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{ShipVerifyCommand: "make ci"}
+	got := resolveShipVerifyCommand(false, "", &rc)
+	if got != "make ci" {
+		t.Errorf("resolveShipVerifyCommand = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveShipVerifyCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveShipVerifyCommand(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveShipVerifyCommand = %q, want empty (no ship verify command configured anywhere)", got)
+	}
+}
+
+func TestResolveReviewNoteExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{ReviewNote: "from config"}
+	got := resolveReviewNote(true, "from flag", &rc)
+	if got != "from flag" {
+		t.Errorf("resolveReviewNote = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveReviewNotePrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{ReviewNote: "from config"}
+	got := resolveReviewNote(false, "", &rc)
+	if got != "from config" {
+		t.Errorf("resolveReviewNote = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveReviewNoteFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveReviewNote(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveReviewNote = %q, want empty (no review note configured anywhere)", got)
+	}
+}
+
+func TestResolveBriefNoteExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{BriefNote: "from config"}
+	got := resolveBriefNote(true, "from flag", &rc)
+	if got != "from flag" {
+		t.Errorf("resolveBriefNote = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveBriefNotePrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{BriefNote: "from config"}
+	got := resolveBriefNote(false, "", &rc)
+	if got != "from config" {
+		t.Errorf("resolveBriefNote = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveBriefNoteFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveBriefNote(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveBriefNote = %q, want empty (no brief note configured anywhere)", got)
+	}
+}

@@ -30,6 +30,7 @@ func newReworkCmd() *cobra.Command {
 		workerRuntime      string
 		reviewModel        string
 		reviewEffort       string
+		reviewNote         string
 		proofRequiredPaths []string
 		alwaysReviewPaths  []string
 		credentialEnv      map[string]string
@@ -78,6 +79,8 @@ outcome instead of retrying forever.`,
 				reviewModel:          reviewModel,
 				reviewEffort:         reviewEffort,
 				reviewEffortExplicit: cmd.Flags().Changed("review-effort"),
+				reviewNote:           reviewNote,
+				reviewNoteExplicit:   cmd.Flags().Changed("review-note"),
 				gate: gateFlags{
 					maxDiffLines:          maxDiffLines,
 					proofRequiredPaths:    proofRequiredPaths,
@@ -107,6 +110,7 @@ outcome instead of retrying forever.`,
 	cmd.Flags().IntVar(&maxRounds, "max-rounds", supervisor.DefaultMaxReworkRounds, "give up and escalate after this many request-changes rounds")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for the review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
+	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
@@ -136,6 +140,7 @@ type reworkOpts struct {
 	worktree              string
 	reviewModel           string
 	reviewEffort          string
+	reviewNote            string
 	findings              []string
 	owner                 ownerFlags
 	gate                  gateFlags
@@ -147,6 +152,7 @@ type reworkOpts struct {
 	noCredProxy           bool
 	gateVerifyCmdExplicit bool
 	reviewEffortExplicit  bool
+	reviewNoteExplicit    bool
 }
 
 // dispatchTarget builds dispatchIntoPane's input from a reworkOpts, mirroring
@@ -254,7 +260,7 @@ func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, rev
 		Home:              home,
 		Base:              opts.base,
 		Reviewer:          reviewer,
-		ReviewNote:        rc.ReviewNote,
+		ReviewNote:        resolveReviewNote(opts.reviewNoteExplicit, opts.reviewNote, &rc),
 		GateVerifyCommand: resolveGateVerifyCommand(opts.gateVerifyCmdExplicit, opts.gateVerifyCmd, &rc),
 	}
 	return cfg, repoRoot, nil
