@@ -708,6 +708,56 @@ func TestShipChangeCommitsPushesAndOpensPR(t *testing.T) {
 	}
 }
 
+// TestShipChangeReusesExistingPRInsteadOfDuplicating covers a ship retry
+// after a prior run was killed between push succeeding and OpenPR completing:
+// CommitAll/Push are no-ops the second time round, but without a FindPR check
+// OpenPR would still fire unconditionally and open a second PR for the same
+// branch.
+func TestShipChangeReusesExistingPRInsteadOfDuplicating(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // openRunLog writes under ~/.argus
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare init: %v\n%s", err, out)
+	}
+	wt := gitRepo(t,
+		[]string{"checkout", "-q", "-b", "feat-x"},
+		[]string{"remote", "add", "origin", remote},
+	)
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	f := &fakeForge{
+		findPR:      forge.PR{Number: 42, HTMLURL: "https://fake/pull/42", State: "open"},
+		findPRFound: true,
+	}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	if err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target); err != nil {
+		t.Fatalf("shipChange: %v", err)
+	}
+
+	if f.opened != nil {
+		t.Errorf("want no new PR opened on retry, got %+v", f.opened)
+	}
+	if !strings.Contains(buf.String(), "reusing existing PR #42") {
+		t.Errorf("want reused-PR output, got: %q", buf.String())
+	}
+
+	lc, found, lerr := protocol.LoadLifecycle(wt)
+	if lerr != nil || !found {
+		t.Fatalf("LoadLifecycle: found=%v err=%v", found, lerr)
+	}
+	if lc.State != protocol.LifecycleShipped || lc.PRNumber != 42 || lc.PRURL != "https://fake/pull/42" {
+		t.Errorf("unexpected lifecycle record: %+v", lc)
+	}
+}
+
 func TestShipChangeReturnsErrorWhenNothingToCommit(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // openRunLog writes under ~/.argus
 	remote := t.TempDir()
