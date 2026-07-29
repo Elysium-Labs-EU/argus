@@ -16,6 +16,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/ownership"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
@@ -1073,7 +1074,7 @@ func TestPollStatusReturnsOnDeadlineWhenWorkerNeverTerminates(t *testing.T) {
 	start := time.Now()
 	go func() {
 		// No parent cancel; only the 40ms deadline should stop it.
-		pollStatus(context.Background(), herdr.Client{}, 5*time.Millisecond, 40*time.Millisecond, nil, st)
+		pollStatus(context.Background(), herdr.Client{}, 5*time.Millisecond, 40*time.Millisecond, nil, st, time.Now)
 		close(done)
 	}()
 	select {
@@ -1102,7 +1103,7 @@ func TestPollStatusLogsUnreadableStatus(t *testing.T) {
 	logger := eventlog.New(&buf, "supervise", "run1", nil)
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "broken", Worktree: wt}}}
 
-	pollStatus(context.Background(), herdr.Client{}, 5*time.Millisecond, 30*time.Millisecond, logger, st)
+	pollStatus(context.Background(), herdr.Client{}, 5*time.Millisecond, 30*time.Millisecond, logger, st, time.Now)
 
 	if !strings.Contains(buf.String(), "status_unreadable") {
 		t.Errorf("expected a status_unreadable event, got:\n%s", buf.String())
@@ -1127,7 +1128,7 @@ func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st)
+	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st, time.Now)
 
 	if !st.hasFile {
 		t.Fatal("pollStatus should have read the status file")
@@ -1137,6 +1138,74 @@ func TestPollStatusReadsTypedFileNotScrollback(t *testing.T) {
 	}
 	if ctx.Err() != nil {
 		t.Errorf("pollStatus should have returned on terminal phase, not on timeout")
+	}
+}
+
+// TestPollStatusAdvancesOwnerHeartbeatOnEachTick pins pollStatus's own side
+// effect on a worktree's owner lease (see internal/ownership): every tick
+// must advance HeartbeatAt to the caller-supplied clock's current value,
+// without disturbing SpawnedAt — the same "advance heartbeat, never spawn"
+// contract ownership.Heartbeat itself already guarantees, exercised here
+// through the actual poll loop rather than called directly.
+func TestPollStatusAdvancesOwnerHeartbeatOnEachTick(t *testing.T) {
+	wt := t.TempDir()
+	spawnedAt := time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC)
+	if err := ownership.Spawn(wt, "sess-1", "test-owner", spawnedAt); err != nil {
+		t.Fatalf("seeding owner lease: %v", err)
+	}
+
+	// A pre-seeded terminal status means pollStatus returns after its very
+	// first tick, so exactly one heartbeat update is expected — not an
+	// unbounded number racing the test's own assertions.
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task: "a", Phase: protocol.PhaseDone,
+	}); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	fakeNow := time.Date(2026, 7, 29, 10, 30, 0, 0, time.UTC)
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st, func() time.Time { return fakeNow })
+
+	o, found, err := ownership.Load(wt)
+	if err != nil || !found {
+		t.Fatalf("ownership.Load: found=%v err=%v", found, err)
+	}
+	if !o.HeartbeatAt.Equal(fakeNow) {
+		t.Errorf("HeartbeatAt = %v, want it advanced to pollStatus's clock %v", o.HeartbeatAt, fakeNow)
+	}
+	if !o.SpawnedAt.Equal(spawnedAt) {
+		t.Errorf("SpawnedAt = %v, want it left unchanged at %v", o.SpawnedAt, spawnedAt)
+	}
+}
+
+// TestPollStatusHeartbeatNoOpsWithNoOwnerLease confirms pollStatus's
+// heartbeat write is silently a no-op (not an error, not a log event) for a
+// worktree with no recorded owner lease — e.g. one predating this feature,
+// or an --attach target argus never spawned — the same "missing owner.json
+// treated as unowned" contract ownership.Heartbeat itself guarantees.
+func TestPollStatusHeartbeatNoOpsWithNoOwnerLease(t *testing.T) {
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task: "a", Phase: protocol.PhaseDone,
+	}); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	var buf bytes.Buffer
+	logger := eventlog.New(&buf, "supervise", "run1", nil)
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "a", Worktree: wt}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, logger, st, time.Now)
+
+	if _, found, _ := ownership.Load(wt); found {
+		t.Error("pollStatus's heartbeat should not create a lease where none existed")
+	}
+	if strings.Contains(buf.String(), "owner_heartbeat") {
+		t.Errorf("a missing lease should log no heartbeat event, got:\n%s", buf.String())
 	}
 }
 
@@ -1171,7 +1240,7 @@ func TestPollStatusIgnoresStatusFromBeforeDispatch(t *testing.T) {
 	// No fresh write ever arrives, so a correct pollStatus can only reach its
 	// deadline — reporting hasFile/PhaseDone here would mean the stale file
 	// was mistaken for this worker's own outcome.
-	pollStatus(context.Background(), herdr.Client{}, 5*time.Millisecond, 40*time.Millisecond, nil, st)
+	pollStatus(context.Background(), herdr.Client{}, 5*time.Millisecond, 40*time.Millisecond, nil, st, time.Now)
 
 	if st.hasFile {
 		t.Error("pollStatus treated a pre-dispatch stale status as this worker's report")
@@ -1206,7 +1275,7 @@ func TestPollStatusAcceptsStatusWithLyingUpdatedAt(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st)
+	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st, time.Now)
 
 	if !st.hasFile || st.status.Phase != protocol.PhaseAwaitingReview {
 		t.Fatalf("pollStatus discarded a real post-dispatch status because of a lying UpdatedAt: hasFile=%v phase=%q", st.hasFile, st.status.Phase)
@@ -1231,7 +1300,7 @@ func TestPollStatusAcceptsStatusWrittenAfterDispatch(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st)
+	pollStatus(ctx, herdr.Client{}, 10*time.Millisecond, 0, nil, st, time.Now)
 
 	if !st.hasFile || st.status.Phase != protocol.PhaseDone {
 		t.Fatalf("pollStatus should accept a status written after dispatch, got hasFile=%v phase=%q", st.hasFile, st.status.Phase)
@@ -1277,7 +1346,7 @@ func TestPollStatusWakesOnHerdrAgentWaitNotFixedInterval(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		pollStatus(context.Background(), client, time.Hour, 0, nil, st)
+		pollStatus(context.Background(), client, time.Hour, 0, nil, st, time.Now)
 		close(done)
 	}()
 
@@ -1336,7 +1405,7 @@ func TestPollStatusFallsBackToIntervalWhenNoPane(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	pollStatus(ctx, client, 5*time.Millisecond, 0, nil, st)
+	pollStatus(ctx, client, 5*time.Millisecond, 0, nil, st, time.Now)
 
 	if st.status.Phase != protocol.PhaseAwaitingReview {
 		t.Fatalf("phase: got %q want awaiting_review", st.status.Phase)

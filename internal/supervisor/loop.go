@@ -21,6 +21,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/ownership"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
@@ -74,6 +75,15 @@ type Config struct {
 	Base     string
 	Home     string
 	Launcher string
+	// OwnerID and OwnerLabel identify this supervise invocation for the
+	// ownership lease (see internal/ownership) prepareWorktree writes into
+	// every worktree it creates. Resolved once by cmd/supervise.go — via
+	// ownership.ResolveOwnerID and ownership.DefaultOwnerLabel — before any
+	// worker is spawned, so every worker this one invocation spawns shares
+	// the same lease identity instead of each worktree claiming a fresh
+	// generated id of its own.
+	OwnerID    string
+	OwnerLabel string
 	// ReviewNote is the repo's own .argus/config.yml review_note (see
 	// internal/repoconfig), forwarded verbatim to each ReviewRequest so
 	// reviewOne's prompt carries it. Empty means no repo-specific review
@@ -498,12 +508,21 @@ func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 	}
 	sem := make(chan struct{}, n)
 
+	// Mirrors recordApproval's own cfg.Now-or-time.Now fallback: judgeEach is
+	// exercised directly by tests whose Config leaves Now unset, and pollStatus
+	// needs a clock for its per-tick owner-lease heartbeat (see
+	// ownership.Heartbeat below).
+	now := time.Now
+	if cfg.Now != nil {
+		now = cfg.Now
+	}
+
 	var wg sync.WaitGroup
 	for _, st := range states {
 		wg.Add(1)
 		go func(st *workerState) {
 			defer wg.Done()
-			pollStatus(ctx, cfg.Client, cfg.Interval, cfg.Timeout, cfg.Log, st)
+			pollStatus(ctx, cfg.Client, cfg.Interval, cfg.Timeout, cfg.Log, st, now)
 
 			one := []*workerState{st}
 			reconcile(ctx, cfg, one)
@@ -1060,6 +1079,21 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	if err := WriteBrief(p.Worktree, p.Brief); err != nil {
 		return herdr.Worktree{}, fmt.Errorf("writing brief for %s: %w", p.Task, err)
 	}
+	// Claims this worktree for cfg.OwnerID before any worker touches it, so a
+	// second, unrelated argus/herdr session's rework/rebase/ship/worker-answer
+	// call refuses by default instead of silently racing this one (see
+	// internal/ownership). cfg.OwnerID/OwnerLabel are resolved once per
+	// supervise invocation, not here, so every worker this run spawns shares
+	// one lease identity. now mirrors recordApproval's own cfg.Now-or-time.Now
+	// fallback, since prepareWorktree is exercised directly by tests whose
+	// Config leaves Now unset.
+	now := time.Now
+	if cfg.Now != nil {
+		now = cfg.Now
+	}
+	if err := ownership.Spawn(p.Worktree, cfg.OwnerID, cfg.OwnerLabel, now()); err != nil {
+		return herdr.Worktree{}, fmt.Errorf("writing owner lease for %s: %w", p.Task, err)
+	}
 	// Recorded in the repo-root pane registry (not the worktree's own
 	// lifecycle.json) so `argus worktree prune` can later close the pane
 	// herdr opened for this worktree — and its workspace, if left empty —
@@ -1381,7 +1415,7 @@ func waitForWake(ctx context.Context, client herdr.Client, log *eventlog.Logger,
 // herdr's own pane-lifecycle wait rather than sleeping blind for interval, so
 // a pane-backed worker's terminal status is noticed close to the moment herdr
 // observes its pane go idle, not up to a full interval later.
-func pollStatus(ctx context.Context, client herdr.Client, interval, timeout time.Duration, log *eventlog.Logger, st *workerState) {
+func pollStatus(ctx context.Context, client herdr.Client, interval, timeout time.Duration, log *eventlog.Logger, st *workerState, now func() time.Time) {
 	path := protocol.StatusPath(st.plan.Worktree)
 
 	// A per-worker wall-clock deadline: without it a worker that dies in a
@@ -1408,6 +1442,14 @@ func pollStatus(ctx context.Context, client herdr.Client, interval, timeout time
 			log.Action("watch", st.plan.Task, "timeout", string(st.status.Phase))
 			return
 		case <-timer.C:
+			// Advances this worktree's owner lease heartbeat on every tick
+			// supervise is actively tracking it (see internal/ownership) —
+			// a no-op if it never spawned one (e.g. --attach against a
+			// worktree with no lease). Best-effort: a write failure here
+			// must not stop the watch loop itself.
+			if herr := ownership.Heartbeat(st.plan.Worktree, now()); herr != nil {
+				log.Fail("owner_heartbeat", st.plan.Task, herr)
+			}
 			s, err := protocol.Load(path)
 			switch {
 			case err == nil && !st.dispatchedAt.IsZero() && isStale(path, st.dispatchedAt):

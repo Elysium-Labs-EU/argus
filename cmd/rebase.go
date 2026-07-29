@@ -13,6 +13,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/ownership"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
@@ -20,15 +21,18 @@ import (
 
 func newRebaseCmd() *cobra.Command {
 	var (
-		worktree      string
-		base          string
-		launcher      string
-		workerRuntime string
-		interval      time.Duration
-		force         bool
-		dryRun        bool
-		noCredProxy   bool
-		credentialEnv map[string]string
+		worktree          string
+		base              string
+		launcher          string
+		workerRuntime     string
+		interval          time.Duration
+		force             bool
+		dryRun            bool
+		noCredProxy       bool
+		credentialEnv     map[string]string
+		owner             string
+		forceForeignOwner bool
+		ownerStaleAfter   time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -55,6 +59,7 @@ conflict resolution itself needs the worker.`,
 				dryRun:        dryRun,
 				noCredProxy:   noCredProxy,
 				credentialEnv: overrides,
+				owner:         ownerFlags{owner: owner, forceForeignOwner: forceForeignOwner, ownerStaleAfter: ownerStaleAfter},
 			})
 		},
 	}
@@ -68,6 +73,9 @@ conflict resolution itself needs the worker.`,
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate the rebase worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front the rebase worker's API traffic with the credential proxy; it inherits the host's real ANTHROPIC_API_KEY")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
+	cmd.Flags().StringVar(&owner, "owner", "", ownerFlagHelp)
+	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
+	cmd.Flags().DurationVar(&ownerStaleAfter, "owner-stale-after", ownership.DefaultStaleAfter, ownerStaleAfterFlagHelp)
 	return cmd
 }
 
@@ -83,9 +91,10 @@ type rebaseOpts struct {
 	base             string
 	launcher         string
 	workerRuntime    string
-	interval         time.Duration
+	owner            ownerFlags
 	livenessTimeout  time.Duration
 	livenessInterval time.Duration
+	interval         time.Duration
 	baseIsDefault    bool
 	force            bool
 	dryRun           bool
@@ -127,6 +136,9 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 	opts.worktree = abs
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
+	if oerr := enforceOwnership(out, opts.worktree, opts.owner, time.Now()); oerr != nil {
+		return oerr
+	}
 	if opts.baseIsDefault {
 		opts.base = supervisor.ResolveBase(ctx, opts.worktree, opts.base, false)
 	}
