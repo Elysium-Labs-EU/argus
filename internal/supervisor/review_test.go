@@ -117,7 +117,7 @@ func TestAssess(t *testing.T) {
 			approve: true,
 		},
 		{
-			name: "argus config change escalates by default",
+			name: "argus config change always escalates unconditionally",
 			status: protocol.Status{
 				Phase:        protocol.PhaseAwaitingReview,
 				Tests:        pass,
@@ -125,7 +125,24 @@ func TestAssess(t *testing.T) {
 				DiffStat:     protocol.DiffStat{Insertions: 1, Deletions: 0},
 			},
 			approve:    false,
-			reasonHint: "behavior-critical",
+			reasonHint: "always reviewed regardless",
+		},
+		{
+			// Proves the fix: a policy whose AlwaysReviewPaths entirely
+			// replaces the default list (per-key replace-not-merge semantics,
+			// see repoconfig.Config.AlwaysReviewPaths) and omits
+			// .argus/config.yml must still escalate on it — selfConfigPath is
+			// checked unconditionally in Assess, not sourced from this list.
+			name: "argus config change still escalates when a repo's own always_review_paths replaces the default list",
+			status: protocol.Status{
+				Phase:        protocol.PhaseAwaitingReview,
+				Tests:        pass,
+				FilesTouched: []string{".argus/config.yml"},
+				DiffStat:     protocol.DiffStat{Insertions: 1, Deletions: 0},
+			},
+			policy:     &ReviewPolicy{AlwaysReviewPaths: []string{"internal/config"}},
+			approve:    false,
+			reasonHint: "always reviewed regardless",
 		},
 		{
 			name:       "blocked escalates",
@@ -162,6 +179,18 @@ func TestAssess(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDefaultReviewPolicyExcludesSelfConfigPath is a regression guard against
+// re-adding .argus/config.yml to the droppable AlwaysReviewPaths default list
+// — it must stay checked unconditionally in Assess via selfConfigPath
+// instead, so a repo's own always_review_paths can never silently drop it.
+func TestDefaultReviewPolicyExcludesSelfConfigPath(t *testing.T) {
+	for _, p := range DefaultReviewPolicy().AlwaysReviewPaths {
+		if p == selfConfigPath {
+			t.Fatalf("DefaultReviewPolicy().AlwaysReviewPaths contains %q, want it checked only via selfConfigPath in Assess", selfConfigPath)
+		}
 	}
 }
 

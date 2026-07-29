@@ -99,12 +99,12 @@
     },
     "proof_required_paths": {
       "type": "array",
-      "description": "Path globs whose changes require real_world_proof in a worker's report before the review gate accepts it.",
+      "description": "Path globs whose changes require real_world_proof in a worker's report before the review gate accepts it. Setting this key entirely replaces argus's own built-in default list rather than merging with it.",
       "items": { "type": "string" }
     },
     "always_review_paths": {
       "type": "array",
-      "description": "Path globs that always escalate to human/reviewer attention regardless of diff size.",
+      "description": "Path globs that always escalate to human/reviewer attention regardless of diff size. Setting this key entirely replaces argus's own built-in default list rather than merging with it. The one exception is .argus/config.yml itself: it is always checked regardless of this list, since it governs next run's own gate policy and can't be allowed to silently drop out by omission.",
       "items": { "type": "string" }
     }
   }

@@ -118,11 +118,21 @@ type Config struct {
 	// ever an error at the one place it's consumed (resolveOwnerStaleAfter),
 	// not at Load time for every command that merely reads other keys. An
 	// explicit --owner-stale-after flag always overrides this.
-	OwnerStaleAfter    string
-	MaxDiffLines       *int
-	Allow              []string
+	OwnerStaleAfter string
+	MaxDiffLines    *int
+	Allow           []string
+	// ProofRequiredPaths, when set, entirely replaces
+	// supervisor.DefaultReviewPolicy's own built-in list rather than merging
+	// with it — the same "config wins outright, no additive merge" shape
+	// every other gate-policy key here has (see resolveGatePolicy).
 	ProofRequiredPaths []string
-	AlwaysReviewPaths  []string
+	// AlwaysReviewPaths, when set, entirely replaces
+	// supervisor.DefaultReviewPolicy's own built-in list rather than merging
+	// with it, same as ProofRequiredPaths. The one exception is
+	// .argus/config.yml itself: supervisor.Assess checks it unconditionally,
+	// independent of this list, so a repo's own AlwaysReviewPaths can never
+	// silently drop that check by omission — see supervisor's selfConfigPath.
+	AlwaysReviewPaths []string
 	// Deprecated is populated only by Load/parseYAML reading an old-named key
 	// (see deprecatedKeyAliases) — never set by anything that constructs a
 	// Config directly, such as runInit's own suggested/cfg values.
