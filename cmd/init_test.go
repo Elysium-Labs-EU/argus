@@ -5,11 +5,22 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 )
+
+// initPromptExemptFields lists Config fields runInit deliberately does not
+// prompt for, with the reason it's fine to stay hand-edit-only (see
+// schemas/config.schema.json). Empty today — every field is either
+// interactively prompted or (Forge) has its own dedicated flag/prompt path —
+// so the next field that genuinely warrants hand-edit-only status has a
+// place to record why, instead of that decision happening by omission.
+var initPromptExemptFields = map[string]string{}
+
+const wantConfigFieldCount = 17 // repoconfig.Config's current field count
 
 func writeMarker(t *testing.T, dir, name string) {
 	t.Helper()
@@ -138,7 +149,13 @@ func TestRunInitInteractivePromptsAcceptEdits(t *testing.T) {
 	}
 }
 
-func TestRunInitInteractivePromptsAllFields(t *testing.T) {
+// TestRunInitInteractivePromptsCoreFields exercises comma-list/int-parsing
+// edge cases for a representative subset of runInit's prompts (base_branch,
+// allow, brief_note, max_diff_lines, proof_required_paths,
+// always_review_paths, worker_placement) — it does not assert completeness
+// across every Config field; that guarantee is TestRunInitPromptsSetEveryConfigField's
+// job.
+func TestRunInitInteractivePromptsCoreFields(t *testing.T) {
 	dir := t.TempDir()
 	writeMarker(t, dir, "Makefile")
 
@@ -148,8 +165,9 @@ func TestRunInitInteractivePromptsAllFields(t *testing.T) {
 	cmd.SetErr(&buf)
 	cmd.SetContext(context.Background())
 	// base_branch, allow, brief_note (keep detected), max_diff_lines,
-	// proof_required_paths, always_review_paths, worker_placement — every
-	// field init supports, each edited to a non-default value.
+	// proof_required_paths, always_review_paths, worker_placement — a
+	// representative subset of init's prompts, each edited to a non-default
+	// value.
 	cmd.SetIn(strings.NewReader("main\nBash(make *)\n\n250\nterraform, deploy\nauth\ntab\n"))
 
 	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
@@ -259,9 +277,11 @@ func TestRunInitInteractivePromptWritesForge(t *testing.T) {
 	cmd.SetErr(&buf)
 	cmd.SetContext(context.Background())
 	// base_branch, allow, brief_note, max_diff_lines, proof_required_paths,
-	// always_review_paths, worker_placement, ship_lint (all bare Enter), then
-	// forge.
-	cmd.SetIn(strings.NewReader("\n\n\n\n\n\n\n\ngitlab\n"))
+	// always_review_paths, worker_placement, ship_verify_command,
+	// gate_verify_command, worktree_setup_command, review_effort, launcher,
+	// worktree_dir, title_prefix_template, review_note (all bare Enter, 15
+	// prompts), then forge.
+	cmd.SetIn(strings.NewReader("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ngitlab\n"))
 
 	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
 		t.Fatalf("runInit: %v", err)
@@ -332,6 +352,54 @@ func TestRunInitYesOverwritesExistingConfigWithoutAsking(t *testing.T) {
 	}
 	if len(got.Allow) != 1 || got.Allow[0] != "Bash(make *)" {
 		t.Errorf("Allow = %v, want the fresh Makefile suggestion", got.Allow)
+	}
+}
+
+func TestRunInitPromptsSetEveryConfigField(t *testing.T) {
+	typ := reflect.TypeFor[repoconfig.Config]()
+	if typ.NumField() != wantConfigFieldCount {
+		t.Fatalf("repoconfig.Config has %d fields, want %d — a field was added or removed: update wantConfigFieldCount and either add a runInit prompt for it or add it to initPromptExemptFields with a documented reason", typ.NumField(), wantConfigFieldCount)
+	}
+
+	dir := t.TempDir()
+	writeMarker(t, dir, "Makefile")
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	// One recognizable answer per prompt, in runInit's own order: base_branch,
+	// allow, brief_note, max_diff_lines, proof_required_paths,
+	// always_review_paths, worker_placement, ship_verify_command,
+	// gate_verify_command, worktree_setup_command, review_effort, launcher,
+	// worktree_dir, title_prefix_template, review_note, forge.
+	answers := []string{
+		"develop", "Bash(task *)", "custom brief", "250", "terraform", "auth",
+		"tab", "make lint", "make ci", "cp ../.env .env", "high",
+		"codex --full-auto", "..", "TICKET-{issue}: ", "pay attention", "gitlab",
+	}
+	cmd.SetIn(strings.NewReader(strings.Join(answers, "\n") + "\n"))
+	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	got, err := repoconfig.Load(repoconfig.Path(dir))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	v := reflect.ValueOf(got)
+	for i := 0; i < typ.NumField(); i++ {
+		name := typ.Field(i).Name
+		if name == "Deprecated" {
+			continue // populated only when an old-named key is read back, not by writing a fresh config
+		}
+		if reason, ok := initPromptExemptFields[name]; ok {
+			t.Logf("field %q exempt from prompting: %s", name, reason)
+			continue
+		}
+		if v.Field(i).IsZero() {
+			t.Errorf("Config field %q is still zero after every prompt was answered — runInit has no prompt for it", name)
+		}
 	}
 }
 

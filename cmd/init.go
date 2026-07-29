@@ -100,7 +100,14 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.ProofRequiredPaths = promptList(reader, out, "proof_required_paths", suggested.ProofRequiredPaths)
 		cfg.AlwaysReviewPaths = promptList(reader, out, "always_review_paths", suggested.AlwaysReviewPaths)
 		cfg.WorkerPlacement = promptLine(reader, out, "worker_placement (workspace|tab)", suggested.WorkerPlacement)
-		cfg.ShipLint = promptLine(reader, out, "ship_lint (controller-side gate command run before commit)", suggested.ShipLint)
+		cfg.ShipLint = promptLine(reader, out, "ship_verify_command (controller-side gate command run before commit)", suggested.ShipLint)
+		cfg.VerifyCommand = promptLine(reader, out, "gate_verify_command (gate: shell command re-run in a worker's worktree before a verdict is recorded)", suggested.VerifyCommand)
+		cfg.WorktreeSetupCmd = promptLine(reader, out, "worktree_setup_command (runs once in a fresh worktree, right after git worktree add, before the worker's agent starts)", suggested.WorktreeSetupCmd)
+		cfg.ReviewEffort = promptLine(reader, out, "review_effort (low|medium|high|xhigh|max)", suggested.ReviewEffort)
+		cfg.Launcher = promptLine(reader, out, "launcher (command started in each worker pane)", suggested.Launcher)
+		cfg.WorktreeDir = promptLine(reader, out, "worktree_dir (blank for <repo>/.claude/worktrees/<branch>; \"..\" for a sibling-of-repo layout)", suggested.WorktreeDir)
+		cfg.TitlePrefixTemplate = promptLine(reader, out, "title_prefix_template (required PR/commit title prefix, e.g. \"TICKET-{issue}: \")", suggested.TitlePrefixTemplate)
+		cfg.ReviewNote = promptLine(reader, out, "review_note (free-text note appended to the reviewer's prompt)", suggested.ReviewNote)
 		cfg.Forge = promptLine(reader, out, "forge (self-hosted only: gitlab|gitea, blank for hosted/auto-detected)", suggested.Forge)
 	}
 
