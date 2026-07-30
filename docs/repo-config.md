@@ -91,6 +91,19 @@ All keys are optional; a missing file is equivalent to an empty one.
   Precedence: an explicit `--worktree-setup-cmd` flag, then this key, then
   unset (no command runs — today's prior behavior). Unset by default; a repo
   owner opts in.
+- **`owner_stale_after`** — how long a worktree's owner-lease heartbeat
+  (`.claude/argus/owner.json`, written by `internal/ownership`) may go quiet
+  before `rework`/`rebase`/`ship`/`worker answer` let a *mismatched* caller
+  proceed anyway (with a logged notice) instead of refusing outright — see
+  the ownership-lease guarantee in `.claude/skills/argus/SKILL.md`. A Go
+  duration string, e.g. `"30m"` or `"1h"`. Precedence: an explicit
+  `--owner-stale-after` flag, then this key, then the built-in default
+  (`ownership.DefaultStaleAfter`, 30m). Unlike `--owner`/
+  `--force-foreign-owner` — per-invocation identity/override, never
+  config-able, since baking either into a repo-committed file would mean
+  every session claims the same lease identity or silently bypasses every
+  mismatch for every developer — this key is a repo-wide policy choice, the
+  same shape as `max_diff_lines`.
 
 ## Why this is safe from a worker
 

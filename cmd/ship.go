@@ -68,7 +68,10 @@ owner/name and branch are derived from the worktree unless overridden.`,
 				jiraIssue: jiraIssue, jiraTransition: jiraTransition, jiraAssignee: jiraAssignee,
 				forgeKind: forgeKind, forgeKindExplicit: cmd.Flags().Changed("forge"),
 				titlePrefixTemplate: titlePrefixTemplate, titlePrefixTemplateExplicit: cmd.Flags().Changed("title-prefix-template"),
-				owner: ownerFlags{owner: owner, forceForeignOwner: forceForeignOwner, ownerStaleAfter: ownerStaleAfter},
+				owner: ownerFlags{
+					owner: owner, forceForeignOwner: forceForeignOwner,
+					ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
+				},
 			})
 		},
 	}
@@ -178,7 +181,7 @@ func resolveShipContext(ctx context.Context, out io.Writer, a *shipArgs) (*shipC
 		return nil, err
 	}
 	a.worktree = resolved
-	if oerr := enforceOwnership(out, a.worktree, a.owner, time.Now()); oerr != nil {
+	if oerr := enforceOwnership(ctx, out, a.worktree, a.owner, time.Now()); oerr != nil {
 		return nil, oerr
 	}
 	if a.baseIsDefault {

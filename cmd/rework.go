@@ -88,7 +88,10 @@ outcome instead of retrying forever.`,
 				},
 				verifyCmd:         verifyCmd,
 				verifyCmdExplicit: cmd.Flags().Changed("verify-cmd"),
-				owner:             ownerFlags{owner: owner, forceForeignOwner: forceForeignOwner, ownerStaleAfter: ownerStaleAfter},
+				owner: ownerFlags{
+					owner: owner, forceForeignOwner: forceForeignOwner,
+					ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
+				},
 			})
 		},
 	}
@@ -173,7 +176,7 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 	opts.worktree = abs
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
-	if oerr := enforceOwnership(out, opts.worktree, opts.owner, time.Now()); oerr != nil {
+	if oerr := enforceOwnership(ctx, out, opts.worktree, opts.owner, time.Now()); oerr != nil {
 		return oerr
 	}
 	if opts.maxRounds <= 0 {

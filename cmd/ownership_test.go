@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +50,7 @@ func failingHerdrClient(t *testing.T) herdr.Client {
 func TestEnforceOwnershipMissingLeaseSilent(t *testing.T) {
 	wt := t.TempDir()
 	var buf bytes.Buffer
-	if err := enforceOwnership(&buf, wt, ownerFlags{owner: "anyone"}, time.Now()); err != nil {
+	if err := enforceOwnership(context.Background(), &buf, wt, ownerFlags{owner: "anyone"}, time.Now()); err != nil {
 		t.Fatalf("a worktree with no recorded lease should never refuse, got: %v", err)
 	}
 	if buf.String() != "" {
@@ -60,7 +63,7 @@ func TestEnforceOwnershipSameOwnerSilent(t *testing.T) {
 	now := time.Now()
 	seedOwnerLease(t, wt, now)
 	var buf bytes.Buffer
-	if err := enforceOwnership(&buf, wt, ownerFlags{owner: "sess-1"}, now); err != nil {
+	if err := enforceOwnership(context.Background(), &buf, wt, ownerFlags{owner: "sess-1"}, now); err != nil {
 		t.Fatalf("the owning caller should never refuse, got: %v", err)
 	}
 	if buf.String() != "" {
@@ -73,7 +76,7 @@ func TestEnforceOwnershipMismatchRefuses(t *testing.T) {
 	now := time.Now()
 	seedOwnerLease(t, wt, now)
 	var buf bytes.Buffer
-	err := enforceOwnership(&buf, wt, ownerFlags{owner: "sess-2"}, now)
+	err := enforceOwnership(context.Background(), &buf, wt, ownerFlags{owner: "sess-2"}, now)
 	if err == nil {
 		t.Fatal("want a mismatched, still-fresh lease to refuse")
 	}
@@ -87,7 +90,7 @@ func TestEnforceOwnershipForceBypassesMismatch(t *testing.T) {
 	now := time.Now()
 	seedOwnerLease(t, wt, now)
 	var buf bytes.Buffer
-	if err := enforceOwnership(&buf, wt, ownerFlags{owner: "sess-2", forceForeignOwner: true}, now); err != nil {
+	if err := enforceOwnership(context.Background(), &buf, wt, ownerFlags{owner: "sess-2", forceForeignOwner: true}, now); err != nil {
 		t.Fatalf("--force-foreign-owner should bypass a mismatch, got: %v", err)
 	}
 }
@@ -97,11 +100,81 @@ func TestEnforceOwnershipStaleMismatchPrintsNoticeAndProceeds(t *testing.T) {
 	spawned := time.Now().Add(-time.Hour)
 	seedOwnerLease(t, wt, spawned)
 	var buf bytes.Buffer
-	if err := enforceOwnership(&buf, wt, ownerFlags{owner: "sess-2", ownerStaleAfter: 30 * time.Minute}, time.Now()); err != nil {
+	if err := enforceOwnership(context.Background(), &buf, wt, ownerFlags{owner: "sess-2", ownerStaleAfter: 30 * time.Minute}, time.Now()); err != nil {
 		t.Fatalf("a stale mismatched lease should not refuse, got: %v", err)
 	}
 	if !strings.Contains(buf.String(), "gone quiet") {
 		t.Errorf("want a stale-lease notice printed, got: %q", buf.String())
+	}
+}
+
+// initOwnerConfigRepo makes a real git checkout with .argus/config.yml
+// containing owner_stale_after: ownerStaleAfterYAML, so
+// resolveOwnerStaleAfterForWorktree's supervisor.RepoRoot call has a real
+// repo to resolve — mirrors attachWorktree's own local git helper closure.
+func initOwnerConfigRepo(t *testing.T, ownerStaleAfterYAML string) string {
+	t.Helper()
+	wt := t.TempDir()
+	git := func(args ...string) {
+		if out, err := exec.Command("git", append([]string{"-C", wt}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	git("init", "-q")
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "-q", "--allow-empty", "-m", "base")
+	cfgPath := filepath.Join(wt, ".argus", "config.yml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir .argus: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("owner_stale_after: \""+ownerStaleAfterYAML+"\"\n"), 0o644); err != nil {
+		t.Fatalf("writing config.yml: %v", err)
+	}
+	return wt
+}
+
+func TestEnforceOwnershipUsesRepoConfigOwnerStaleAfterWhenFlagNotExplicit(t *testing.T) {
+	wt := initOwnerConfigRepo(t, "1m")
+	// Stale by the repo's own 1m threshold, but well inside the flag's own
+	// 30m default — proves the config value, not the flag default, decided
+	// this.
+	spawned := time.Now().Add(-5 * time.Minute)
+	seedOwnerLease(t, wt, spawned)
+	var buf bytes.Buffer
+	err := enforceOwnership(context.Background(), &buf, wt, ownerFlags{owner: "sess-2", ownerStaleAfter: 30 * time.Minute}, time.Now())
+	if err != nil {
+		t.Fatalf("a lease stale by the repo config's 1m threshold should not refuse, got: %v", err)
+	}
+	if !strings.Contains(buf.String(), "gone quiet") {
+		t.Errorf("want a stale-lease notice printed, got: %q", buf.String())
+	}
+}
+
+func TestEnforceOwnershipExplicitFlagWinsOverRepoConfigOwnerStaleAfter(t *testing.T) {
+	wt := initOwnerConfigRepo(t, "1m")
+	// Only 5m stale: past the repo's 1m config threshold, but inside an
+	// explicit --owner-stale-after 30m the operator passed on the command
+	// line — the flag must win, so this should still refuse.
+	spawned := time.Now().Add(-5 * time.Minute)
+	seedOwnerLease(t, wt, spawned)
+	var buf bytes.Buffer
+	err := enforceOwnership(context.Background(), &buf, wt, ownerFlags{
+		owner: "sess-2", ownerStaleAfter: 30 * time.Minute, ownerStaleAfterExplicit: true,
+	}, time.Now())
+	if err == nil {
+		t.Fatal("want an explicit --owner-stale-after to win over the repo config's shorter threshold and still refuse")
+	}
+}
+
+func TestResolveOwnerStaleAfterForWorktreeOutsideRepoFallsBackToFlag(t *testing.T) {
+	wt := t.TempDir()
+	got, err := resolveOwnerStaleAfterForWorktree(context.Background(), wt, false, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("a worktree outside any git repo should fall back, not error: %v", err)
+	}
+	if got != 30*time.Minute {
+		t.Errorf("resolveOwnerStaleAfterForWorktree = %v, want the flag's own default", got)
 	}
 }
 

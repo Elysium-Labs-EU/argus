@@ -48,7 +48,10 @@ the same as any other report.`,
 			}
 			logger, closeLog := openRunLog(cmd, "worker-answer")
 			defer closeLog()
-			of := ownerFlags{owner: owner, forceForeignOwner: forceForeignOwner, ownerStaleAfter: ownerStaleAfter}
+			of := ownerFlags{
+				owner: owner, forceForeignOwner: forceForeignOwner,
+				ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
+			}
 			return runWorkerAnswer(cmd, herdr.New(), logger, args[0], text, option, of, time.Now)
 		},
 	}
@@ -74,7 +77,7 @@ func runWorkerAnswer(cmd *cobra.Command, client herdr.Client, logger *eventlog.L
 		return err
 	}
 	worktree = abs
-	if oerr := enforceOwnership(cmd.OutOrStdout(), worktree, of, now()); oerr != nil {
+	if oerr := enforceOwnership(cmd.Context(), cmd.OutOrStdout(), worktree, of, now()); oerr != nil {
 		return oerr
 	}
 

@@ -59,7 +59,10 @@ conflict resolution itself needs the worker.`,
 				dryRun:        dryRun,
 				noCredProxy:   noCredProxy,
 				credentialEnv: overrides,
-				owner:         ownerFlags{owner: owner, forceForeignOwner: forceForeignOwner, ownerStaleAfter: ownerStaleAfter},
+				owner: ownerFlags{
+					owner: owner, forceForeignOwner: forceForeignOwner,
+					ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
+				},
 			})
 		},
 	}
@@ -136,7 +139,7 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 	opts.worktree = abs
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
-	if oerr := enforceOwnership(out, opts.worktree, opts.owner, time.Now()); oerr != nil {
+	if oerr := enforceOwnership(ctx, out, opts.worktree, opts.owner, time.Now()); oerr != nil {
 		return oerr
 	}
 	if opts.baseIsDefault {
