@@ -120,19 +120,23 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 //     unwaivable. Stripped before replay so the literal command underneath
 //     is what actually gets re-run.
 //   - Target naming a subdirectory the command must be run from rather than
-//     an argument to append (e.g. a monorepo with one go.mod per plugin dir:
-//     Cmd "govulncheck ./...", Target "eos-sink-logbench") — appending it
-//     produces "govulncheck ./... eos-sink-logbench", a positional argument
-//     the tool never expected, instead of the cwd the worker actually ran
-//     it from. Detected by resolving target against worktree; only a real
-//     directory takes this branch; any other single word (e.g. a package
-//     path like "./...") falls through unchanged to the append case, since
-//     that's exactly what tools with a real positional target expect.
+//     an argument to append (e.g. a monorepo with one go.mod/Makefile per
+//     plugin dir: Cmd "govulncheck ./..." or "make crap", Target
+//     "eos-sink-logbench") — appending it produces "govulncheck ./...
+//     eos-sink-logbench", a positional argument the tool never expected,
+//     instead of the cwd the worker actually ran it from; for the make case
+//     it's worse, since "make crap eos-sink-logbench" reads as a second,
+//     nonexistent target and fails with "No rule to make target". Detected
+//     by resolving target against worktree; only a real directory takes
+//     this branch (both here and in the make branch above) — any other
+//     single word (e.g. a package path like "./...") falls through
+//     unchanged to the append case, since that's exactly what tools with a
+//     real positional target expect.
 func replayCommands(worktree, cmd, target string) []replayCmd {
 	cmd = stripTrailingParenthetical(cmd)
 
 	if fields := strings.Fields(cmd); len(fields) >= 2 && fields[0] == "make" {
-		return []replayCmd{{cmd: "make " + fields[1], dir: worktree}}
+		return []replayCmd{{cmd: "make " + fields[1], dir: targetDir(worktree, target)}}
 	}
 
 	if target == "" || strings.Contains(cmd, target) {
@@ -155,11 +159,34 @@ func replayCommands(worktree, cmd, target string) []replayCmd {
 		return []replayCmd{{cmd: cmd, dir: worktree}}
 	}
 
-	if info, err := os.Stat(filepath.Join(worktree, target)); err == nil && info.IsDir() {
-		return []replayCmd{{cmd: cmd, dir: filepath.Join(worktree, target)}}
+	if dir, ok := targetDirIfExists(worktree, target); ok {
+		return []replayCmd{{cmd: cmd, dir: dir}}
 	}
 
 	return []replayCmd{{cmd: cmd + " " + target, dir: worktree}}
+}
+
+// targetDirIfExists resolves target against worktree and reports whether the
+// result is a real directory — the shared test the make branch and the
+// final directory-detection branch both need before treating target as a
+// cwd rather than a positional argument.
+func targetDirIfExists(worktree, target string) (string, bool) {
+	dir := filepath.Join(worktree, target)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return dir, false
+	}
+	return dir, info.IsDir()
+}
+
+// targetDir is targetDirIfExists with the not-a-directory case folded to
+// worktree itself, for call sites (like the make branch) that always need
+// some dir and fall back to worktree when target isn't one.
+func targetDir(worktree, target string) string {
+	if dir, ok := targetDirIfExists(worktree, target); ok {
+		return dir
+	}
+	return worktree
 }
 
 // replayCmd is one command line replayCommands recomposed, paired with the
