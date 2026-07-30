@@ -409,7 +409,7 @@ func TestSpawnWorkersTasksFileMultiLineBriefWithSingleBranchErrors(t *testing.T)
 
 	_, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: "/pinned", tasksFile: path, branches: []string{"single-branch"},
-	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
 	if err == nil {
 		t.Fatal("want error: 3 tasks-file lines paired with 1 --branches entry")
 	}
