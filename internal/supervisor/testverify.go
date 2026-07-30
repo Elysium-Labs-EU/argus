@@ -275,13 +275,13 @@ func isShellSyntaxError(cmdStr string, res verifyResult) bool {
 	return shellSyntaxErrorPattern.Match(res.output)
 }
 
-// verifyCommandTimeout bounds one run of a repo's configured verify_command
+// verifyCommandTimeout bounds one run of a repo's configured gate_verify_command
 // (see repoconfig.Config.GateVerifyCommand). It is longer than testVerifyTimeout
 // because this command is repo-owner-chosen and may itself chain build+lint+
 // test (e.g. "make ci"), not a single reported test target.
 const verifyCommandTimeout = 10 * time.Minute
 
-// RunGateVerifyCommand re-runs a repo's own configured verify_command inside
+// RunGateVerifyCommand re-runs a repo's own configured gate_verify_command inside
 // worktree: the gate otherwise only reproduces a worker's *claimed* test
 // passes (VerifyTests), never a repo's own lint/build/pre-commit, so a diff
 // could earn a clean verdict and then fail at `argus ship`'s `git commit`

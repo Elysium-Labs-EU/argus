@@ -1003,7 +1003,7 @@ func repoBriefNote(out io.Writer, repoPath string, bn briefNoteOverride) string 
 // repo owner can disable.
 //
 // The lint/build/pre-commit sentence below closes the other half of the same
-// gap a configured verify_command closes on the gate side (see
+// gap a configured gate_verify_command closes on the gate side (see
 // resolveGateVerifyCommand): `argus ship`'s `git commit` runs whatever hooks the
 // target repo has wired up (e.g. lefthook running golangci-lint), so a diff
 // that never ran them locally can earn a clean gate verdict and still fail

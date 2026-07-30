@@ -440,7 +440,7 @@ func TestSpawnWorkersTasksFileParagraphNoBranchesErrors(t *testing.T) {
 
 	_, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: "/pinned", tasksFile: path,
-	}, nil, nil, nil, jiraSpawnOpts{}, "", false)
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
 	if err == nil {
 		t.Fatal("want error: a paragraph-shaped --tasks-file brief must be refused even with no --branches given")
 	}
