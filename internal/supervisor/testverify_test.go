@@ -108,6 +108,30 @@ func TestVerifyTestsSkipsRedundantTargetAlreadyInCmd(t *testing.T) {
 	}
 }
 
+// TestVerifyTestsRunsFromTargetSubdirWhenItExists is the regression for a
+// monorepo per-module Target (e.g. eos-plugins: one go.mod per plugin dir,
+// no root module) being appended as a positional argument instead of
+// becoming the re-run's cwd. Without the fix, replaying from wt fails to
+// find go.mod at all (or errors on the stray extra argument); the worker's
+// own original run, from inside the plugin dir, genuinely passed.
+func TestVerifyTestsRunsFromTargetSubdirWhenItExists(t *testing.T) {
+	wt := t.TempDir()
+	plugin := filepath.Join(wt, "eos-sink-logbench")
+	if err := os.Mkdir(plugin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "go.mod"), []byte("module eos-sink-logbench\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []protocol.TestRun{
+		{Cmd: "test -f go.mod", Target: "eos-sink-logbench", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — a directory-valued Target must set cwd, not become a positional argument", mismatches)
+	}
+}
+
 // TestVerifyTestsSplitsCommaSeparatedTargetIntoOneRunEach is the regression
 // for the multiple-positional-args failure: a worker's Target sometimes
 // lists several comma-separated files mirroring the brief's file list, which
