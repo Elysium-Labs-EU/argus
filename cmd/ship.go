@@ -279,18 +279,32 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 		return fmt.Errorf("%w%s", perr, svcstatus.Note(target.host))
 	}
 
-	prBody := buildPRBody(ctx, f, a.worktree, a.base, a.issue, target.owner, target.name)
-	pr, err := f.OpenPR(ctx, &forge.PRRequest{
-		Owner: target.owner, Repo: target.name,
-		Title: target.prTitle, Body: prBody,
-		Head: target.branch, Base: a.base,
-	})
+	// CommitAll/Push above are safe no-ops on a retry (nothing to commit, branch
+	// already up to date), but OpenPR is not idempotent: a retry after this
+	// process was killed between push and OpenPR completing would otherwise
+	// open a second PR for the same branch. FindPR closes that gap.
+	pr, existed, err := f.FindPR(ctx, target.owner, target.name, target.branch)
 	if err != nil {
-		logger.Fail("open_pr", target.branch, err)
-		return err
+		logger.Fail("find_pr", target.branch, err)
+		return fmt.Errorf("checking for an existing PR before opening one: %w", err)
 	}
-	logger.Action("open_pr", target.branch, "ok", pr.HTMLURL)
-	_, _ = fmt.Fprintf(out, "%s opened PR #%d: %s\n", ui.LabelSuccess.Render("✓"), pr.Number, pr.HTMLURL)
+	if existed {
+		logger.Action("find_pr", target.branch, "reused", pr.HTMLURL)
+		_, _ = fmt.Fprintf(out, "%s reusing existing PR #%d: %s\n", ui.LabelSuccess.Render("✓"), pr.Number, pr.HTMLURL)
+	} else {
+		prBody := buildPRBody(ctx, f, a.worktree, a.base, a.issue, target.owner, target.name)
+		pr, err = f.OpenPR(ctx, &forge.PRRequest{
+			Owner: target.owner, Repo: target.name,
+			Title: target.prTitle, Body: prBody,
+			Head: target.branch, Base: a.base,
+		})
+		if err != nil {
+			logger.Fail("open_pr", target.branch, err)
+			return err
+		}
+		logger.Action("open_pr", target.branch, "ok", pr.HTMLURL)
+		_, _ = fmt.Fprintf(out, "%s opened PR #%d: %s\n", ui.LabelSuccess.Render("✓"), pr.Number, pr.HTMLURL)
+	}
 
 	// Recorded best-effort: a write failure here must not undo an already-opened
 	// PR. Without it, `argus worktree prune` still works (it falls back to
