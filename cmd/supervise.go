@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,7 +103,7 @@ each pane's directory in --panes mode).`,
 				}
 				workers, err = attachWorkers(cmd.Context(), client, workspace, worktrees)
 			} else {
-				workers, err = spawnWorkers(cmd.Context(), client, &workerInput{
+				workers, err = spawnWorkers(cmd.Context(), client, cmd.OutOrStdout(), &workerInput{
 					panes: panes, branches: branches, labels: labels, tasks: tasks, tasksFile: tasksFile, repo: repo,
 				}, issues, jiraIssues, overrides, jiraSpawnOpts{assignToCaller: jiraAssignOnSpawn, transition: jiraTransitionOnSpawn},
 					forgeKind, cmd.Flags().Changed("forge"))
@@ -546,7 +547,7 @@ type jiraSpawnOpts struct {
 // value and whether it was actually passed, needed only for --issues (the one
 // forge.New call this path makes, to fetch issue bodies before any worker
 // exists).
-func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) ([]supervisor.Worker, error) {
+func spawnWorkers(ctx context.Context, client herdr.Client, w io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) ([]supervisor.Worker, error) {
 	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && in.tasksFile == "" && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
@@ -557,7 +558,7 @@ func spawnWorkers(ctx context.Context, client herdr.Client, in *workerInput, iss
 		return nil, err
 	}
 	if in.tasksFile != "" {
-		fileTasks, err := loadTasksFile(in.tasksFile)
+		fileTasks, err := loadTasksFile(w, in.tasksFile)
 		if err != nil {
 			return nil, err
 		}
@@ -595,7 +596,16 @@ func resolveSpawnRepo(in *workerInput) error {
 // prose (`bare " in non-quoted-field`); a tasks file sidesteps that entirely by
 // only ever splitting on newlines, so a multi-sentence brief with punctuation
 // survives untouched as long as it stays on one line.
-func loadTasksFile(path string) ([]string, error) {
+//
+// It structurally preflight-checks the file before any worker spawns: a blank
+// line between two non-blank lines is refused outright (a paragraph-shaped
+// brief pasted in by mistake — blank-line-separated paragraphs — otherwise
+// silently becomes one worker per line/sentence with no --branches count
+// mismatch to catch it, since that check only fires when --branches is
+// explicitly given). w receives a non-blocking warning when line lengths vary
+// wildly, a second-order signal of the same mistake in files with no blank
+// lines at all (e.g. a paragraph broken one sentence per line).
+func loadTasksFile(w io.Writer, path string) ([]string, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is the operator-supplied --tasks-file, a deliberate local file read, not remote input
 	if err != nil {
 		return nil, &ui.UserError{
@@ -603,10 +613,26 @@ func loadTasksFile(path string) ([]string, error) {
 			Hint: "pass a path to a file with one task per line",
 		}
 	}
+	rawLines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	for i := range rawLines {
+		rawLines[i] = strings.TrimRight(rawLines[i], "\r")
+	}
+	lastNonBlank := -1
+	for i, line := range rawLines {
+		if line != "" {
+			lastNonBlank = i
+		}
+	}
 	var tasks []string
-	for line := range strings.SplitSeq(strings.TrimRight(string(data), "\n"), "\n") {
-		line = strings.TrimRight(line, "\r")
+	for i, line := range rawLines {
 		if line == "" {
+			if i < lastNonBlank {
+				return nil, &ui.UserError{
+					Err: fmt.Errorf("--tasks-file %s has a blank line between non-blank lines (line %d)", path, i+1),
+					Hint: "one brief per line, no blank lines between them; a multi-paragraph brief with blank-line-separated " +
+						"paragraphs would otherwise split into one worker per line — put the whole brief on a single line instead",
+				}
+			}
 			continue
 		}
 		tasks = append(tasks, line)
@@ -617,7 +643,45 @@ func loadTasksFile(path string) ([]string, error) {
 			Hint: "each line becomes one worker's task",
 		}
 	}
+	warnAnomalousTaskLineLengths(w, path, tasks)
 	return tasks, nil
+}
+
+// anomalousLineLengthRatio and anomalousLineLengthFloor gate
+// warnAnomalousTaskLineLengths: flagging every file with some length variance
+// (a perfectly normal shape — a short "fix typo" task next to a long
+// multi-sentence one) would make the warning noise, not signal. Requiring
+// both a large ratio and a genuinely long longest line narrows it to the
+// shape a paragraph broken one sentence per line (no blank separators)
+// actually produces: several short fragments alongside a much longer one.
+const (
+	anomalousLineLengthRatio = 5
+	anomalousLineLengthFloor = 40
+)
+
+// warnAnomalousTaskLineLengths prints a non-blocking warning (never an error —
+// this heuristic is too fuzzy to fail the run on) when a --tasks-file's line
+// lengths vary far more than typical hand-written one-brief-per-line tasks
+// do, the second-order signal loadTasksFile's hard blank-line check can't
+// catch: a paragraph broken one sentence per line, with no blank lines
+// separating it from a genuinely intended multi-task file.
+func warnAnomalousTaskLineLengths(w io.Writer, path string, tasks []string) {
+	if len(tasks) < 3 {
+		return
+	}
+	minLen, maxLen := len(tasks[0]), len(tasks[0])
+	for _, t := range tasks[1:] {
+		if l := len(t); l < minLen {
+			minLen = l
+		} else if l > maxLen {
+			maxLen = l
+		}
+	}
+	if minLen == 0 || maxLen < anomalousLineLengthFloor || maxLen < anomalousLineLengthRatio*minLen {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "%s --tasks-file %s: %d lines range from %d to %d characters — if this was meant as one multi-paragraph brief, put it on a single line; as-is it becomes %d separate workers\n",
+		ui.LabelWarning.Render("○"), path, len(tasks), minLen, maxLen, len(tasks))
 }
 
 // foldIssueSources turns --issues and --jira-issues into worker briefs and
