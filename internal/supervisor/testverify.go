@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,7 +28,15 @@ const maxCapturedOutput = 4000
 // has no git ground truth to cross-check, so the gate must reproduce it
 // itself rather than trust status.json. A claimed fail or skip is left alone:
 // Assess already escalates on any reported failure regardless of this check,
-// and a claimed skip makes no pass assertion to falsify.
+// and a claimed skip makes no pass assertion to falsify. A claimed git
+// mutation (commit/push/merge/rebase) is also left alone: unlike a test,
+// lint, or build, these commands are not safely repeatable — a second
+// `git commit` has nothing left to stage (exit 1, not evidence the first
+// commit never happened), and a second `git push` either no-ops or fails on
+// the re-run subprocess's own credentials, neither of which says anything
+// about whether the worker's original push landed. This check does have
+// git ground truth for these specifically (the measured diff, the branch's
+// state on origin), unlike the general case this function exists for.
 //
 // A single failing sample is not trusted on its own: a slow, multi-stage
 // command (build, race tests, lint, coverage) sharing a machine with other
@@ -38,7 +47,7 @@ const maxCapturedOutput = 4000
 func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun, timeout time.Duration) []string {
 	var mismatches []string
 	for _, t := range tests {
-		if t.Cmd == "" || t.Result != protocol.ResultPass {
+		if t.Cmd == "" || t.Result != protocol.ResultPass || isGitMutation(t.Cmd) {
 			continue
 		}
 
@@ -75,7 +84,7 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 // replayCommands recomposes the exact command line(s) to re-run for a
 // worker's self-reported Cmd/Target, in place of a naive Cmd+" "+Target join
 // that trusts the worker's paraphrase of what it actually typed. That join
-// breaks in four observed ways, each guarded here:
+// breaks in five observed ways, each guarded here:
 //
 //   - `make <target>`: make treats every token after the target name as an
 //     additional target to build, never as an argument to the recipe — a
@@ -99,7 +108,18 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 //     positional argument reported this way is always one shell word, so
 //     Cmd is replayed bare rather than guessing where in the phrase a
 //     shell-safe split would even go.
+//   - Cmd itself carrying a trailing parenthetical aside describing what it
+//     triggers (e.g. `git commit (lefthook pre-commit: format, lint,
+//     fieldalignment, test)`) rather than being purely literal shell — the
+//     same prose-vs-argument confusion the Target case above guards against,
+//     just folded into Cmd instead. Passed to sh -c verbatim, the stray
+//     parens are a syntax error ("unexpected token `(`"), which is not
+//     evidence the underlying claim is false — yet this mismatch is
+//     unwaivable. Stripped before replay so the literal command underneath
+//     is what actually gets re-run.
 func replayCommands(cmd, target string) []string {
+	cmd = stripTrailingParenthetical(cmd)
+
 	if fields := strings.Fields(cmd); len(fields) >= 2 && fields[0] == "make" {
 		return []string{"make " + fields[1]}
 	}
@@ -125,6 +145,43 @@ func replayCommands(cmd, target string) []string {
 	}
 
 	return []string{cmd + " " + target}
+}
+
+// gitMutationSubcommands are git subcommands whose whole point is to change
+// repo state, so a second identical invocation is expected to behave
+// differently from the first (nothing left to commit, nothing new to push)
+// rather than reproduce it — see the isGitMutation call site in VerifyTests.
+var gitMutationSubcommands = map[string]bool{
+	"commit": true,
+	"push":   true,
+	"merge":  true,
+	"rebase": true,
+}
+
+// isGitMutation reports whether cmd's first two words are "git" plus one of
+// gitMutationSubcommands, regardless of any flags or trailing text after
+// that (e.g. "git push --force-with-lease" or a Cmd carrying a trailing
+// parenthetical aside, stripped separately by stripTrailingParenthetical).
+func isGitMutation(cmd string) bool {
+	fields := strings.Fields(cmd)
+	return len(fields) >= 2 && fields[0] == "git" && gitMutationSubcommands[fields[1]]
+}
+
+// trailingParenthetical matches a space-separated, unnested "(...)" aside at
+// the very end of a string, e.g. the " (lefthook pre-commit: format, lint)"
+// in `git commit (lefthook pre-commit: format, lint)`. Deliberately narrow —
+// only a *trailing* group is stripped, so parens genuinely part of a command
+// (e.g. mid-string) are left untouched.
+var trailingParenthetical = regexp.MustCompile(`\s+\([^()]*\)\s*$`)
+
+// stripTrailingParenthetical removes a trailing descriptive aside from a
+// worker-reported Cmd, leaving the literal command in front of it intact.
+// A Cmd with no such aside is returned unchanged.
+func stripTrailingParenthetical(cmd string) string {
+	if loc := trailingParenthetical.FindStringIndex(cmd); loc != nil {
+		return strings.TrimSpace(cmd[:loc[0]])
+	}
+	return cmd
 }
 
 // verifyCommandTimeout bounds one run of a repo's configured verify_command

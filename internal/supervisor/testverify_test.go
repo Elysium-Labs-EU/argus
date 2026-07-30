@@ -140,6 +140,58 @@ func TestVerifyTestsSkipsLabelShapedTarget(t *testing.T) {
 	}
 }
 
+// TestVerifyTestsSkipsTrailingParentheticalInCmd is the regression for a
+// worker folding a descriptive aside into Cmd itself rather than Target
+// (e.g. `git commit (lefthook pre-commit: format, lint, fieldalignment,
+// test)`): replayed verbatim through sh -c, the stray parens are a syntax
+// error, which previously read as a reproduced failure even though the
+// literal command in front of the aside genuinely passes.
+func TestVerifyTestsSkipsTrailingParentheticalInCmd(t *testing.T) {
+	wt := t.TempDir()
+	tests := []protocol.TestRun{
+		{Cmd: "exit 0 (lefthook pre-commit: format, lint, fieldalignment, test)", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — a trailing parenthetical aside in Cmd must be stripped before replay", mismatches)
+	}
+}
+
+// TestVerifyTestsFlagsGenuineFailureWithTrailingParenthetical confirms the
+// strip in TestVerifyTestsSkipsTrailingParentheticalInCmd doesn't also mask
+// a real failure hiding behind the same shape of aside.
+func TestVerifyTestsFlagsGenuineFailureWithTrailingParenthetical(t *testing.T) {
+	wt := t.TempDir()
+	tests := []protocol.TestRun{
+		{Cmd: "exit 1 (lefthook pre-commit: format, lint, fieldalignment, test)", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 1 {
+		t.Fatalf("mismatches = %v, want 1 entry — a genuine failure must still be flagged after stripping the aside", mismatches)
+	}
+}
+
+// TestVerifyTestsSkipsGitMutationClaims is the regression for a worker
+// (e.g. one dispatched by `argus rebase`) reporting `git commit`/`git push`
+// as claimed-pass tests[] entries: both are real, one-shot mutations, not
+// safely repeatable checks — re-running "git commit" a second time has
+// nothing staged (exit 1), which is not evidence the original commit never
+// happened. Cmd here would fail if actually re-run, proving VerifyTests
+// skips it rather than happening to pass.
+func TestVerifyTestsSkipsGitMutationClaims(t *testing.T) {
+	wt := t.TempDir()
+	tests := []protocol.TestRun{
+		{Cmd: "git commit", Result: protocol.ResultPass},
+		{Cmd: "git push --force-with-lease", Result: protocol.ResultPass},
+		{Cmd: "git merge --ff-only origin/main", Result: protocol.ResultPass},
+		{Cmd: "git rebase origin/main", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — git commit/push/merge/rebase claims must not be re-run", mismatches)
+	}
+}
+
 func TestVerifyTestsSkipsFailAndSkippedClaims(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
