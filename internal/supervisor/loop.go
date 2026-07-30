@@ -1014,12 +1014,32 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 	return states, nil
 }
 
-// prepareWorktree creates one worker's git worktree via herdr and writes its
-// settings and brief into it. Split out of execute to keep the worktree/herdr
-// side effects independently testable from pane resolution and launch, the
-// same way foldIssueSources in cmd/supervise.go isolates one source's
-// fetch-and-fold step.
+// prepareWorktree creates one worker's git worktree via herdr, provisions it
+// (setup cmd, status, settings, brief, owner lease), and registers its pane.
+// Split into three steps — createAndPlaceWorktree, provisionWorktree,
+// registerSpawnedPane — each independently testable and each staying under
+// its own CRAP budget, the same way foldIssueSources in cmd/supervise.go
+// isolates one source's fetch-and-fold step out of a larger caller.
 func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Worktree, error) {
+	wt, err := createAndPlaceWorktree(ctx, cfg, p)
+	if err != nil {
+		return herdr.Worktree{}, err
+	}
+	if err := provisionWorktree(ctx, cfg, p); err != nil {
+		return herdr.Worktree{}, err
+	}
+	if err := registerSpawnedPane(p, wt, cfg.ParentWorkspace); err != nil {
+		return herdr.Worktree{}, err
+	}
+	return wt, nil
+}
+
+// createAndPlaceWorktree opens p's git worktree via herdr and, if cfg wants
+// it nested into a parent workspace, moves its root pane there. Split out of
+// prepareWorktree as the "open the worktree and land its pane somewhere"
+// step, distinct from provisioning the worktree's own files or registering
+// the pane afterward.
+func createAndPlaceWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Worktree, error) {
 	wt, err := cfg.Client.WorktreeCreate(ctx, &herdr.WorktreeSpec{
 		Cwd:    p.RepoRoot,
 		Branch: p.Branch,
@@ -1043,6 +1063,15 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 		}
 		wt.RootPaneID = moved.PaneID
 	}
+	return wt, nil
+}
+
+// provisionWorktree runs p.Worktree's bootstrap step and writes argus's own
+// scaffolding into it — status, settings, brief, owner lease — once the
+// worktree itself already exists (see createAndPlaceWorktree). Split out of
+// prepareWorktree as the "fill in the worktree's own files" step, distinct
+// from opening/placing the worktree or registering its pane afterward.
+func provisionWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) error {
 	// Runs immediately after `git worktree add` succeeds (whether or not
 	// nesting above ran) and before any of argus's own scaffolding below, so
 	// a repo's bootstrap step (e.g. copying in gitignored per-developer local
@@ -1050,7 +1079,7 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	// failure here fails worktree creation the same way a WorktreeCreate
 	// error already does — execute never reaches PaneRun for this worker.
 	if err := RunWorktreeSetupCmd(ctx, p.Worktree, cfg.WorktreeSetupCmd); err != nil {
-		return herdr.Worktree{}, fmt.Errorf("running worktree_setup_cmd for %s: %w", p.Task, err)
+		return fmt.Errorf("running worktree_setup_cmd for %s: %w", p.Task, err)
 	}
 	// A worktree directory can carry a leftover status.json/verdict.json from an
 	// unrelated prior task — e.g. directory reuse in worktree
@@ -1060,7 +1089,7 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	// independent second guard: pollStatus also ignores any status whose
 	// UpdatedAt isn't after it.
 	if err := InvalidateStatus(p.Worktree); err != nil {
-		return herdr.Worktree{}, fmt.Errorf("invalidating stale status before dispatching %s: %w", p.Task, err)
+		return fmt.Errorf("invalidating stale status before dispatching %s: %w", p.Task, err)
 	}
 	// Records the base this worktree actually branched from — cfg.Base is a
 	// ref (e.g. "origin/main"), while protocol.Status.Base and every
@@ -1071,13 +1100,13 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	// base was actually used instead of re-defaulting to the literal "main".
 	baseBranch := strings.TrimPrefix(cfg.Base, "origin/")
 	if err := protocol.Write(protocol.StatusPath(p.Worktree), &protocol.Status{Base: baseBranch}); err != nil {
-		return herdr.Worktree{}, fmt.Errorf("recording base branch for %s: %w", p.Task, err)
+		return fmt.Errorf("recording base branch for %s: %w", p.Task, err)
 	}
 	if err := WriteSettings(p.Worktree, cfg.RepoAllow, cfg.ExtraAllow); err != nil {
-		return herdr.Worktree{}, fmt.Errorf("writing settings for %s: %w", p.Task, err)
+		return fmt.Errorf("writing settings for %s: %w", p.Task, err)
 	}
 	if err := WriteBrief(p.Worktree, p.Brief); err != nil {
-		return herdr.Worktree{}, fmt.Errorf("writing brief for %s: %w", p.Task, err)
+		return fmt.Errorf("writing brief for %s: %w", p.Task, err)
 	}
 	// Claims this worktree for cfg.OwnerID before any worker touches it, so a
 	// second, unrelated argus/herdr session's rework/rebase/ship/worker-answer
@@ -1085,38 +1114,43 @@ func prepareWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (herdr.Wor
 	// internal/ownership). cfg.OwnerID/OwnerLabel are resolved once per
 	// supervise invocation, not here, so every worker this run spawns shares
 	// one lease identity. now mirrors recordApproval's own cfg.Now-or-time.Now
-	// fallback, since prepareWorktree is exercised directly by tests whose
+	// fallback, since provisionWorktree is exercised directly by tests whose
 	// Config leaves Now unset.
 	now := time.Now
 	if cfg.Now != nil {
 		now = cfg.Now
 	}
 	if err := ownership.Spawn(p.Worktree, cfg.OwnerID, cfg.OwnerLabel, now()); err != nil {
-		return herdr.Worktree{}, fmt.Errorf("writing owner lease for %s: %w", p.Task, err)
+		return fmt.Errorf("writing owner lease for %s: %w", p.Task, err)
 	}
-	// Recorded in the repo-root pane registry (not the worktree's own
-	// lifecycle.json) so `argus worktree prune` can later close the pane
-	// herdr opened for this worktree — and its workspace, if left empty —
-	// even after the worktree directory itself is gone, e.g. deleted by hand
-	// rather than through prune. wt.RootPaneID is empty only if herdr's reply
-	// omitted it, in which case there's nothing to record or later close.
-	if wt.RootPaneID != "" {
-		reg, err := protocol.LoadPaneRegistry(p.RepoRoot)
-		if err != nil {
-			return herdr.Worktree{}, fmt.Errorf("loading pane registry for %s: %w", p.Task, err)
-		}
-		reg.Panes[p.Worktree] = wt.RootPaneID
-		if cfg.ParentWorkspace != "" {
-			if reg.Nested == nil {
-				reg.Nested = map[string]bool{}
-			}
-			reg.Nested[p.Worktree] = true
-		}
-		if err := protocol.WritePaneRegistry(p.RepoRoot, reg); err != nil {
-			return herdr.Worktree{}, fmt.Errorf("recording spawned pane for %s: %w", p.Task, err)
-		}
+	return nil
+}
+
+// registerSpawnedPane records wt's root pane (if any) in p.RepoRoot's pane
+// registry, so `argus worktree prune` can later close the pane herdr opened
+// for this worktree — and its workspace, if left empty — even after the
+// worktree directory itself is gone, e.g. deleted by hand rather than
+// through prune. wt.RootPaneID is empty only if herdr's reply omitted it, in
+// which case there's nothing to record.
+func registerSpawnedPane(p *WorkerPlan, wt herdr.Worktree, parentWorkspace string) error {
+	if wt.RootPaneID == "" {
+		return nil
 	}
-	return wt, nil
+	reg, err := protocol.LoadPaneRegistry(p.RepoRoot)
+	if err != nil {
+		return fmt.Errorf("loading pane registry for %s: %w", p.Task, err)
+	}
+	reg.Panes[p.Worktree] = wt.RootPaneID
+	if parentWorkspace != "" {
+		if reg.Nested == nil {
+			reg.Nested = map[string]bool{}
+		}
+		reg.Nested[p.Worktree] = true
+	}
+	if err := protocol.WritePaneRegistry(p.RepoRoot, reg); err != nil {
+		return fmt.Errorf("recording spawned pane for %s: %w", p.Task, err)
+	}
+	return nil
 }
 
 // resolvePaneID picks the pane a worker launches in: a caller-supplied pane
