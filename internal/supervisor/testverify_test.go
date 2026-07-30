@@ -171,6 +171,27 @@ func TestVerifyTestsFlagsGenuineFailureWithTrailingParenthetical(t *testing.T) {
 	}
 }
 
+// TestVerifyTestsSkipsGitMutationClaims is the regression for a worker
+// (e.g. one dispatched by `argus rebase`) reporting `git commit`/`git push`
+// as claimed-pass tests[] entries: both are real, one-shot mutations, not
+// safely repeatable checks — re-running "git commit" a second time has
+// nothing staged (exit 1), which is not evidence the original commit never
+// happened. Cmd here would fail if actually re-run, proving VerifyTests
+// skips it rather than happening to pass.
+func TestVerifyTestsSkipsGitMutationClaims(t *testing.T) {
+	wt := t.TempDir()
+	tests := []protocol.TestRun{
+		{Cmd: "git commit", Result: protocol.ResultPass},
+		{Cmd: "git push --force-with-lease", Result: protocol.ResultPass},
+		{Cmd: "git merge --ff-only origin/main", Result: protocol.ResultPass},
+		{Cmd: "git rebase origin/main", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — git commit/push/merge/rebase claims must not be re-run", mismatches)
+	}
+}
+
 func TestVerifyTestsSkipsFailAndSkippedClaims(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{

@@ -28,7 +28,15 @@ const maxCapturedOutput = 4000
 // has no git ground truth to cross-check, so the gate must reproduce it
 // itself rather than trust status.json. A claimed fail or skip is left alone:
 // Assess already escalates on any reported failure regardless of this check,
-// and a claimed skip makes no pass assertion to falsify.
+// and a claimed skip makes no pass assertion to falsify. A claimed git
+// mutation (commit/push/merge/rebase) is also left alone: unlike a test,
+// lint, or build, these commands are not safely repeatable — a second
+// `git commit` has nothing left to stage (exit 1, not evidence the first
+// commit never happened), and a second `git push` either no-ops or fails on
+// the re-run subprocess's own credentials, neither of which says anything
+// about whether the worker's original push landed. This check does have
+// git ground truth for these specifically (the measured diff, the branch's
+// state on origin), unlike the general case this function exists for.
 //
 // A single failing sample is not trusted on its own: a slow, multi-stage
 // command (build, race tests, lint, coverage) sharing a machine with other
@@ -39,7 +47,7 @@ const maxCapturedOutput = 4000
 func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun, timeout time.Duration) []string {
 	var mismatches []string
 	for _, t := range tests {
-		if t.Cmd == "" || t.Result != protocol.ResultPass {
+		if t.Cmd == "" || t.Result != protocol.ResultPass || isGitMutation(t.Cmd) {
 			continue
 		}
 
@@ -137,6 +145,26 @@ func replayCommands(cmd, target string) []string {
 	}
 
 	return []string{cmd + " " + target}
+}
+
+// gitMutationSubcommands are git subcommands whose whole point is to change
+// repo state, so a second identical invocation is expected to behave
+// differently from the first (nothing left to commit, nothing new to push)
+// rather than reproduce it — see the isGitMutation call site in VerifyTests.
+var gitMutationSubcommands = map[string]bool{
+	"commit": true,
+	"push":   true,
+	"merge":  true,
+	"rebase": true,
+}
+
+// isGitMutation reports whether cmd's first two words are "git" plus one of
+// gitMutationSubcommands, regardless of any flags or trailing text after
+// that (e.g. "git push --force-with-lease" or a Cmd carrying a trailing
+// parenthetical aside, stripped separately by stripTrailingParenthetical).
+func isGitMutation(cmd string) bool {
+	fields := strings.Fields(cmd)
+	return len(fields) >= 2 && fields[0] == "git" && gitMutationSubcommands[fields[1]]
 }
 
 // trailingParenthetical matches a space-separated, unnested "(...)" aside at
