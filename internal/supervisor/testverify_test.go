@@ -92,6 +92,31 @@ func TestVerifyTestsMakeTargetDropsAppendedTarget(t *testing.T) {
 	}
 }
 
+// TestVerifyTestsMakeTargetRunsFromTargetSubdirWhenItExists covers a
+// monorepo with one Makefile per module (e.g. eos-plugins' eos-sink-* dirs):
+// a worker reports {Cmd: "make crap", Target: "eos-sink-logbench"}, and the
+// make branch must resolve Target as the subdirectory to run from, not
+// discard it in favor of the worktree root — a root-level replay finds no
+// such Makefile target and fails with "No rule to make target", even though
+// the worker's own run, from inside the plugin dir, genuinely passed.
+func TestVerifyTestsMakeTargetRunsFromTargetSubdirWhenItExists(t *testing.T) {
+	wt := t.TempDir()
+	plugin := filepath.Join(wt, "eos-sink-logbench")
+	if err := os.Mkdir(plugin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "Makefile"), []byte("crap:\n\t@true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []protocol.TestRun{
+		{Cmd: "make crap", Target: "eos-sink-logbench", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — a directory-valued Target must set cwd for a make replay too, not just the bare-append case", mismatches)
+	}
+}
+
 // TestVerifyTestsSkipsRedundantTargetAlreadyInCmd is the regression for the
 // doubled-path failure: a worker sometimes folds the path into Cmd directly
 // and also repeats it in Target, and a naive join hands the tool the same
@@ -105,6 +130,30 @@ func TestVerifyTestsSkipsRedundantTargetAlreadyInCmd(t *testing.T) {
 	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — Target already present in Cmd must not be appended again", mismatches)
+	}
+}
+
+// TestVerifyTestsRunsFromTargetSubdirWhenItExists is the regression for a
+// monorepo per-module Target (e.g. eos-plugins: one go.mod per plugin dir,
+// no root module) being appended as a positional argument instead of
+// becoming the re-run's cwd. Without the fix, replaying from wt fails to
+// find go.mod at all (or errors on the stray extra argument); the worker's
+// own original run, from inside the plugin dir, genuinely passed.
+func TestVerifyTestsRunsFromTargetSubdirWhenItExists(t *testing.T) {
+	wt := t.TempDir()
+	plugin := filepath.Join(wt, "eos-sink-logbench")
+	if err := os.Mkdir(plugin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "go.mod"), []byte("module eos-sink-logbench\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []protocol.TestRun{
+		{Cmd: "test -f go.mod", Target: "eos-sink-logbench", Result: protocol.ResultPass},
+	}
+	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — a directory-valued Target must set cwd, not become a positional argument", mismatches)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -51,30 +53,30 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 			continue
 		}
 
-		for _, cmdStr := range replayCommands(t.Cmd, t.Target) {
-			first := runVerify(ctx, worktree, cmdStr, timeout)
+		for _, rc := range replayCommands(worktree, t.Cmd, t.Target) {
+			first := runVerify(ctx, rc.dir, rc.cmd, timeout)
 			if first.ok {
 				continue
 			}
 			if first.timedOut {
 				mismatches = append(mismatches, fmt.Sprintf(
-					"could not verify claimed pass of %q: re-run exceeded %s and was killed", cmdStr, timeout))
+					"could not verify claimed pass of %q: re-run exceeded %s and was killed", rc.cmd, timeout))
 				break
 			}
 
-			second := runVerify(ctx, worktree, cmdStr, timeout)
+			second := runVerify(ctx, rc.dir, rc.cmd, timeout)
 			if second.ok {
 				continue
 			}
 			if second.timedOut {
 				mismatches = append(mismatches, fmt.Sprintf(
-					"could not verify claimed pass of %q: re-run exceeded %s and was killed", cmdStr, timeout))
+					"could not verify claimed pass of %q: re-run exceeded %s and was killed", rc.cmd, timeout))
 				break
 			}
 
 			mismatches = append(mismatches, fmt.Sprintf(
 				"worker claimed %q passed, but re-running it failed twice in a row: %v\n--- attempt 1 output (tail) ---\n%s\n--- attempt 2 output (tail) ---\n%s",
-				cmdStr, second.err, tail(first.output), tail(second.output)))
+				rc.cmd, second.err, tail(first.output), tail(second.output)))
 			break
 		}
 	}
@@ -117,22 +119,35 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 //     evidence the underlying claim is false — yet this mismatch is
 //     unwaivable. Stripped before replay so the literal command underneath
 //     is what actually gets re-run.
-func replayCommands(cmd, target string) []string {
+//   - Target naming a subdirectory the command must be run from rather than
+//     an argument to append (e.g. a monorepo with one go.mod/Makefile per
+//     plugin dir: Cmd "govulncheck ./..." or "make crap", Target
+//     "eos-sink-logbench") — appending it produces "govulncheck ./...
+//     eos-sink-logbench", a positional argument the tool never expected,
+//     instead of the cwd the worker actually ran it from; for the make case
+//     it's worse, since "make crap eos-sink-logbench" reads as a second,
+//     nonexistent target and fails with "No rule to make target". Detected
+//     by resolving target against worktree; only a real directory takes
+//     this branch (both here and in the make branch above) — any other
+//     single word (e.g. a package path like "./...") falls through
+//     unchanged to the append case, since that's exactly what tools with a
+//     real positional target expect.
+func replayCommands(worktree, cmd, target string) []replayCmd {
 	cmd = stripTrailingParenthetical(cmd)
 
 	if fields := strings.Fields(cmd); len(fields) >= 2 && fields[0] == "make" {
-		return []string{"make " + fields[1]}
+		return []replayCmd{{cmd: "make " + fields[1], dir: targetDir(worktree, target)}}
 	}
 
 	if target == "" || strings.Contains(cmd, target) {
-		return []string{cmd}
+		return []replayCmd{{cmd: cmd, dir: worktree}}
 	}
 
 	if strings.Contains(target, ",") {
-		var cmds []string
+		var cmds []replayCmd
 		for p := range strings.SplitSeq(target, ",") {
 			if p = strings.TrimSpace(p); p != "" {
-				cmds = append(cmds, cmd+" "+p)
+				cmds = append(cmds, replayCmd{cmd: cmd + " " + p, dir: worktree})
 			}
 		}
 		if len(cmds) > 0 {
@@ -141,10 +156,46 @@ func replayCommands(cmd, target string) []string {
 	}
 
 	if len(strings.Fields(target)) > 1 {
-		return []string{cmd}
+		return []replayCmd{{cmd: cmd, dir: worktree}}
 	}
 
-	return []string{cmd + " " + target}
+	if dir, ok := targetDirIfExists(worktree, target); ok {
+		return []replayCmd{{cmd: cmd, dir: dir}}
+	}
+
+	return []replayCmd{{cmd: cmd + " " + target, dir: worktree}}
+}
+
+// targetDirIfExists resolves target against worktree and reports whether the
+// result is a real directory — the shared test the make branch and the
+// final directory-detection branch both need before treating target as a
+// cwd rather than a positional argument.
+func targetDirIfExists(worktree, target string) (string, bool) {
+	dir := filepath.Join(worktree, target)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return dir, false
+	}
+	return dir, info.IsDir()
+}
+
+// targetDir is targetDirIfExists with the not-a-directory case folded to
+// worktree itself, for call sites (like the make branch) that always need
+// some dir and fall back to worktree when target isn't one.
+func targetDir(worktree, target string) string {
+	if dir, ok := targetDirIfExists(worktree, target); ok {
+		return dir
+	}
+	return worktree
+}
+
+// replayCmd is one command line replayCommands recomposed, paired with the
+// directory it must run from — a monorepo per-module Target changes cwd
+// rather than becoming a positional argument, so a single command string is
+// no longer enough to describe a replay.
+type replayCmd struct {
+	cmd string
+	dir string
 }
 
 // gitMutationSubcommands are git subcommands whose whole point is to change
@@ -240,12 +291,12 @@ type verifyResult struct {
 	timedOut bool
 }
 
-func runVerify(ctx context.Context, worktree, cmdStr string, timeout time.Duration) verifyResult {
+func runVerify(ctx context.Context, dir, cmdStr string, timeout time.Duration) verifyResult {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := execArgvOrShell(runCtx, cmdStr)
-	cmd.Dir = worktree
+	cmd.Dir = dir
 	out, err := runCombinedOutput(cmd)
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 
