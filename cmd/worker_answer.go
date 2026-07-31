@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -120,7 +118,7 @@ func runWorkerAnswer(cmd *cobra.Command, client herdr.Client, logger *eventlog.L
 	}
 
 	message := supervisor.AnswerMessage(cur.Question, cur.BlockedReason, answerText)
-	if err := deliverAnswerToPane(ctx, logger, client, wt.RootPaneID, worktree, message); err != nil {
+	if err := deliverPaneMessage(ctx, logger, client, wt.RootPaneID, worktree, "answer", message); err != nil {
 		return fmt.Errorf("answer recorded, but delivery failed: %w", err)
 	}
 
@@ -158,45 +156,4 @@ func resolveAnswerText(q *protocol.Question, text string, option int) (string, e
 		}
 	}
 	return text, nil
-}
-
-// deliverAnswerToPane submits message into paneID's live agent so a blocked
-// worker can resume from a supervisor's answer without a human free-typing
-// into herdr by hand. Unlike dispatchIntoPane, there is no spawn-a-fresh-
-// agent fallback: a pane with no live agent means the original worker's
-// session is gone, and starting a brand-new one with no context beyond this
-// one message would not actually resume the blocked task — the operator
-// needs `argus rework`/`argus rebase` instead, which re-dispatch with a full
-// brief.
-func deliverAnswerToPane(ctx context.Context, logger *eventlog.Logger, client herdr.Client, paneID, worktree, message string) error {
-	_, live, err := client.AgentGet(ctx, paneID)
-	if err != nil {
-		return fmt.Errorf("checking whether pane %s has a live agent: %w", paneID, err)
-	}
-	if !live {
-		return fmt.Errorf("pane %s has no live agent — the worker's session is gone", paneID)
-	}
-
-	timeout := defaultLivenessTimeout
-	perr := client.AgentPrompt(ctx, paneID, message, timeout)
-	if perr == nil {
-		logger.Action("answer", worktree, "delivered", paneID)
-		return nil
-	}
-	if !errors.Is(perr, herdr.ErrAgentPromptStalled) {
-		return fmt.Errorf("delivering answer to pane %s: %w", paneID, perr)
-	}
-
-	logger.Action("answer", worktree, "prompt-stalled-fallback-pane-run", paneID)
-	if rerr := client.PaneRun(ctx, paneID, message); rerr != nil {
-		return fmt.Errorf("delivering answer to pane %s: %w (pane-run fallback also failed: %w)", paneID, perr, rerr)
-	}
-	if kerr := client.PaneSendKeys(ctx, paneID, "enter"); kerr != nil {
-		return fmt.Errorf("delivering answer to pane %s: %w (pane-run fallback's submit keystroke failed: %w)", paneID, perr, kerr)
-	}
-	if _, werr := client.AgentWait(ctx, paneID, []string{"working"}, timeout); werr != nil {
-		return fmt.Errorf("delivering answer to pane %s: %w (pane-run fallback sent, but agent never started working: %w)", paneID, perr, werr)
-	}
-	logger.Action("answer", worktree, "delivered-via-fallback", paneID)
-	return nil
 }

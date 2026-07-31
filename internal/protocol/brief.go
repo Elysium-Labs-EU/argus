@@ -102,4 +102,10 @@ literally enumerable. A supervisor resolves it with
 ` + "`argus worker answer <worktree> <text>`" + ` (or ` + "`--option N`" + `
 against your options), which is delivered into your pane as a chat message
 and recorded on status.json as a durable trace — act on it, then report your
-next phase as normal.`
+next phase as normal.
+
+While you are still working, a supervisor who spots a wrong turn early may
+send you a follow-up via ` + "`argus worker steer`" + ` as an ordinary chat
+message instead of waiting for you to reach a terminal phase. It is not a new
+task: keep your existing plan and context, fold the note into your current
+turn, and continue reporting phases as normal.`
