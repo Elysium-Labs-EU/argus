@@ -98,6 +98,7 @@ argus supervise --repo /path/to/project --tasks "risky change" --worker-placemen
 argus review  --worktree /path/to/project-feat-retry --base origin/main  # review one diff on demand
 argus rework  --worktree /path/to/project-feat-retry --base origin/main  # re-dispatch on request changes, loop until it clears
 argus ship    --worktree /path/to/project-feat-retry --issue 42          # ship an approved worktree to a PR
+argus tend    --worktree /path/to/project-feat-retry --dry-run           # poll a shipped PR's CI checks
 ```
 
 | Command | What it does |
@@ -108,6 +109,7 @@ argus ship    --worktree /path/to/project-feat-retry --issue 42          # ship 
 | `argus rework` | Re-dispatch a worker with a request changes verdict's findings, loop until it clears |
 | `argus ship` | Commit, push, open a PR; refused without an approving verdict unless `--force` |
 | `argus rebase` | Dispatch a worktree's worker to resolve a conflict after a merge and force push |
+| `argus tend` | Poll a shipped PR's CI checks to a terminal state (GitHub only) |
 | `argus worktree prune` | Clean up a merged worktree (`--branch <name>`, or `--merged` to sweep the repo) |
 | `argus stats` | Aggregate run logs into escalation rate, review parse fail rate, and tokens per task |
 
