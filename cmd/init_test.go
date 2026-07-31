@@ -20,7 +20,7 @@ import (
 // place to record why, instead of that decision happening by omission.
 var initPromptExemptFields = map[string]string{}
 
-const wantConfigFieldCount = 19 // repoconfig.Config's current field count
+const wantConfigFieldCount = 20 // repoconfig.Config's current field count
 
 func writeMarker(t *testing.T, dir, name string) {
 	t.Helper()

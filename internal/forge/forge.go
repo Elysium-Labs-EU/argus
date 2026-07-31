@@ -193,14 +193,14 @@ type rest struct {
 	authScheme string
 	accept     string
 	token      string
+	// statusPageURL overrides svcstatus's built-in status-page map for host;
+	// see New's own doc comment.
+	statusPageURL string
 	// checksAPI is true only for the github.com construction: GitHub's
 	// check-runs endpoint has no equivalent implemented here yet for the
 	// Gitea/Forgejo shape this same type also serves, so PRChecks must
 	// distinguish the two rather than send a request Gitea would 404 on.
 	checksAPI bool
-	// statusPageURL overrides svcstatus's built-in status-page map for host;
-	// see New's own doc comment.
-	statusPageURL string
 }
 
 func (r *rest) Host() string { return r.host }
