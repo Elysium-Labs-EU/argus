@@ -62,6 +62,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.TitlePrefixTemplate != "" {
 		fmt.Fprintf(&b, "title_prefix_template: %s\n", quoteYAML(cfg.TitlePrefixTemplate))
 	}
+	if cfg.OwnerStaleAfter != "" {
+		fmt.Fprintf(&b, "owner_stale_after: %s\n", quoteYAML(cfg.OwnerStaleAfter))
+	}
 	if cfg.MaxDiffLines != nil {
 		fmt.Fprintf(&b, "max_diff_lines: %d\n", *cfg.MaxDiffLines)
 	}
@@ -119,8 +122,8 @@ func listFieldFor(cfg *Config, key string) *[]string {
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
 // scalars (base_branch, worker_placement, launcher, forge, worktree_dir,
 // brief_note, review_note, ship_lint, verify_command, worktree_setup_cmd,
-// title_prefix_template, review_effort, max_diff_lines; value optionally
-// quoted), and a top-level list key (`allow`, `proof_required_paths`,
+// title_prefix_template, owner_stale_after, review_effort, max_diff_lines;
+// value optionally quoted), and a top-level list key (`allow`, `proof_required_paths`,
 // `always_review_paths`) followed by indented `- value` list items. Any
 // other top-level key is ignored (along with any indented block under it),
 // so a future config key this version doesn't know about doesn't break
@@ -179,7 +182,7 @@ func parseYAML(data string) (Config, error) {
 // assignScalarField sets cfg's field for one of parseYAML's scalar keys
 // (base_branch, worker_placement, launcher, forge, worktree_dir, brief_note,
 // review_note, ship_lint, verify_command, worktree_setup_cmd,
-// title_prefix_template, review_effort, max_diff_lines), reporting whether
+// title_prefix_template, owner_stale_after, review_effort, max_diff_lines), reporting whether
 // key was recognized so parseYAML can still skip an unrecognized key's
 // indented block. line is the 1-based source line, for error messages.
 func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
@@ -206,6 +209,8 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 		cfg.WorktreeSetupCmd = value
 	case "title_prefix_template":
 		cfg.TitlePrefixTemplate = value
+	case "owner_stale_after":
+		cfg.OwnerStaleAfter = value
 	case "review_effort":
 		cfg.ReviewEffort = value
 	case "max_diff_lines":

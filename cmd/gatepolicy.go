@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 // gateFlags carries supervise/rework's --max-diff-lines/--proof-required-path/
@@ -77,4 +81,26 @@ func resolveWorktreeSetupCmd(explicit bool, flagValue string, rc *repoconfig.Con
 		return rc.WorktreeSetupCmd
 	}
 	return flagValue
+}
+
+// resolveOwnerStaleAfter applies an explicit --owner-stale-after flag over
+// this repo's .argus/config.yml owner_stale_after over flagValue (already
+// ownership.DefaultStaleAfter when nothing was passed — see newRebaseCmd et
+// al.'s own flag registration), the same explicit-flag-wins precedence
+// resolveVerifyCommand/resolveWorktreeSetupCmd apply for their own sources.
+// Unlike those two (plain shell-command strings), owner_stale_after is a Go
+// duration string that can be malformed, so this is the one place in the
+// config-key chain that can fail — a bad config value surfaces as a
+// *ui.UserError naming the repo config path, not a panic or a silently
+// ignored key. explicit is cmd.Flags().Changed("owner-stale-after"). rc is a
+// pointer solely to avoid copying the struct at the call site.
+func resolveOwnerStaleAfter(explicit bool, flagValue time.Duration, rc *repoconfig.Config, configPath string) (time.Duration, error) {
+	if explicit || rc.OwnerStaleAfter == "" {
+		return flagValue, nil
+	}
+	d, err := time.ParseDuration(rc.OwnerStaleAfter)
+	if err != nil {
+		return 0, &ui.UserError{Err: fmt.Errorf("%s: owner_stale_after: %w", configPath, err)}
+	}
+	return d, nil
 }

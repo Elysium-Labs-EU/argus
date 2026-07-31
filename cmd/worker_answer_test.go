@@ -62,7 +62,7 @@ func TestRunWorkerAnswerRejectsMissingStatus(t *testing.T) {
 	client := fakeAnswerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, fixedNow(time.Now()))
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error answering a worktree with no status report, got nil")
 	}
@@ -77,7 +77,7 @@ func TestRunWorkerAnswerRejectsNonBlockedWorker(t *testing.T) {
 	client := fakeAnswerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, fixedNow(time.Now()))
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error answering a non-blocked worker, got nil")
 	}
@@ -92,7 +92,7 @@ func TestRunWorkerAnswerRejectsBothTextAndOption(t *testing.T) {
 	client := fakeAnswerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "cherry-pick", 2, fixedNow(time.Now()))
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "cherry-pick", 2, ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error when both TEXT and --option are given, got nil")
 	}
@@ -104,7 +104,7 @@ func TestRunWorkerAnswerRejectsEmptyAnswer(t *testing.T) {
 	client := fakeAnswerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "", 0, fixedNow(time.Now()))
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "", 0, ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error with no TEXT and no --option, got nil")
 	}
@@ -116,7 +116,7 @@ func TestRunWorkerAnswerRejectsOptionOutOfRange(t *testing.T) {
 	client := fakeAnswerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "", 3, fixedNow(time.Now()))
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "", 3, ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error for an out-of-range --option, got nil")
 	}
@@ -128,7 +128,7 @@ func TestRunWorkerAnswerRejectsOptionWithNoQuestion(t *testing.T) {
 	client := fakeAnswerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "", 1, fixedNow(time.Now()))
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "", 1, ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error picking --option with no reported question, got nil")
 	}
@@ -142,7 +142,7 @@ func TestRunWorkerAnswerRecordsFreeTextAndDelivers(t *testing.T) {
 	testCmdCtx, _ := testCmd()
 
 	now := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
-	if err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "cherry-pick now", 0, fixedNow(now)); err != nil {
+	if err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "cherry-pick now", 0, ownerFlags{}, fixedNow(now)); err != nil {
 		t.Fatalf("runWorkerAnswer: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestRunWorkerAnswerRecordsOptionIndex(t *testing.T) {
 	client := fakeAnswerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	if err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "", 2, fixedNow(time.Now())); err != nil {
+	if err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "", 2, ownerFlags{}, fixedNow(time.Now())); err != nil {
 		t.Fatalf("runWorkerAnswer: %v", err)
 	}
 
@@ -197,7 +197,7 @@ func TestRunWorkerAnswerNoLiveAgentStillRecords(t *testing.T) {
 	client := fakeAnswerClient(false, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, fixedNow(time.Now()))
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error when the worker's pane has no live agent, got nil")
 	}
@@ -245,7 +245,7 @@ func TestRunWorkerAnswerDeliveryStalledFallsBackToPaneRun(t *testing.T) {
 	})
 	testCmdCtx, _ := testCmd()
 
-	if err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, fixedNow(time.Now())); err != nil {
+	if err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, ownerFlags{}, fixedNow(time.Now())); err != nil {
 		t.Fatalf("runWorkerAnswer: want the pane-run fallback to succeed, got %v", err)
 	}
 	if paneRunText == "" {
@@ -266,7 +266,7 @@ func TestRunWorkerAnswerDeliveryNonStalledPromptErrorPropagates(t *testing.T) {
 	client := fakeAnswerClient(true, errors.New("herdr: socket unavailable"))
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, fixedNow(time.Now()))
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, ownerFlags{}, fixedNow(time.Now()))
 	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
 		t.Fatalf("want the AgentPrompt error propagated, got %v", err)
 	}

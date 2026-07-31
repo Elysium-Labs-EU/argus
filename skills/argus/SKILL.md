@@ -98,6 +98,33 @@ These are enforced in code, not conventions the worker is merely asked to follow
 - **`ship` refuses without a persisted approving verdict.** This is real and it is
   strict — see the gaps immediately below on exactly which actions do and do not
   produce a verdict `ship` can see.
+- **Cross-session worktree collision has a guard — an advisory ownership lease,
+  not a hard lock.** Every worktree `supervise` spawns gets a
+  `.claude/argus/owner.json` lease (`owner_id`, `owner_label`, `spawned_at`,
+  `heartbeat_at`, written by `internal/ownership`) at spawn time;
+  `supervise`'s own poll loop re-stamps `heartbeat_at` every tick for as long
+  as it keeps tracking that worktree. `rework`, `rebase`, `ship`, and
+  `worker answer` each check the caller's resolved identity against the
+  recorded lease before touching an existing worktree — identity resolves
+  `--owner` flag > `$ARGUS_OWNER_ID` > `$HERDR_WORKSPACE_ID` > a generated id,
+  the same chain `supervise` itself resolves once per run. A live mismatch
+  refuses outright, naming the actual owner; a mismatch whose `heartbeat_at`
+  has gone quiet longer than `--owner-stale-after` (default 30m) logs a
+  notice and proceeds instead of blocking forever on a session that crashed;
+  `--force-foreign-owner` is the explicit human override for anything else. A
+  worktree with no lease at all (predates this feature, or never went through
+  `supervise`'s own spawn path) is treated as unowned and never refused.
+  **What this does not do**: reap or clean up a worktree with a stale lease —
+  that's `argus worktree prune`, still not shipped (see below). A stale lease
+  only ever changes whether a *mismatched* caller may proceed; it is not
+  itself a cleanup mechanism. `--owner`/`--force-foreign-owner` are
+  necessarily per-invocation flags (an override is a human decision, not
+  something to default silently for a whole repo) and are not settable via
+  `.argus/config.yml`. `--owner-stale-after` is different — a repo-wide
+  policy knob, the same shape as `max_diff_lines` — so it *can* be set once
+  as this repo's `.argus/config.yml` `owner_stale_after` key instead of
+  repeated on every invocation (see `docs/repo-config.md`); an explicit
+  `--owner-stale-after` flag still wins over the config key.
 
 ## Known gaps — still manual, no first-class command yet
 
@@ -133,7 +160,9 @@ These are enforced in code, not conventions the worker is merely asked to follow
   bug (`--dry-run` silently mutating `lifecycle.json` despite claiming to be
   preview-only) that is still being fixed. Until it lands, treat worktree cleanup
   as fully manual (see below) — do not invoke a prune subcommand that doesn't
-  exist.
+  exist. The owner-lease `heartbeat_at`/`Stale` check above is what a future
+  `prune` would read to decide a worktree is abandoned — the lease already
+  exists, only the reaping command itself does not yet.
 - **Pre-spawn failures leave zero trace anywhere in argus's own logs.** If
   `argus supervise` errors before any worker spawns (e.g. "error creating worktree
   ... already exists"), nothing is written to `~/.argus/runs/*.jsonl` — that log

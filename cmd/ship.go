@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mattn/go-isatty"
@@ -16,6 +17,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/jira"
+	"github.com/Elysium-Labs-EU/argus/internal/ownership"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
@@ -38,6 +40,9 @@ func newShipCmd() *cobra.Command {
 		jiraAssignee        string
 		forgeKind           string
 		titlePrefixTemplate string
+		owner               string
+		forceForeignOwner   bool
+		ownerStaleAfter     time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -63,6 +68,10 @@ owner/name and branch are derived from the worktree unless overridden.`,
 				jiraIssue: jiraIssue, jiraTransition: jiraTransition, jiraAssignee: jiraAssignee,
 				forgeKind: forgeKind, forgeKindExplicit: cmd.Flags().Changed("forge"),
 				titlePrefixTemplate: titlePrefixTemplate, titlePrefixTemplateExplicit: cmd.Flags().Changed("title-prefix-template"),
+				owner: ownerFlags{
+					owner: owner, forceForeignOwner: forceForeignOwner,
+					ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
+				},
 			})
 		},
 	}
@@ -80,6 +89,9 @@ owner/name and branch are derived from the worktree unless overridden.`,
 	cmd.Flags().StringVar(&jiraAssignee, "jira-assignee", "", "with --jira-issue: Jira accountID to assign the issue to; not reassigned if unset")
 	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
 	cmd.Flags().StringVar(&titlePrefixTemplate, "title-prefix-template", "", "required PR/commit title prefix template, e.g. \"TICKET-{issue}: \" ({issue} becomes --jira-issue's key, else \"#<--issue>\", else empty); mechanically prepended to whatever title ship ends up using if missing. Without this flag, this repo's .argus/config.yml title_prefix_template key wins, then no enforcement")
+	cmd.Flags().StringVar(&owner, "owner", "", ownerFlagHelp)
+	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
+	cmd.Flags().DurationVar(&ownerStaleAfter, "owner-stale-after", ownership.DefaultStaleAfter, ownerStaleAfterFlagHelp)
 	return cmd
 }
 
@@ -104,6 +116,7 @@ type shipArgs struct {
 	// building shipArgs directly for a test that wants to skip config
 	// resolution can just set this to the final value they want enforced.
 	titlePrefixTemplate string
+	owner               ownerFlags
 	issue               int
 	force               bool
 	dryRun              bool
@@ -158,7 +171,7 @@ type shipContext struct {
 // runShip itself only has to branch on the outcome. Split out because this is
 // the bulk of runShip's own decision points; isolating them here keeps both
 // functions independently testable and each under the CRAP gate.
-func resolveShipContext(ctx context.Context, a *shipArgs) (*shipContext, error) {
+func resolveShipContext(ctx context.Context, out io.Writer, a *shipArgs) (*shipContext, error) {
 	// See supervisor.ResolveWorktree: a --worktree given relative to argus's
 	// own cwd must be resolved before it reaches CurrentBranch/CommitAll/Push
 	// or protocol.Load/LoadApproval, so every downstream call agrees on the
@@ -168,6 +181,9 @@ func resolveShipContext(ctx context.Context, a *shipArgs) (*shipContext, error) 
 		return nil, err
 	}
 	a.worktree = resolved
+	if oerr := enforceOwnership(ctx, out, a.worktree, a.owner, time.Now()); oerr != nil {
+		return nil, oerr
+	}
 	if a.baseIsDefault {
 		a.base = supervisor.ResolveBase(ctx, a.worktree, a.base, false)
 	}
@@ -205,13 +221,13 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus ship --worktree <path> --issue <n>"}
 	}
 	ctx := cmd.Context()
-	sc, err := resolveShipContext(ctx, a)
+	out := cmd.OutOrStdout()
+	sc, err := resolveShipContext(ctx, out, a)
 	if err != nil {
 		return err
 	}
 
 	reader := bufio.NewReader(cmd.InOrStdin())
-	out := cmd.OutOrStdout()
 
 	if a.dryRun {
 		// No token/forge client yet at this point (see below) — the issue-title

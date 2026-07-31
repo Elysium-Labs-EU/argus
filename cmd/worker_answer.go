@@ -10,13 +10,19 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/ownership"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 func newWorkerAnswerCmd() *cobra.Command {
-	var option int
+	var (
+		option            int
+		owner             string
+		forceForeignOwner bool
+		ownerStaleAfter   time.Duration
+	)
 
 	cmd := &cobra.Command{
 		Use:   "answer <worktree> [text]",
@@ -42,11 +48,18 @@ the same as any other report.`,
 			}
 			logger, closeLog := openRunLog(cmd, "worker-answer")
 			defer closeLog()
-			return runWorkerAnswer(cmd, herdr.New(), logger, args[0], text, option, time.Now)
+			of := ownerFlags{
+				owner: owner, forceForeignOwner: forceForeignOwner,
+				ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
+			}
+			return runWorkerAnswer(cmd, herdr.New(), logger, args[0], text, option, of, time.Now)
 		},
 	}
 
 	cmd.Flags().IntVar(&option, "option", 0, "1-indexed choice from the worker's reported question options, instead of free-form TEXT")
+	cmd.Flags().StringVar(&owner, "owner", "", ownerFlagHelp)
+	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
+	cmd.Flags().DurationVar(&ownerStaleAfter, "owner-stale-after", ownership.DefaultStaleAfter, ownerStaleAfterFlagHelp)
 	return cmd
 }
 
@@ -55,7 +68,7 @@ the same as any other report.`,
 // durable Question/Answer pair on status.json, then delivers it into the
 // worker's live pane. Split out of the RunE closure so it is directly
 // testable without cobra flag parsing, mirroring runWorkerReport.
-func runWorkerAnswer(cmd *cobra.Command, client herdr.Client, logger *eventlog.Logger, worktree, text string, option int, now func() time.Time) error {
+func runWorkerAnswer(cmd *cobra.Command, client herdr.Client, logger *eventlog.Logger, worktree, text string, option int, of ownerFlags, now func() time.Time) error {
 	if worktree == "" {
 		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus worker answer <worktree> <text>"}
 	}
@@ -64,6 +77,9 @@ func runWorkerAnswer(cmd *cobra.Command, client herdr.Client, logger *eventlog.L
 		return err
 	}
 	worktree = abs
+	if oerr := enforceOwnership(cmd.Context(), cmd.OutOrStdout(), worktree, of, now()); oerr != nil {
+		return oerr
+	}
 
 	cur, err := protocol.Load(protocol.StatusPath(worktree))
 	if err != nil {

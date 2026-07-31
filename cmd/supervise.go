@@ -17,6 +17,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/jira"
+	"github.com/Elysium-Labs-EU/argus/internal/ownership"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
@@ -403,6 +404,12 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		ReviewNote:        o.reviewNote,
 		VerifyCommand:     o.verifyCommand,
 		WorktreeSetupCmd:  o.worktreeSetupCmd,
+		// Resolved once for this whole invocation (supervise has no --owner
+		// flag of its own — see ownership.ResolveOwnerID's doc) so every
+		// worker this run spawns shares one lease identity rather than each
+		// worktree claiming a fresh generated id.
+		OwnerID:    ownership.ResolveOwnerID(""),
+		OwnerLabel: ownership.DefaultOwnerLabel(),
 	}
 	if o.review {
 		cfg.Reviewer = supervisor.NewCLIReviewer(o.reviewModel, o.reviewEffort).WithLog(logger)

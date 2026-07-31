@@ -12,6 +12,7 @@ import (
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/ownership"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
@@ -38,6 +39,9 @@ func newReworkCmd() *cobra.Command {
 		verifyCmd          string
 		dryRun             bool
 		noCredProxy        bool
+		owner              string
+		forceForeignOwner  bool
+		ownerStaleAfter    time.Duration
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -84,6 +88,10 @@ outcome instead of retrying forever.`,
 				},
 				verifyCmd:         verifyCmd,
 				verifyCmdExplicit: cmd.Flags().Changed("verify-cmd"),
+				owner: ownerFlags{
+					owner: owner, forceForeignOwner: forceForeignOwner,
+					ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
+				},
 			})
 		},
 	}
@@ -106,6 +114,9 @@ outcome instead of retrying forever.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan without dispatching a worker")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front the rework worker's API traffic with the credential proxy; it inherits the host's real ANTHROPIC_API_KEY")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
+	cmd.Flags().StringVar(&owner, "owner", "", ownerFlagHelp)
+	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
+	cmd.Flags().DurationVar(&ownerStaleAfter, "owner-stale-after", ownership.DefaultStaleAfter, ownerStaleAfterFlagHelp)
 	return cmd
 }
 
@@ -124,8 +135,9 @@ type reworkOpts struct {
 	reviewModel          string
 	reviewEffort         string
 	findings             []string
+	owner                ownerFlags
 	gate                 gateFlags
-	livenessTimeout      time.Duration // internal knob, mirrors rebaseOpts; zero = package default
+	livenessTimeout      time.Duration
 	maxRounds            int
 	interval             time.Duration
 	livenessInterval     time.Duration
@@ -162,11 +174,14 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 		return err
 	}
 	opts.worktree = abs
+	ctx := cmd.Context()
+	out := cmd.OutOrStdout()
+	if oerr := enforceOwnership(ctx, out, opts.worktree, opts.owner, time.Now()); oerr != nil {
+		return oerr
+	}
 	if opts.maxRounds <= 0 {
 		opts.maxRounds = supervisor.DefaultMaxReworkRounds
 	}
-	ctx := cmd.Context()
-	out := cmd.OutOrStdout()
 
 	findings, err := startingFindings(opts.worktree, opts.findings)
 	if err != nil {

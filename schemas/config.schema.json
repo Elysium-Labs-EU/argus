@@ -68,6 +68,11 @@
       "description": "Reasoning effort for --review. Without this, the review command's own default wins.",
       "enum": ["low", "medium", "high", "xhigh", "max"]
     },
+    "owner_stale_after": {
+      "type": "string",
+      "description": "How long a worktree's owner-lease heartbeat (see internal/ownership, .claude/argus/owner.json) may go quiet before a mismatched caller on rework/rebase/ship/worker answer proceeds (with a logged notice) instead of being refused. A Go duration string. Empty/unset falls back to the built-in default (30m). An explicit --owner-stale-after flag still overrides this.",
+      "examples": ["30m", "1h", "10m"]
+    },
     "max_diff_lines": {
       "type": ["integer", "null"],
       "description": "Review gate: diffs larger than this (insertions+deletions) escalate. 0 disables the ceiling; unset/null falls back to the gate's own default.",

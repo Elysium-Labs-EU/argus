@@ -95,10 +95,20 @@ type Config struct {
 	// otherwise the prefix is prepended. Empty means no enforcement, the
 	// same "not configured" default every other key here has.
 	TitlePrefixTemplate string
-	MaxDiffLines        *int
-	Allow               []string
-	ProofRequiredPaths  []string
-	AlwaysReviewPaths   []string
+	// OwnerStaleAfter overrides how long a worktree's owner-lease heartbeat
+	// (see internal/ownership) may go quiet before a mismatched caller is let
+	// through instead of refused, same "not configured, skip" plain-string
+	// shape as VerifyCommand/ShipLint — empty falls back to
+	// ownership.DefaultStaleAfter. Stored as a Go duration string (e.g.
+	// "30m") rather than a parsed time.Duration so a malformed value is only
+	// ever an error at the one place it's consumed (resolveOwnerStaleAfter),
+	// not at Load time for every command that merely reads other keys. An
+	// explicit --owner-stale-after flag always overrides this.
+	OwnerStaleAfter    string
+	MaxDiffLines       *int
+	Allow              []string
+	ProofRequiredPaths []string
+	AlwaysReviewPaths  []string
 }
 
 // pathEnvVar overrides the default <repo>/.argus/config.yml location for

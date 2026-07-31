@@ -3,6 +3,7 @@ package cmd
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 )
@@ -124,5 +125,56 @@ func TestResolveWorktreeSetupCmdFallsBackToFlagDefaultWhenNeitherSet(t *testing.
 	got := resolveWorktreeSetupCmd(false, "", &repoconfig.Config{})
 	if got != "" {
 		t.Errorf("resolveWorktreeSetupCmd = %q, want empty (no worktree setup command configured anywhere)", got)
+	}
+}
+
+func TestResolveOwnerStaleAfterExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{OwnerStaleAfter: "1h"}
+	got, err := resolveOwnerStaleAfter(true, 5*time.Minute, &rc, "/repo/.argus/config.yml")
+	if err != nil {
+		t.Fatalf("resolveOwnerStaleAfter: %v", err)
+	}
+	if got != 5*time.Minute {
+		t.Errorf("resolveOwnerStaleAfter = %v, want the explicit flag value", got)
+	}
+}
+
+func TestResolveOwnerStaleAfterPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{OwnerStaleAfter: "1h"}
+	got, err := resolveOwnerStaleAfter(false, 30*time.Minute, &rc, "/repo/.argus/config.yml")
+	if err != nil {
+		t.Fatalf("resolveOwnerStaleAfter: %v", err)
+	}
+	if got != time.Hour {
+		t.Errorf("resolveOwnerStaleAfter = %v, want the repo config value", got)
+	}
+}
+
+func TestResolveOwnerStaleAfterFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got, err := resolveOwnerStaleAfter(false, 30*time.Minute, &repoconfig.Config{}, "/repo/.argus/config.yml")
+	if err != nil {
+		t.Fatalf("resolveOwnerStaleAfter: %v", err)
+	}
+	if got != 30*time.Minute {
+		t.Errorf("resolveOwnerStaleAfter = %v, want the flag's own default", got)
+	}
+}
+
+func TestResolveOwnerStaleAfterMalformedConfigValueErrors(t *testing.T) {
+	rc := repoconfig.Config{OwnerStaleAfter: "not-a-duration"}
+	_, err := resolveOwnerStaleAfter(false, 30*time.Minute, &rc, "/repo/.argus/config.yml")
+	if err == nil {
+		t.Fatal("want an error for a malformed owner_stale_after config value")
+	}
+}
+
+func TestResolveOwnerStaleAfterExplicitFlagSkipsMalformedConfigValue(t *testing.T) {
+	rc := repoconfig.Config{OwnerStaleAfter: "not-a-duration"}
+	got, err := resolveOwnerStaleAfter(true, 5*time.Minute, &rc, "/repo/.argus/config.yml")
+	if err != nil {
+		t.Fatalf("an explicit flag should win before the malformed config value is ever parsed, got: %v", err)
+	}
+	if got != 5*time.Minute {
+		t.Errorf("resolveOwnerStaleAfter = %v, want the explicit flag value", got)
 	}
 }
