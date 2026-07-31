@@ -1118,7 +1118,11 @@ func TestSuperviseVerifyCmdFlagDeprecatedAliasStillWorks(t *testing.T) {
 	if !cmd.Flags().Changed("verify-cmd") {
 		t.Error("Changed(\"verify-cmd\") = false, want true")
 	}
-	if got := cmd.Flags().Lookup("gate-verify-command").Value.String(); got != "make lint" {
+	f := cmd.Flags().Lookup("gate-verify-command")
+	if f == nil {
+		t.Fatal("expected --gate-verify-command flag to be registered")
+	}
+	if got := f.Value.String(); got != "make lint" {
 		t.Errorf("--gate-verify-command's bound value = %q, want %q (shared with --verify-cmd)", got, "make lint")
 	}
 	if !strings.Contains(buf.String(), "deprecated") || !strings.Contains(buf.String(), "gate-verify-command") {
@@ -1137,7 +1141,11 @@ func TestSuperviseWorktreeSetupCmdFlagDeprecatedAliasStillWorks(t *testing.T) {
 	if !cmd.Flags().Changed("worktree-setup-cmd") {
 		t.Error("Changed(\"worktree-setup-cmd\") = false, want true")
 	}
-	if got := cmd.Flags().Lookup("worktree-bootstrap-command").Value.String(); got != "cp ../.env .env" {
+	f := cmd.Flags().Lookup("worktree-bootstrap-command")
+	if f == nil {
+		t.Fatal("expected --worktree-bootstrap-command flag to be registered")
+	}
+	if got := f.Value.String(); got != "cp ../.env .env" {
 		t.Errorf("--worktree-bootstrap-command's bound value = %q, want %q (shared with --worktree-setup-cmd)", got, "cp ../.env .env")
 	}
 	if !strings.Contains(buf.String(), "deprecated") || !strings.Contains(buf.String(), "worktree-bootstrap-command") {

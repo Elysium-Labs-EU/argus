@@ -770,7 +770,11 @@ func TestReworkVerifyCmdFlagDeprecatedAliasStillWorks(t *testing.T) {
 	if !cmd.Flags().Changed("verify-cmd") {
 		t.Error("Changed(\"verify-cmd\") = false, want true")
 	}
-	if got := cmd.Flags().Lookup("gate-verify-command").Value.String(); got != "make lint" {
+	f := cmd.Flags().Lookup("gate-verify-command")
+	if f == nil {
+		t.Fatal("expected --gate-verify-command flag to be registered")
+	}
+	if got := f.Value.String(); got != "make lint" {
 		t.Errorf("--gate-verify-command's bound value = %q, want %q (shared with --verify-cmd)", got, "make lint")
 	}
 	if !strings.Contains(buf.String(), "deprecated") || !strings.Contains(buf.String(), "gate-verify-command") {
