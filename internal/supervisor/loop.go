@@ -487,8 +487,8 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 		return err
 	}
 
-	if verr := EnsureDistinctWorktrees(worktreePaths(plans)); verr != nil {
-		return verr
+	if perr := Preflight(ctx, cfg, plans); perr != nil {
+		return perr
 	}
 
 	if dryRun {
