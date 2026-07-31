@@ -270,6 +270,40 @@ func TestSaveLoadRoundTripMaxDiffLinesZeroDisablesLimit(t *testing.T) {
 	}
 }
 
+func TestSaveLoadRoundTripReworkBudget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	budget := 6
+	want := Config{ReworkBudget: &budget}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestSaveLoadRoundTripReworkBudgetZeroDisablesBudget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	zero := 0
+	want := Config{ReworkBudget: &zero}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.ReworkBudget == nil || *got.ReworkBudget != 0 {
+		t.Errorf("ReworkBudget = %v, want a pointer to 0 (explicit disable, not unset)", got.ReworkBudget)
+	}
+}
+
 func TestSaveLoadEmptyConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")

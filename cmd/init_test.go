@@ -20,7 +20,7 @@ import (
 // place to record why, instead of that decision happening by omission.
 var initPromptExemptFields = map[string]string{}
 
-const wantConfigFieldCount = 18 // repoconfig.Config's current field count
+const wantConfigFieldCount = 19 // repoconfig.Config's current field count
 
 func writeMarker(t *testing.T, dir, name string) {
 	t.Helper()
@@ -165,10 +165,10 @@ func TestRunInitInteractivePromptsCoreFields(t *testing.T) {
 	cmd.SetErr(&buf)
 	cmd.SetContext(context.Background())
 	// base_branch, allow, brief_note (keep detected), max_diff_lines,
-	// proof_required_paths, always_review_paths, worker_placement — a
-	// representative subset of init's prompts, each edited to a non-default
-	// value.
-	cmd.SetIn(strings.NewReader("main\nBash(make *)\n\n250\nterraform, deploy\nauth\ntab\n"))
+	// rework_budget (keep default), proof_required_paths,
+	// always_review_paths, worker_placement — a representative subset of
+	// init's prompts, each edited to a non-default value.
+	cmd.SetIn(strings.NewReader("main\nBash(make *)\n\n250\n\nterraform, deploy\nauth\ntab\n"))
 
 	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
 		t.Fatalf("runInit: %v", err)
@@ -276,12 +276,13 @@ func TestRunInitInteractivePromptWritesForge(t *testing.T) {
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 	cmd.SetContext(context.Background())
-	// base_branch, allow, brief_note, max_diff_lines, proof_required_paths,
-	// always_review_paths, worker_placement, ship_verify_command,
-	// gate_verify_command, worktree_bootstrap_command, review_effort, launcher,
-	// worktree_dir, owner_stale_after, title_prefix_template, review_note (all
-	// bare Enter, 16 prompts), then forge.
-	cmd.SetIn(strings.NewReader("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ngitlab\n"))
+	// base_branch, allow, brief_note, max_diff_lines, rework_budget,
+	// proof_required_paths, always_review_paths, worker_placement,
+	// ship_verify_command, gate_verify_command, worktree_bootstrap_command,
+	// review_effort, launcher, worktree_dir, owner_stale_after,
+	// title_prefix_template, review_note (all bare Enter, 17 prompts), then
+	// forge.
+	cmd.SetIn(strings.NewReader(strings.Repeat("\n", 17) + "gitlab\n"))
 
 	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
 		t.Fatalf("runInit: %v", err)
@@ -369,12 +370,12 @@ func TestRunInitPromptsSetEveryConfigField(t *testing.T) {
 	cmd.SetErr(&buf)
 	cmd.SetContext(context.Background())
 	// One recognizable answer per prompt, in runInit's own order: base_branch,
-	// allow, brief_note, max_diff_lines, proof_required_paths,
+	// allow, brief_note, max_diff_lines, rework_budget, proof_required_paths,
 	// always_review_paths, worker_placement, ship_verify_command,
 	// gate_verify_command, worktree_bootstrap_command, review_effort, launcher,
 	// worktree_dir, owner_stale_after, title_prefix_template, review_note, forge.
 	answers := []string{
-		"develop", "Bash(task *)", "custom brief", "250", "terraform", "auth",
+		"develop", "Bash(task *)", "custom brief", "250", "6", "terraform", "auth",
 		"tab", "make lint", "make ci", "cp ../.env .env", "high",
 		"codex --full-auto", "..", "45m", "TICKET-{issue}: ", "pay attention", "gitlab",
 	}

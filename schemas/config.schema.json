@@ -95,6 +95,12 @@
       "minimum": 0,
       "examples": [400, 0]
     },
+    "rework_budget": {
+      "type": ["integer", "null"],
+      "description": "Restart budget: total rework rounds a worktree may ever be dispatched for, across every separate `argus rework` invocation over its lifetime — distinct from --max-rounds, which only bounds one invocation's own loop. Exceeding it records an unwaivable rework-budget-exceeded verdict instead of dispatching another round. 0 disables the budget; unset/null falls back to rework's own default.",
+      "minimum": 0,
+      "examples": [6, 0]
+    },
     "allow": {
       "type": "array",
       "description": "Extra tool-permission patterns granted to workers, on top of argus's toolchain-neutral defaults.",

@@ -15,6 +15,18 @@ import (
 // can't loop the worker forever.
 const DefaultMaxReworkRounds = 3
 
+// DefaultMaxReworkBudget bounds how many rework rounds a worktree may be
+// dispatched for in total, across every separate `argus rework` invocation
+// over its lifetime — not just one call's own --max-rounds. Without this, a
+// supervisor that keeps re-invoking rework after each invocation's own rounds
+// are exhausted can loop the same worker indefinitely; the budget is what
+// actually trips a hard stop, matching the same "give up and hand it to a
+// human" shape as an unmeasurable-diff hard reason. Equal to
+// DefaultMaxReworkRounds so a single invocation's default behavior is
+// unchanged; only a second invocation against the same worktree sees the new
+// ceiling.
+const DefaultMaxReworkBudget = 3
+
 // ReworkBrief is the task brief argus injects when re-dispatching a worker to
 // address a request-changes (or needs-human) verdict. Unlike RebaseBrief's
 // fixed git recipe, the fix itself is exactly what the worker was already

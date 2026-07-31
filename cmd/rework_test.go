@@ -501,6 +501,102 @@ func TestRunReworkExhaustsRoundsAndEscalates(t *testing.T) {
 	}
 }
 
+// TestRunReworkBudgetTripsMidInvocation covers a --max-rework-budget smaller
+// than --max-rounds: the budget must cut the loop short before max-rounds
+// would, escalating with a distinct rework-budget-exceeded verdict instead of
+// dispatching a round the budget has already exhausted.
+func TestRunReworkBudgetTripsMidInvocation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	cmd, buf := testCmd()
+	client := fakeReworkClient(dir, reworkStatus())
+	reviewer := &sequenceReviewer{results: []supervisor.ReviewResult{
+		{Decision: "request-changes", Summary: "still wrong", Findings: []string{"finding"}},
+	}} // repeats for every round
+
+	err := runRework(cmd, client, reviewer, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "feat-x", maxRounds: 3, maxReworkBudget: 1, maxReworkBudgetExplicit: true,
+		interval: 5 * time.Millisecond, gate: gateFlags{},
+	})
+	if err != nil {
+		t.Fatalf("runRework: %v", err)
+	}
+	if reviewer.callCount() != 1 {
+		t.Fatalf("want exactly 1 review call (budget of 1), got %d", reviewer.callCount())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "rework budget exceeded") {
+		t.Errorf("expected a budget-exceeded escalation message:\n%s", out)
+	}
+	approval, found, aerr := protocol.LoadApproval(dir)
+	if aerr != nil || !found || approval.Approved {
+		t.Errorf("want a persisted not-approved verdict, found=%v approval=%+v err=%v", found, approval, aerr)
+	}
+	if approval.Provenance() != protocol.ProvenanceReworkBudgetExceeded {
+		t.Errorf("Provenance() = %q, want %q", approval.Provenance(), protocol.ProvenanceReworkBudgetExceeded)
+	}
+}
+
+// TestRunReworkBudgetPersistsAcrossInvocations covers the actual gap this
+// budget closes: a supervisor that keeps re-invoking `argus rework` against
+// the same worktree after each invocation's own --max-rounds gives up must
+// eventually be refused, not get a fresh --max-rounds allowance every time.
+// The first call exhausts a 1-round budget; the second call — a brand new
+// runRework invocation, as a supervisor's repeated CLI call would be — must
+// dispatch zero further rounds and escalate immediately.
+func TestRunReworkBudgetPersistsAcrossInvocations(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	reviewer := &sequenceReviewer{results: []supervisor.ReviewResult{
+		{Decision: "request-changes", Summary: "still wrong", Findings: []string{"finding"}},
+	}} // repeats for every round
+
+	opts := func() *reworkOpts {
+		return &reworkOpts{
+			worktree: dir, base: "feat-x", maxRounds: 1, maxReworkBudget: 1, maxReworkBudgetExplicit: true,
+			interval: 5 * time.Millisecond, gate: gateFlags{},
+		}
+	}
+
+	cmd1, _ := testCmd()
+	if err := runRework(cmd1, fakeReworkClient(dir, reworkStatus()), reviewer, reworkLogger(), opts()); err != nil {
+		t.Fatalf("first runRework: %v", err)
+	}
+	if reviewer.callCount() != 1 {
+		t.Fatalf("first invocation: want exactly 1 review call, got %d", reviewer.callCount())
+	}
+
+	cmd2, buf2 := testCmd()
+	// A client whose PaneRun/AgentPrompt would fail the test if called — the
+	// second invocation must never dispatch a round at all.
+	client2 := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "worktree" {
+			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, reworkTestPaneID), nil
+		}
+		t.Fatalf("second invocation dispatched a round via %v; the exhausted budget should have refused before any dispatch", args)
+		return nil, errors.New("unreachable")
+	})
+	if err := runRework(cmd2, client2, reviewer, reworkLogger(), opts()); err != nil {
+		t.Fatalf("second runRework: %v", err)
+	}
+	if reviewer.callCount() != 1 {
+		t.Errorf("second invocation: want no further review calls, got %d total", reviewer.callCount())
+	}
+	if !strings.Contains(buf2.String(), "rework budget exceeded") {
+		t.Errorf("expected a budget-exceeded escalation message on the second invocation:\n%s", buf2.String())
+	}
+	approval, found, aerr := protocol.LoadApproval(dir)
+	if aerr != nil || !found || approval.Approved {
+		t.Errorf("want a persisted not-approved verdict, found=%v approval=%+v err=%v", found, approval, aerr)
+	}
+}
+
 func TestRunReworkNeedsHumanEscalatesImmediately(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := initGitDir(t)

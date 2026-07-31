@@ -97,6 +97,7 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.Allow = promptList(reader, out, "allow", suggested.Allow)
 		cfg.BriefNote = promptLine(reader, out, "brief_note", suggested.BriefNote)
 		cfg.MaxDiffLines = promptOptionalInt(reader, out, "max_diff_lines", suggested.MaxDiffLines)
+		cfg.ReworkBudget = promptOptionalInt(reader, out, "rework_budget (restart budget: total rework rounds a worktree may ever be dispatched for)", suggested.ReworkBudget)
 		cfg.ProofRequiredPaths = promptList(reader, out, "proof_required_paths", suggested.ProofRequiredPaths)
 		cfg.AlwaysReviewPaths = promptList(reader, out, "always_review_paths", suggested.AlwaysReviewPaths)
 		cfg.WorkerPlacement = promptLine(reader, out, "worker_placement (workspace|tab)", suggested.WorkerPlacement)

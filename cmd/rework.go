@@ -36,6 +36,7 @@ func newReworkCmd() *cobra.Command {
 		credentialEnv      map[string]string
 		interval           time.Duration
 		maxRounds          int
+		maxReworkBudget    int
 		maxDiffLines       int
 		gateVerifyCmd      string
 		dryRun             bool
@@ -76,11 +77,13 @@ outcome instead of retrying forever.`,
 				worktree: worktree, base: base, task: task, findings: findings,
 				launcher: launcher, workerRuntime: workerRuntime, interval: interval,
 				maxRounds: maxRounds, dryRun: dryRun, noCredProxy: noCredProxy, credentialEnv: overrides,
-				reviewModel:          reviewModel,
-				reviewEffort:         reviewEffort,
-				reviewEffortExplicit: cmd.Flags().Changed("review-effort"),
-				reviewNote:           reviewNote,
-				reviewNoteExplicit:   cmd.Flags().Changed("review-note"),
+				maxReworkBudget:         maxReworkBudget,
+				maxReworkBudgetExplicit: cmd.Flags().Changed("max-rework-budget"),
+				reviewModel:             reviewModel,
+				reviewEffort:            reviewEffort,
+				reviewEffortExplicit:    cmd.Flags().Changed("review-effort"),
+				reviewNote:              reviewNote,
+				reviewNoteExplicit:      cmd.Flags().Changed("review-note"),
 				gate: gateFlags{
 					maxDiffLines:          maxDiffLines,
 					proofRequiredPaths:    proofRequiredPaths,
@@ -108,6 +111,7 @@ outcome instead of retrying forever.`,
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate the rework worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "status poll cadence")
 	cmd.Flags().IntVar(&maxRounds, "max-rounds", supervisor.DefaultMaxReworkRounds, "give up and escalate after this many request-changes rounds")
+	cmd.Flags().IntVar(&maxReworkBudget, "max-rework-budget", supervisor.DefaultMaxReworkBudget, "restart budget: total rework rounds this worktree may ever be dispatched for, across every separate `argus rework` invocation (unlike --max-rounds, which only bounds this one invocation's own loop); 0 disables. Without this flag, this repo's .argus/config.yml rework_budget wins, then this default")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for the review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
 	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
@@ -131,28 +135,30 @@ var reworkCmd = newReworkCmd()
 // reworkOpts carries newReworkCmd's flag values into runRework, mirroring
 // rebaseOpts's split of constructor-flag-registration from RunE logic.
 type reworkOpts struct {
-	credentialEnv         map[string]string
-	gateVerifyCmd         string
-	workerRuntime         string
-	base                  string
-	task                  string
-	launcher              string
-	worktree              string
-	reviewModel           string
-	reviewEffort          string
-	reviewNote            string
-	findings              []string
-	owner                 ownerFlags
-	gate                  gateFlags
-	livenessTimeout       time.Duration // internal knob, mirrors rebaseOpts; zero = package default
-	maxRounds             int
-	interval              time.Duration
-	livenessInterval      time.Duration
-	dryRun                bool
-	noCredProxy           bool
-	gateVerifyCmdExplicit bool
-	reviewEffortExplicit  bool
-	reviewNoteExplicit    bool
+	credentialEnv           map[string]string
+	gateVerifyCmd           string
+	workerRuntime           string
+	base                    string
+	task                    string
+	launcher                string
+	worktree                string
+	reviewModel             string
+	reviewEffort            string
+	reviewNote              string
+	findings                []string
+	owner                   ownerFlags
+	gate                    gateFlags
+	livenessTimeout         time.Duration // internal knob, mirrors rebaseOpts; zero = package default
+	maxRounds               int
+	maxReworkBudget         int
+	interval                time.Duration
+	livenessInterval        time.Duration
+	dryRun                  bool
+	noCredProxy             bool
+	gateVerifyCmdExplicit   bool
+	reviewEffortExplicit    bool
+	reviewNoteExplicit      bool
+	maxReworkBudgetExplicit bool
 }
 
 // dispatchTarget builds dispatchIntoPane's input from a reworkOpts, mirroring
@@ -184,45 +190,79 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 	opts.worktree = abs
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
+
+	branch, task, findings, done, err := prepareReworkRun(ctx, out, opts)
+	if err != nil || done {
+		return err
+	}
+
+	cfg, repoRoot, budget, err := buildReworkConfig(ctx, out, opts, reviewer, logger)
+	if err != nil {
+		return err
+	}
+	return runReworkLoop(ctx, out, logger, client, cfg, repoRoot, branch, task, findings, budget, opts)
+}
+
+// prepareReworkRun resolves everything runRework needs before it can start
+// dispatching rounds — ownership, --max-rounds' own default, round 1's
+// findings, and the branch/task the brief will name — split out of runRework
+// so these sequential guard clauses don't inflate its own complexity. done
+// means runRework should return (err, which may be nil) without ever
+// entering the round loop: either the worktree already has an approving
+// verdict (findings == nil, nothing to rework) or --dry-run already printed
+// the plan.
+func prepareReworkRun(ctx context.Context, out io.Writer, opts *reworkOpts) (branch, task string, findings []string, done bool, err error) {
 	if oerr := enforceOwnership(ctx, out, opts.worktree, opts.owner, time.Now()); oerr != nil {
-		return oerr
+		return "", "", nil, true, oerr
 	}
 	if opts.maxRounds <= 0 {
 		opts.maxRounds = supervisor.DefaultMaxReworkRounds
 	}
 
-	findings, err := startingFindings(opts.worktree, opts.findings)
+	findings, err = startingFindings(opts.worktree, opts.findings)
 	if err != nil {
-		return err
+		return "", "", nil, true, err
 	}
 	if findings == nil {
 		_, _ = fmt.Fprintf(out, "%s %s already has an approving argus verdict — nothing to rework\n", ui.LabelSuccess.Render("✓"), opts.worktree)
-		return nil
+		return "", "", nil, true, nil
 	}
 
-	branch, err := supervisor.CurrentBranch(ctx, opts.worktree)
+	branch, err = supervisor.CurrentBranch(ctx, opts.worktree)
 	if err != nil {
-		return err
+		return "", "", nil, true, err
 	}
-	task := opts.task
+	task = opts.task
 	if task == "" {
 		task = taskFor(opts.worktree, branch)
 	}
 
 	if opts.dryRun {
 		renderReworkPlan(out, opts, branch, findings)
-		return nil
+		return "", "", nil, true, nil
 	}
+	return branch, task, findings, false, nil
+}
 
-	cfg, repoRoot, err := buildReworkConfig(ctx, out, opts, reviewer, logger)
-	if err != nil {
-		return err
-	}
-
+// runReworkLoop is runRework's dispatch-and-judge loop, split out so its own
+// per-round branching doesn't inflate runRework's complexity. budget is the
+// resolved cumulative restart budget (see resolveMaxReworkBudget); <=0 means
+// no budget is configured.
+func runReworkLoop(ctx context.Context, out io.Writer, logger *eventlog.Logger, client herdr.Client, cfg *supervisor.Config, repoRoot, branch, task string, findings []string, budget int, opts *reworkOpts) error {
 	for round := 1; round <= opts.maxRounds; round++ {
+		exceeded, berr := checkReworkBudget(out, opts.worktree, findings, budget)
+		if berr != nil {
+			return berr
+		}
+		if exceeded {
+			return nil
+		}
 		outcome, rerr := runReworkRound(ctx, out, logger, client, cfg, repoRoot, branch, task, findings, round, opts)
 		if rerr != nil {
 			return rerr
+		}
+		if serr := recordReworkAttempt(opts.worktree, time.Now()); serr != nil {
+			return serr
 		}
 		if outcome.stop {
 			return nil
@@ -232,23 +272,82 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 	return nil
 }
 
+// checkReworkBudget reports whether worktree has already reached its
+// cumulative restart budget, escalating (persisting the distinct
+// rework-budget-exceeded verdict) and returning exceeded=true if so — split
+// out of runRework's own loop so this branch doesn't inflate runRework's
+// cyclomatic complexity. budget<=0 means no budget is configured.
+func checkReworkBudget(out io.Writer, worktree string, findings []string, budget int) (exceeded bool, err error) {
+	if budget <= 0 {
+		return false, nil
+	}
+	state, err := protocol.LoadReworkState(worktree)
+	if err != nil {
+		return false, err
+	}
+	if state.RoundsAttempted < budget {
+		return false, nil
+	}
+	return true, escalateReworkBudgetExceeded(out, worktree, findings, state.RoundsAttempted, budget)
+}
+
+// recordReworkAttempt increments and persists the worktree's cumulative
+// rework-round count once a round has actually dispatched and reported back —
+// this is what lets the budget check above span separate `argus rework`
+// invocations instead of resetting every time runRework starts a fresh loop.
+func recordReworkAttempt(worktree string, now time.Time) error {
+	state, err := protocol.LoadReworkState(worktree)
+	if err != nil {
+		return err
+	}
+	state.RoundsAttempted++
+	state.UpdatedAt = now
+	return protocol.WriteReworkState(worktree, &state)
+}
+
+// escalateReworkBudgetExceeded persists a distinct, unwaivable verdict once the
+// worktree's cumulative rework attempts reach its restart budget with no
+// approving verdict ever reached — without this, a supervisor that keeps
+// re-invoking rework after each invocation's own --max-rounds gives up could
+// loop the same worker forever, since each fresh invocation otherwise starts
+// its own --max-rounds allowance from zero. No round is dispatched for this
+// call: findings is whatever the last round (or the initial verdict) already
+// found.
+func escalateReworkBudgetExceeded(out io.Writer, worktree string, findings []string, attempted, budget int) error {
+	summary := fmt.Sprintf("rework budget exceeded: %d attempted round(s) (budget %d) with no approving verdict", attempted, budget)
+	a := protocol.Approval{
+		Approved:  false,
+		Source:    protocol.SourceReworkBudget,
+		Summary:   summary,
+		Reasons:   findings,
+		UpdatedAt: time.Now(),
+	}
+	if err := protocol.WriteApproval(worktree, &a); err != nil {
+		return fmt.Errorf("recording rework-budget-exceeded verdict: %w", err)
+	}
+	_, _ = fmt.Fprintf(out, "%s %s — escalating to the supervisor\n", ui.LabelError.Render("✗"), summary)
+	return nil
+}
+
 // buildReworkConfig assembles runRework's per-round supervisor.Config:
 // resolving the repo root, loading its repoconfig, defaulting the reviewer,
 // and reading $HOME — split out so this one-time setup doesn't inflate
-// runRework's own branching.
-func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, reviewer supervisor.Reviewer, logger *eventlog.Logger) (*supervisor.Config, string, error) {
+// runRework's own branching. The returned int is the resolved rework restart
+// budget (see resolveMaxReworkBudget) — not part of supervisor.Config since
+// it governs runRework's own loop, not anything the gate/reviewer consult.
+func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, reviewer supervisor.Reviewer, logger *eventlog.Logger) (*supervisor.Config, string, int, error) {
 	repoRoot, err := supervisor.RepoRoot(ctx, opts.worktree)
 	if err != nil {
-		return nil, "", fmt.Errorf("resolving repo root for %s: %w", opts.worktree, err)
+		return nil, "", 0, fmt.Errorf("resolving repo root for %s: %w", opts.worktree, err)
 	}
 	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
 	if err != nil {
-		return nil, "", &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
+		return nil, "", 0, &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
 	}
 	warnDeprecatedConfigKeys(out, &rc)
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, "", fmt.Errorf("resolving home dir: %w", err)
+		return nil, "", 0, fmt.Errorf("resolving home dir: %w", err)
 	}
 	if reviewer == nil {
 		reviewer = newReviewer(opts.reviewModel, resolveReviewEffort(opts.reviewEffortExplicit, opts.reviewEffort, &rc), logger)
@@ -263,7 +362,8 @@ func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, rev
 		ReviewNote:        resolveReviewNote(opts.reviewNoteExplicit, opts.reviewNote, &rc),
 		GateVerifyCommand: resolveGateVerifyCommand(opts.gateVerifyCmdExplicit, opts.gateVerifyCmd, &rc),
 	}
-	return cfg, repoRoot, nil
+	budget := resolveMaxReworkBudget(opts.maxReworkBudgetExplicit, opts.maxReworkBudget, &rc)
+	return cfg, repoRoot, budget, nil
 }
 
 // reworkRoundOutcome is what one dispatch-and-judge round decided: stop is
