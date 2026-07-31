@@ -28,6 +28,11 @@
       "enum": ["gitlab", "gitea"],
       "examples": ["gitlab", "gitea"]
     },
+    "status_page": {
+      "type": "string",
+      "description": "Status page to point at when a forge request or push fails in a host-shaped way (see internal/svcstatus). Checked before svcstatus's built-in map, which only covers github.com/gitlab.com/codeberg.org — required for a self-hosted host to get any hint at all. An explicit --status-page-url flag on ship still overrides this.",
+      "examples": ["https://status.example.com", "https://uptime.example.com/status/git"]
+    },
     "worktree_dir": {
       "type": "string",
       "description": "Where a spawned worker's worktree is created. Empty/unset defaults to <repo>/.claude/worktrees/<branch>. A relative value is joined under the repo root, so \"..\" points at a sibling-of-repo convention (<parent>/<branch>); an absolute value is used as-is. Changing this shifts the worktree's nesting depth relative to the original checkout — see worktree_bootstrap_command's own note if that command hardcodes a relative hop count back to it.",

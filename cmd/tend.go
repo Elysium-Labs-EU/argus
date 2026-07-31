@@ -140,7 +140,7 @@ func resolveTendTarget(cmd *cobra.Command, opts *tendOpts) (client forge.Forge, 
 	if err != nil {
 		return nil, "", "", "", err
 	}
-	client, err = forge.New(host, forge.TokenForHost(host, opts.credentialEnv), nil, kind)
+	client, err = forge.New(host, forge.TokenForHost(host, opts.credentialEnv), nil, kind, issueStatusPageConfigDefault(ctx, opts.worktree))
 	if err != nil {
 		return nil, "", "", "", err
 	}

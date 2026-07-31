@@ -1049,11 +1049,26 @@ func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[
 			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN), or run `gh auth login` / `glab auth login`",
 		}
 	}
-	f, err = forge.New(host, token, nil, kind)
+	f, err = forge.New(host, token, nil, kind, issueStatusPageConfigDefault(ctx, repoPath))
 	if err != nil {
 		return nil, "", "", err
 	}
 	return f, owner, name, nil
+}
+
+// issueStatusPageConfigDefault reads repoPath's .argus/config.yml status_page
+// key, best-effort like resolveIssueForgeKind's own lookup: a repo path that
+// doesn't resolve, or has no config file, just means no override applies.
+func issueStatusPageConfigDefault(ctx context.Context, repoPath string) string {
+	repoRoot, err := supervisor.RepoRoot(ctx, repoPath)
+	if err != nil {
+		return ""
+	}
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		return ""
+	}
+	return rc.StatusPage
 }
 
 // issuesToTasks renders each issue into a worker brief and a default branch

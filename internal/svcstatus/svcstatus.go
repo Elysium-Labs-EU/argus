@@ -21,9 +21,16 @@ var statusPages = map[string]string{
 	"codeberg.org": "https://status.codeberg.org/status/codeberg",
 }
 
-// pageURL returns the status page for host, or "" if none is known. A
+// pageURL returns the status page for host, or "" if none is known. override,
+// when non-empty, wins outright — it is a repo owner's explicit
+// .argus/config.yml status_page key or --status-page-url flag, for a
+// self-hosted host with no entry in the built-in map below (or a hosted one
+// whose page a repo owner wants to point somewhere else, e.g. a mirror). A
 // subdomain of a known host (e.g. ci.codeberg.org) resolves to the same page.
-func pageURL(host string) string {
+func pageURL(host, override string) string {
+	if override != "" {
+		return override
+	}
 	if u, ok := statusPages[host]; ok {
 		return u
 	}
@@ -46,12 +53,13 @@ func WorthMentioning(statusCode int) bool {
 }
 
 // Note returns a clause to append to an error message, pointing at host's
-// status page, or "" when host has no known page. It does not claim the host
-// is down — only that the page is where to confirm whether it is, since a
-// request failure this points at (a dropped connection, a rejected push) can
-// just as easily be local.
-func Note(host string) string {
-	u := pageURL(host)
+// status page, or "" when host has no known page and override is empty. See
+// pageURL for override's precedence over the built-in map. It does not claim
+// the host is down — only that the page is where to confirm whether it is,
+// since a request failure this points at (a dropped connection, a rejected
+// push) can just as easily be local.
+func Note(host, override string) string {
+	u := pageURL(host, override)
 	if u == "" {
 		return ""
 	}

@@ -99,6 +99,16 @@ type Config struct {
 	// allowlist still applies, and any other host still refuses without an
 	// explicit --forge. An explicit --forge flag always overrides this.
 	Forge string
+	// StatusPage overrides the status page internal/svcstatus points at when a
+	// forge request or push fails in a host-shaped way (see
+	// svcstatus.WorthMentioning). svcstatus's built-in map only knows the three
+	// hosted forges' own pages; a self-hosted host has no built-in entry, and
+	// there is no way to guess where an operator's own Statuspage/Cachet/static
+	// page lives, so this is the same static per-repo fact as Forge, set once
+	// instead of repeated. Checked before svcstatus's built-in map, so it also
+	// lets a repo owner point at a mirror instead of a known host's own page.
+	// An explicit --status-page-url flag (ship only) always overrides this.
+	StatusPage string
 	// WorktreeDir overrides where a spawned worker's worktree is created,
 	// same plain-string-means-unset shape as WorkerPlacement. Empty keeps
 	// argus's default (<repo>/.claude/worktrees/<branch>); a relative value

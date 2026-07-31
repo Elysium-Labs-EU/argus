@@ -45,6 +45,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.Forge != "" {
 		fmt.Fprintf(&b, "forge: %s\n", quoteYAML(cfg.Forge))
 	}
+	if cfg.StatusPage != "" {
+		fmt.Fprintf(&b, "status_page: %s\n", quoteYAML(cfg.StatusPage))
+	}
 	if cfg.WorktreeDir != "" {
 		fmt.Fprintf(&b, "worktree_dir: %s\n", quoteYAML(cfg.WorktreeDir))
 	}
@@ -136,10 +139,11 @@ func listFieldFor(cfg *Config, key string) *[]string {
 
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
-// scalars (base_branch, worker_placement, launcher, forge, worktree_dir,
-// brief_note, review_note, ship_verify_command, gate_verify_command,
-// worktree_bootstrap_command, title_prefix_template, owner_stale_after,
-// review_effort, max_diff_lines, rework_budget; value optionally quoted, plus
+// scalars (base_branch, worker_placement, launcher, forge, status_page,
+// worktree_dir, brief_note, review_note, ship_verify_command,
+// gate_verify_command, worktree_bootstrap_command, title_prefix_template,
+// owner_stale_after, review_effort, max_diff_lines, rework_budget; value
+// optionally quoted, plus
 // deprecatedKeyAliases' old names), and a top-level list key (`allow`, `proof_required_paths`,
 // `always_review_paths`) followed by indented `- value` list items. Any
 // other top-level key is ignored (along with any indented block under it),
@@ -202,8 +206,8 @@ func parseYAML(data string) (Config, error) {
 }
 
 // assignScalarField sets cfg's field for one of parseYAML's scalar keys
-// (base_branch, worker_placement, launcher, forge, worktree_dir, brief_note,
-// review_note, ship_verify_command, gate_verify_command,
+// (base_branch, worker_placement, launcher, forge, status_page, worktree_dir,
+// brief_note, review_note, ship_verify_command, gate_verify_command,
 // worktree_bootstrap_command, title_prefix_template, owner_stale_after,
 // review_effort, max_diff_lines, rework_budget — key is already the canonical name by the
 // time it reaches here, deprecatedKeyAliases having been applied by the
@@ -220,6 +224,8 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 		cfg.Launcher = value
 	case "forge":
 		cfg.Forge = value
+	case "status_page":
+		cfg.StatusPage = value
 	case "worktree_dir":
 		cfg.WorktreeDir = value
 	case "brief_note":

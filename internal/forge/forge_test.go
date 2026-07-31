@@ -31,7 +31,7 @@ func fakeHTTP(t *testing.T, wantURLContains, wantAuth, reply string, code int) *
 func TestGiteaOpenPR(t *testing.T) {
 	hc := fakeHTTP(t, "https://codeberg.org/api/v1/repos/o/r/pulls", "token secret",
 		`{"number":7,"html_url":"https://codeberg.org/o/r/pulls/7","state":"open"}`, 201)
-	f, err := New("codeberg.org", "secret", hc, KindAuto)
+	f, err := New("codeberg.org", "secret", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestGiteaOpenPR(t *testing.T) {
 func TestGitHubOpenPRUsesBearerAndGitHubAPI(t *testing.T) {
 	hc := fakeHTTP(t, "https://api.github.com/repos/o/r/pulls", "Bearer ght",
 		`{"number":3,"html_url":"https://github.com/o/r/pull/3","state":"open"}`, 201)
-	f, err := New("github.com", "ght", hc, KindAuto)
+	f, err := New("github.com", "ght", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestGitHubOpenPRUsesBearerAndGitHubAPI(t *testing.T) {
 
 func TestFetchIssue(t *testing.T) {
 	hc := fakeHTTP(t, "/repos/o/r/issues/42", "", `{"number":42,"title":"Bug","body":"it breaks"}`, 200)
-	f, err := New("codeberg.org", "", hc, KindAuto)
+	f, err := New("codeberg.org", "", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestGiteaFindPRFiltersClientSideByHeadRef(t *testing.T) {
 	hc := fakeHTTP(t, "https://codeberg.org/api/v1/repos/o/r/pulls?state=all", "token secret",
 		`[{"number":5,"html_url":"https://codeberg.org/o/r/pulls/5","state":"closed","head":{"ref":"other"}},
 		  {"number":7,"html_url":"https://codeberg.org/o/r/pulls/7","state":"closed","merged_at":"2026-01-01T00:00:00Z","head":{"ref":"feat-x"}}]`, 200)
-	f, err := New("codeberg.org", "secret", hc, KindAuto)
+	f, err := New("codeberg.org", "secret", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestGiteaFindPRFiltersClientSideByHeadRef(t *testing.T) {
 
 func TestGiteaFindPRNotFound(t *testing.T) {
 	hc := fakeHTTP(t, "", "", `[]`, 200)
-	f, err := New("codeberg.org", "secret", hc, KindAuto)
+	f, err := New("codeberg.org", "secret", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestGiteaFindPRNotFound(t *testing.T) {
 func TestGitHubFindPRUsesHeadFilterAndTakesFirstResult(t *testing.T) {
 	hc := fakeHTTP(t, "head=o:feat-x", "Bearer ght",
 		`[{"number":3,"html_url":"https://github.com/o/r/pull/3","state":"open"}]`, 200)
-	f, err := New("github.com", "ght", hc, KindAuto)
+	f, err := New("github.com", "ght", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestGitHubFindPRUsesHeadFilterAndTakesFirstResult(t *testing.T) {
 
 func TestOpenPRSurfacesAPIMessage(t *testing.T) {
 	hc := fakeHTTP(t, "", "", `{"message":"branch already exists"}`, 409)
-	f, err := New("codeberg.org", "t", hc, KindAuto)
+	f, err := New("codeberg.org", "t", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestGitHubPRChecksMergeReadyWhenAllSucceed(t *testing.T) {
 			{"name":"lint","status":"completed","conclusion":"neutral"}
 		]}`,
 	}, 200)
-	f, err := New("github.com", "ght", hc, KindAuto)
+	f, err := New("github.com", "ght", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestGitHubPRChecksNamesFailingCheck(t *testing.T) {
 			{"name":"test","status":"completed","conclusion":"failure","details_url":"https://github.com/o/r/runs/2"}
 		]}`,
 	}, 200)
-	f, err := New("github.com", "ght", hc, KindAuto)
+	f, err := New("github.com", "ght", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestGitHubPRChecksInFlightIsNotTerminal(t *testing.T) {
 		`{"head":{"sha":"deadbeef"}}`,
 		`{"check_runs":[{"name":"build","status":"in_progress"}]}`,
 	}, 200)
-	f, err := New("github.com", "ght", hc, KindAuto)
+	f, err := New("github.com", "ght", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestGitHubPRChecksPaginatesBeyondFirstPage(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(replies[i])), Header: make(http.Header)}, nil
 	})}
 
-	f, err := New("github.com", "ght", hc, KindAuto)
+	f, err := New("github.com", "ght", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestGitHubPRChecksPaginatesBeyondFirstPage(t *testing.T) {
 // (sharing the rest type) must refuse clearly rather than send a request
 // shaped for an endpoint it doesn't have.
 func TestGiteaPRChecksRefusesUnimplementedHost(t *testing.T) {
-	f, err := New("codeberg.org", "secret", nil, KindAuto)
+	f, err := New("codeberg.org", "secret", nil, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestGiteaPRChecksRefusesUnimplementedHost(t *testing.T) {
 // outside its three-host allowlist, named-like-GitLab or not.
 func TestNewRefusesAnyHostOutsideTheAutoAllowlist(t *testing.T) {
 	for _, host := range []string{"gitlab.corp.example.com", "git.company.com", "scm.company.io", "gitea.example.com"} {
-		_, err := New(host, "secret", nil, KindAuto)
+		_, err := New(host, "secret", nil, KindAuto, "")
 		if err == nil {
 			t.Errorf("New(%q, KindAuto) = nil error, want a refusal (not on the allowlist)", host)
 			continue
@@ -338,7 +338,7 @@ func TestNewRefusesAnyHostOutsideTheAutoAllowlist(t *testing.T) {
 
 func TestNewAllowlistedHostsAutoRoute(t *testing.T) {
 	for _, host := range []string{"github.com", "gitlab.com", "codeberg.org"} {
-		f, err := New(host, "secret", nil, KindAuto)
+		f, err := New(host, "secret", nil, KindAuto, "")
 		if err != nil {
 			t.Errorf("New(%q, KindAuto): %v", host, err)
 			continue
@@ -351,7 +351,7 @@ func TestNewAllowlistedHostsAutoRoute(t *testing.T) {
 
 func TestNewKindOverrideBypassesAllowlistRefusal(t *testing.T) {
 	for _, host := range []string{"gitlab.corp.example.com", "git.company.com"} {
-		f, err := New(host, "secret", nil, KindGitea)
+		f, err := New(host, "secret", nil, KindGitea, "")
 		if err != nil {
 			t.Errorf("New(%q, KindGitea): %v", host, err)
 			continue
@@ -362,8 +362,27 @@ func TestNewKindOverrideBypassesAllowlistRefusal(t *testing.T) {
 	}
 }
 
+// TestDoAppendsConfiguredStatusPageForSelfHostedHost pins issue #300: a
+// self-hosted host has no entry in svcstatus's built-in map, so without an
+// explicit override a 5xx from it gets no status-page hint at all. New's
+// statusPageURL parameter closes that gap.
+func TestDoAppendsConfiguredStatusPageForSelfHostedHost(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"internal error"}`, 503)
+	f, err := New("git.company.com", "secret", hc, KindGitea, "https://status.company.com")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r", Title: "t", Head: "b", Base: "main"})
+	if err == nil {
+		t.Fatal("want an error for a 503 response")
+	}
+	if !strings.Contains(err.Error(), "https://status.company.com") {
+		t.Errorf("OpenPR error = %q, want it to mention the configured status page", err.Error())
+	}
+}
+
 func TestNewUnknownKindErrors(t *testing.T) {
-	if _, err := New("codeberg.org", "secret", nil, Kind("bogus")); err == nil {
+	if _, err := New("codeberg.org", "secret", nil, Kind("bogus"), ""); err == nil {
 		t.Error("want an error for an unrecognized forge kind")
 	}
 }
