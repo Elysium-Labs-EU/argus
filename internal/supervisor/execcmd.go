@@ -29,12 +29,27 @@ const shellOperatorChars = "|&;<>(){}"
 // (e.g. a shell builtin like `exit`, or a multi-statement `f() { ...; }; f`
 // reported as a single Cmd).
 func execArgvOrShell(ctx context.Context, cmdStr string) *exec.Cmd {
-	if argv, ok := splitShellWords(cmdStr); ok && len(argv) > 0 && !slices.ContainsFunc(argv, tokenNeedsShell) {
-		if _, err := exec.LookPath(argv[0]); err == nil {
-			return exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // re-running the worker's own reported command, argv-style — no shell involved
-		}
+	if argv, ok := directArgv(cmdStr); ok {
+		return exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // re-running the worker's own reported command, argv-style — no shell involved
 	}
 	return exec.CommandContext(ctx, "sh", "-c", cmdStr) //nolint:gosec // cmdStr needs real shell semantics, or its command name isn't a standalone executable
+}
+
+// directArgv returns cmdStr's word-split argv when it can run directly
+// (bypassing sh -c) — see execArgvOrShell. ok is false whenever
+// execArgvOrShell would fall back to a real shell instead, which
+// VerifyTests uses to tell a genuine `sh -c` parse failure apart from a
+// directly-executed command that happens to exit 2 on its own (see
+// isShellSyntaxError).
+func directArgv(cmdStr string) (argv []string, ok bool) {
+	argv, split := splitShellWords(cmdStr)
+	if !split || len(argv) == 0 || slices.ContainsFunc(argv, tokenNeedsShell) {
+		return nil, false
+	}
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		return nil, false
+	}
+	return argv, true
 }
 
 // wordScanner accumulates splitShellWords' current word: the builder holding

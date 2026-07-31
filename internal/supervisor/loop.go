@@ -641,7 +641,7 @@ func verifyClaimedTests(ctx context.Context, states []*workerState) {
 		if st.status.Phase != protocol.PhaseAwaitingReview && st.status.Phase != protocol.PhaseDone {
 			continue
 		}
-		st.testMismatches = VerifyTests(ctx, st.plan.Worktree, st.status.Tests, testVerifyTimeout)
+		st.testMismatches, st.testUnverifiable = VerifyTests(ctx, st.plan.Worktree, st.status.Tests, testVerifyTimeout)
 	}
 }
 
@@ -864,6 +864,13 @@ type workerState struct {
 	// (see reconcile) — nil means either no terminal-phase check ran yet or
 	// every claimed pass reproduced clean.
 	testMismatches []string
+	// testUnverifiable holds a reason string for each worker-claimed test pass
+	// VerifyTests could not re-run at all — cmdStr never parsed as shell
+	// syntax, so nothing was actually re-executed (see isShellSyntaxError).
+	// Unlike testMismatches, this is not ground truth that the claim is false,
+	// so gateVerdict folds it into Reasons only, not HardReasons: a reviewer
+	// can waive it, where a reproduced mismatch cannot be.
+	testUnverifiable []string
 	// verifyMismatch holds the RunVerifyCommand failure reason once the repo's
 	// configured verify command (Config.VerifyCommand) has been re-run against
 	// a terminal-phase worker — empty means either no command is configured,

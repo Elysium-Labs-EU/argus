@@ -164,8 +164,11 @@ func underReportReason(st *workerState) string {
 // pure gate can't make: it escalates when argus could not measure the diff (so
 // the self-report is unverifiable), when the real diff materially exceeds what
 // the worker claimed (a buggy or dishonest status.json), when a claimed test
-// pass does not reproduce (st.testMismatches, from VerifyTests), when this
-// repo's own configured verify command fails to reproduce clean
+// pass does not reproduce (st.testMismatches, from VerifyTests — a claimed
+// pass that could not even be re-run, e.g. a Cmd that isn't literal shell,
+// escalates too via st.testUnverifiable, but only as a waivable reason: it
+// is not proof the claim is false, just that this gate couldn't confirm it),
+// when this repo's own configured verify command fails to reproduce clean
 // (st.verifyMismatch, from RunVerifyCommand — the same bar `argus ship`'s
 // `git commit` enforces via the repo's own hooks), and when herdr's own
 // agent_status — not status.json — is the only evidence of the worker's real
@@ -188,95 +191,130 @@ func gateVerdict(st *workerState, policy *ReviewPolicy) Verdict {
 		return v
 	}
 	if st.measuredOK {
-		// A worker's self-reported DiffStat is only meaningful once it claims to
-		// be done — mid-"working" it's a snapshot from an earlier report, while
-		// git measures whatever's on disk *right now* as the worker keeps
-		// editing. Comparing those before the worker reaches a terminal phase
-		// pits a live, still-changing number against a stale one and can flag a
-		// perfectly honest in-progress worker as having "under-reported" — this
-		// hard reason is unwaivable, so it must never fire on a mid-flight
-		// comparison that isn't apples-to-apples yet.
-		terminal := eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone
-		if terminal {
-			if reason := underReportReason(st); reason != "" {
-				v.AutoApprove = false
-				v.Reasons = append(v.Reasons, reason)
-				v.HardReasons = append(v.HardReasons, reason)
-			}
-		}
-		// A worker that reaches a terminal phase claiming completed, verified work
-		// but touched zero files per git is exactly the failure mode that let a
-		// launcher spawn silently fail while its stale/fabricated status.json still
-		// sailed through the gate: no code change means nothing was actually done
-		// or reviewable, so this must never auto-approve even though an empty diff
-		// looks "clean" by every other check above.
-		if len(st.measuredFiles) == 0 && terminal {
-			v.AutoApprove = false
-			reason := fmt.Sprintf("worker reports phase %q but git shows zero files changed against base — status may be stale or unverified", eff.Phase)
-			v.Reasons = append(v.Reasons, reason)
-			v.HardReasons = append(v.HardReasons, reason)
-		}
-		// A rework round only exists because a prior verdict was NOT approved, so
-		// something is expected to change. Reaching a terminal phase byte-identical
-		// to the state already found wanting (same touched files, same content)
-		// means it addressed none of its findings — exactly the self-report/reality
-		// mismatch the zero-files check catches for a fresh dispatch, and just as
-		// unwaivable. priorContentHash is set only on a rework round (see JudgeOne),
-		// so this never fires in the main supervise loop where files legitimately
-		// stay unchanged between polls of a single worker.
-		//
-		// Byte-identical content is not proof of a no-op round on its own: a worker
-		// can commit content that was already sitting in the worktree uncommitted
-		// before the round even started (e.g. a fix applied but never landed), which
-		// leaves ContentHash unchanged while a genuinely new HEAD commit ships it —
-		// git rev-parse HEAD moving to a distinct SHA is real, verifiable progress
-		// no content hash can see. So both signals must agree nothing happened
-		// before this hard-escalates.
-		if terminal && st.priorContentHash != "" && st.contentHash == st.priorContentHash && st.headSHA == st.priorHeadSHA {
-			v.AutoApprove = false
-			reason := fmt.Sprintf("rework round reports phase %q but changed nothing since the state already found wanting — findings not addressed", eff.Phase)
-			v.Reasons = append(v.Reasons, reason)
-			v.HardReasons = append(v.HardReasons, reason)
-		}
+		applyMeasuredChecks(&v, st, &eff)
 	}
-
-	// The unfakeable backstop for the planning phase's self-reported Plan
-	// field: a status.json claiming a plan/todo list, with no matching
-	// TodoWrite/TaskCreate tool call anywhere in the worker's own transcript,
-	// escalates exactly like a diff under-report does above — only checked
-	// once the worker is asking to be judged, mirroring the diff checks' own
-	// gating on a terminal phase.
 	if eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone {
-		// Same unfakeable treatment for a claimed test pass: VerifyTests
-		// already reproduced (or failed to reproduce) each one against the
-		// real worktree, so a mismatch here means status.json's pass claim
-		// doesn't hold up — no reviewer verdict should be able to waive it,
-		// the same as an under-reported diff.
-		for _, m := range st.testMismatches {
-			v.AutoApprove = false
-			v.Reasons = append(v.Reasons, m)
-			v.HardReasons = append(v.HardReasons, m)
-		}
-		// Same unwaivable treatment for this repo's own configured verify
-		// command (lint/build/pre-commit): a failure here means ship's own
-		// `git commit` would hit the same failure via the repo's pre-commit
-		// hook, so no reviewer verdict should be able to approve past it.
-		if st.verifyMismatch != "" {
-			v.AutoApprove = false
-			v.Reasons = append(v.Reasons, st.verifyMismatch)
-			v.HardReasons = append(v.HardReasons, st.verifyMismatch)
-		}
-		switch {
-		case st.planEvidenceErr != nil:
-			v.AutoApprove = false
-			v.Reasons = append(v.Reasons, "could not verify plan evidence in worker transcript: "+st.planEvidenceErr.Error())
-		case st.planEvidenceOK && !st.hasPlanEvidence:
-			v.AutoApprove = false
-			v.Reasons = append(v.Reasons,
-				"no TodoWrite/TaskCreate tool call found in worker's session transcript — planning claim unverified")
-		}
+		applyTerminalTestChecks(&v, st)
+		applyPlanEvidenceCheck(&v, st)
 	}
 	return v
+}
+
+// applyMeasuredChecks folds gateVerdict's git-measured-diff checks (self-report
+// vs git ground truth) into v: under-reported diff size, a terminal phase with
+// zero files changed, and a rework round that changed nothing since the state
+// already found wanting. Split out of gateVerdict purely to keep that
+// function's own cyclomatic complexity down — go-crap gates on a function's
+// CRAP score, and folding every check gateVerdict makes into one body pushed
+// it over threshold even at full test coverage. Behavior is unchanged; every
+// existing gateVerdict test still exercises this through the same call.
+// eff is a pointer (rather than the value gateVerdict holds) purely to avoid
+// copying protocol.Status on every call — applyMeasuredChecks never mutates it.
+func applyMeasuredChecks(v *Verdict, st *workerState, eff *protocol.Status) {
+	// A worker's self-reported DiffStat is only meaningful once it claims to
+	// be done — mid-"working" it's a snapshot from an earlier report, while
+	// git measures whatever's on disk *right now* as the worker keeps
+	// editing. Comparing those before the worker reaches a terminal phase
+	// pits a live, still-changing number against a stale one and can flag a
+	// perfectly honest in-progress worker as having "under-reported" — this
+	// hard reason is unwaivable, so it must never fire on a mid-flight
+	// comparison that isn't apples-to-apples yet.
+	terminal := eff.Phase == protocol.PhaseAwaitingReview || eff.Phase == protocol.PhaseDone
+	if terminal {
+		if reason := underReportReason(st); reason != "" {
+			v.AutoApprove = false
+			v.Reasons = append(v.Reasons, reason)
+			v.HardReasons = append(v.HardReasons, reason)
+		}
+	}
+	// A worker that reaches a terminal phase claiming completed, verified work
+	// but touched zero files per git is exactly the failure mode that let a
+	// launcher spawn silently fail while its stale/fabricated status.json still
+	// sailed through the gate: no code change means nothing was actually done
+	// or reviewable, so this must never auto-approve even though an empty diff
+	// looks "clean" by every other check above.
+	if len(st.measuredFiles) == 0 && terminal {
+		v.AutoApprove = false
+		reason := fmt.Sprintf("worker reports phase %q but git shows zero files changed against base — status may be stale or unverified", eff.Phase)
+		v.Reasons = append(v.Reasons, reason)
+		v.HardReasons = append(v.HardReasons, reason)
+	}
+	// A rework round only exists because a prior verdict was NOT approved, so
+	// something is expected to change. Reaching a terminal phase byte-identical
+	// to the state already found wanting (same touched files, same content)
+	// means it addressed none of its findings — exactly the self-report/reality
+	// mismatch the zero-files check catches for a fresh dispatch, and just as
+	// unwaivable. priorContentHash is set only on a rework round (see JudgeOne),
+	// so this never fires in the main supervise loop where files legitimately
+	// stay unchanged between polls of a single worker.
+	//
+	// Byte-identical content is not proof of a no-op round on its own: a worker
+	// can commit content that was already sitting in the worktree uncommitted
+	// before the round even started (e.g. a fix applied but never landed), which
+	// leaves ContentHash unchanged while a genuinely new HEAD commit ships it —
+	// git rev-parse HEAD moving to a distinct SHA is real, verifiable progress
+	// no content hash can see. So both signals must agree nothing happened
+	// before this hard-escalates.
+	if terminal && st.priorContentHash != "" && st.contentHash == st.priorContentHash && st.headSHA == st.priorHeadSHA {
+		v.AutoApprove = false
+		reason := fmt.Sprintf("rework round reports phase %q but changed nothing since the state already found wanting — findings not addressed", eff.Phase)
+		v.Reasons = append(v.Reasons, reason)
+		v.HardReasons = append(v.HardReasons, reason)
+	}
+}
+
+// applyTerminalTestChecks folds VerifyTests' and RunVerifyCommand's
+// reproduction results into v once a worker reaches a terminal phase — see
+// gateVerdict's own doc comment for why a reproduced mismatch is unwaivable
+// while an unverifiable claim (st.testUnverifiable) is only a waivable
+// reason. Split out for the same CRAP-score reason as applyMeasuredChecks.
+func applyTerminalTestChecks(v *Verdict, st *workerState) {
+	// Same unfakeable treatment for a claimed test pass: VerifyTests
+	// already reproduced (or failed to reproduce) each one against the
+	// real worktree, so a mismatch here means status.json's pass claim
+	// doesn't hold up — no reviewer verdict should be able to waive it,
+	// the same as an under-reported diff.
+	for _, m := range st.testMismatches {
+		v.AutoApprove = false
+		v.Reasons = append(v.Reasons, m)
+		v.HardReasons = append(v.HardReasons, m)
+	}
+	// A claimed pass this gate could never actually re-run (cmdStr didn't
+	// parse as shell syntax) still needs a human/reviewer look — the claim
+	// is unconfirmed, not disproven — but a reviewer verdict can waive it,
+	// unlike a reproduced mismatch above.
+	for _, m := range st.testUnverifiable {
+		v.AutoApprove = false
+		v.Reasons = append(v.Reasons, m)
+	}
+	// Same unwaivable treatment for this repo's own configured verify
+	// command (lint/build/pre-commit): a failure here means ship's own
+	// `git commit` would hit the same failure via the repo's pre-commit
+	// hook, so no reviewer verdict should be able to approve past it.
+	if st.verifyMismatch != "" {
+		v.AutoApprove = false
+		v.Reasons = append(v.Reasons, st.verifyMismatch)
+		v.HardReasons = append(v.HardReasons, st.verifyMismatch)
+	}
+}
+
+// applyPlanEvidenceCheck is the unfakeable backstop for the planning phase's
+// self-reported Plan field: a status.json claiming a plan/todo list, with no
+// matching TodoWrite/TaskCreate tool call anywhere in the worker's own
+// transcript, escalates exactly like a diff under-report does — only checked
+// once the worker is asking to be judged, mirroring the diff checks' own
+// gating on a terminal phase. Split out for the same CRAP-score reason as
+// applyMeasuredChecks.
+func applyPlanEvidenceCheck(v *Verdict, st *workerState) {
+	switch {
+	case st.planEvidenceErr != nil:
+		v.AutoApprove = false
+		v.Reasons = append(v.Reasons, "could not verify plan evidence in worker transcript: "+st.planEvidenceErr.Error())
+	case st.planEvidenceOK && !st.hasPlanEvidence:
+		v.AutoApprove = false
+		v.Reasons = append(v.Reasons,
+			"no TodoWrite/TaskCreate tool call found in worker's session transcript — planning claim unverified")
+	}
 }
 
 func blockedText(s *protocol.Status) string {
