@@ -26,6 +26,9 @@ jobs:
         with:
           fetch-depth: 0 # go-crap-gate diffs against origin/main; needs full history
 
+      - name: Check spelling
+        uses: crate-ci/typos@v1
+
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
