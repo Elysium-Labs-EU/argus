@@ -306,19 +306,34 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 		_, _ = fmt.Fprintf(out, "%s opened PR #%d: %s\n", ui.LabelSuccess.Render("✓"), pr.Number, pr.HTMLURL)
 	}
 
+	// prevLifecycle carries JiraNotified forward across a retry — best-effort
+	// read, same posture as the write below: a decode failure here must not
+	// block ship, and the safe fallback (treat as not-yet-notified) only
+	// risks a redundant Jira call, never a lost one.
+	prevLifecycle, _, _ := protocol.LoadLifecycle(a.worktree)
+
 	// Recorded best-effort: a write failure here must not undo an already-opened
 	// PR. Without it, `argus worktree prune` still works (it falls back to
 	// forge.FindPR by branch), just without the exact PR number pre-resolved.
-	if lerr := protocol.WriteLifecycle(a.worktree, &protocol.Lifecycle{
+	lc := &protocol.Lifecycle{
 		State: protocol.LifecycleShipped, Host: target.host, Owner: target.owner, Repo: target.name,
 		Branch: target.branch, PRURL: pr.HTMLURL, PRNumber: pr.Number,
-	}); lerr != nil {
+		JiraNotified: prevLifecycle.JiraNotified,
+	}
+	if lerr := protocol.WriteLifecycle(a.worktree, lc); lerr != nil {
 		logger.Fail("record_lifecycle", target.branch, lerr)
 		_, _ = fmt.Fprintf(out, "%s recording worktree lifecycle: %v\n", ui.LabelWarning.Render("!"), lerr)
 	}
 
 	if a.jiraIssue != "" {
-		postShipJira(ctx, out, logger, a, pr)
+		if lc.JiraNotified {
+			_, _ = fmt.Fprintf(out, "%s already notified Jira issue %s for this PR on a prior ship — skipping duplicate post-ship update\n", ui.LabelInfo.Render("i"), a.jiraIssue)
+		} else if postShipJira(ctx, out, logger, a, pr) {
+			lc.JiraNotified = true
+			if lerr := protocol.WriteLifecycle(a.worktree, lc); lerr != nil {
+				logger.Fail("record_lifecycle", target.branch, lerr)
+			}
+		}
 	}
 	return nil
 }
@@ -340,15 +355,20 @@ type jiraIssueWriter interface {
 // opened: optionally moves the issue to a new status, optionally reassigns
 // it, and always leaves a comment linking the PR — so an operator using
 // --jira-issues as work input (see cmd/supervise.go) doesn't have to update
-// the ticket by hand afterward. It only runs when --jira-issue is set (see
-// shipChange) and is entirely best-effort: a failure here is logged and
-// printed as a warning but never undoes the ship, which has already
-// succeeded by the time this runs.
-func postShipJira(ctx context.Context, out io.Writer, logger *eventlog.Logger, a *shipArgs, pr forge.PR) {
+// the ticket by hand afterward. It only runs when --jira-issue is set and
+// not already recorded as notified (see shipChange) and is otherwise
+// entirely best-effort: a failure here is logged and printed as a warning
+// but never undoes the ship, which has already succeeded by the time this
+// runs. It reports whether the comment actually posted, so shipChange can
+// record JiraNotified only once the one non-idempotent step (Jira has no
+// FindPR-equivalent to de-dupe a comment against) has actually landed —
+// transition/assign are naturally idempotent (an absolute state to move to
+// or assign to) and are retried unconditionally alongside it.
+func postShipJira(ctx context.Context, out io.Writer, logger *eventlog.Logger, a *shipArgs, pr forge.PR) bool {
 	c, err := newJiraClient()
 	if err != nil {
 		warnJiraPostShip(out, logger, a.jiraIssue, err)
-		return
+		return false
 	}
 	if a.jiraTransition != "" {
 		if terr := c.Transition(ctx, a.jiraIssue, a.jiraTransition); terr != nil {
@@ -366,9 +386,10 @@ func postShipJira(ctx context.Context, out io.Writer, logger *eventlog.Logger, a
 	}
 	if cerr := c.Comment(ctx, a.jiraIssue, "Opened "+pr.HTMLURL); cerr != nil {
 		warnJiraPostShip(out, logger, a.jiraIssue, cerr)
-		return
+		return false
 	}
 	logger.Action("jira_comment", a.jiraIssue, "ok", pr.HTMLURL)
+	return true
 }
 
 func warnJiraPostShip(out io.Writer, logger *eventlog.Logger, key string, err error) {
