@@ -916,6 +916,50 @@ func TestShipChangeWarnsButSucceedsWhenJiraHookFails(t *testing.T) {
 	}
 }
 
+// TestShipChangeSkipsDuplicateJiraNotificationOnRetry covers a ship retry
+// after a prior run already posted the Jira post-ship comment: FindPR now
+// reports the PR as already existing (see
+// TestShipChangeReusesExistingPRInsteadOfDuplicating), but unlike PR
+// creation, Jira's Comment call has no forge-side FindPR-equivalent to
+// de-dupe against — without protocol.Lifecycle.JiraNotified, shipChange would
+// call postShipJira unconditionally on every retry and post a second
+// identical comment.
+func TestShipChangeSkipsDuplicateJiraNotificationOnRetry(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	w := &fakeJiraWriter{}
+	withFakeJiraClient(t, w)
+
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	args := &shipArgs{worktree: wt, base: "main", jiraIssue: "PROJ-1"}
+
+	// First ship: no existing PR, so it opens one and notifies Jira.
+	first := &fakeForge{}
+	if err := shipChange(cmd, first, args, target); err != nil {
+		t.Fatalf("first shipChange: %v", err)
+	}
+	if len(w.comments) != 1 {
+		t.Fatalf("after first ship: comments = %v, want exactly one", w.comments)
+	}
+
+	// Retry: FindPR now reports the PR opened above as already existing.
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	retry := &fakeForge{
+		findPR:      forge.PR{Number: 99, HTMLURL: "https://fake/pull/99", State: "open"},
+		findPRFound: true,
+	}
+	if err := shipChange(cmd, retry, args, target); err != nil {
+		t.Fatalf("retry shipChange: %v", err)
+	}
+	if len(w.comments) != 1 {
+		t.Errorf("after retry: comments = %v, want still exactly one (no duplicate)", w.comments)
+	}
+	if !strings.Contains(buf.String(), "already notified Jira issue PROJ-1") {
+		t.Errorf("want an already-notified message on retry, got: %q", buf.String())
+	}
+}
+
 // TestShipChangeFailsWhenShipLintCommandFails covers the .argus/config.yml
 // ship_lint gate: a failing command must stop shipChange before anything is
 // committed or pushed, not just get reported alongside a PR that already

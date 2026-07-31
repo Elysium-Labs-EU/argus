@@ -45,6 +45,12 @@ type Lifecycle struct {
 	Branch    string         `json:"branch"`
 	PRURL     string         `json:"pr_url"`
 	PRNumber  int            `json:"pr_number"`
+	// JiraNotified marks that the --jira-issue post-ship comment already
+	// landed for this worktree's PR. Jira has no FindPR-equivalent lookup a
+	// retry could use to detect an already-posted comment, so this is the
+	// only signal that tells a ship retry (e.g. after a crash between
+	// WriteLifecycle and postShipJira) apart from a first attempt.
+	JiraNotified bool `json:"jira_notified,omitempty"`
 }
 
 // LifecyclePath is where a worktree's Lifecycle record lives, alongside its
