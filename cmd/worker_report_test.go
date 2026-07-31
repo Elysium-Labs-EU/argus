@@ -292,6 +292,36 @@ func TestRunWorkerReportFreshQuestionResetsAnswer(t *testing.T) {
 	}
 }
 
+// TestRunWorkerReportResetsSteersAcrossReports pins the reset half of the
+// steer budget: a worker's own report body never carries a "steers" key, and
+// runWorkerReport does not carry the prior value forward the way it does
+// Base/Title/Question/Answer — so any worker-initiated phase transition
+// clears the working leg's steer count, giving the next working leg a fresh
+// MaxSteersPerWorking budget instead of accumulating across the worktree's
+// whole lifetime.
+func TestRunWorkerReportResetsSteersAcrossReports(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{
+		Phase:  protocol.PhaseWorking,
+		Steers: []protocol.Steer{{Text: "note 1"}, {Text: "note 2"}},
+	}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	body := &protocol.Status{Task: "t", Branch: "b"}
+	if err := runWorkerReport(wt, protocol.PhaseSelfTest, body, fixedNow(time.Now())); err != nil {
+		t.Fatalf("self_test report rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Steers) != 0 {
+		t.Errorf("Steers = %+v after the worker's own report, want it reset to empty", got.Steers)
+	}
+}
+
 func TestParseReportablePhaseRejectsUnknown(t *testing.T) {
 	for _, s := range []string{"done", "bogus", ""} {
 		if _, err := parseReportablePhase(s); err == nil {

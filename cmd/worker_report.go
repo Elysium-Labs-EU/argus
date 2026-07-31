@@ -21,6 +21,7 @@ func newWorkerCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newWorkerReportCmd())
 	cmd.AddCommand(newWorkerAnswerCmd())
+	cmd.AddCommand(newWorkerSteerCmd())
 	return cmd
 }
 

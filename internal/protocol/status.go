@@ -82,6 +82,23 @@ type Answer struct {
 	Option int `json:"option,omitempty"`
 }
 
+// Steer records one supervisor follow-up injected into a worker that is still
+// in PhaseWorking — see `argus worker steer`. Unlike Answer, it resolves
+// nothing and never touches Phase: it is a live chat message delivered into
+// the worker's own turn, not a phase transition, so it sits outside
+// legalTransitions entirely.
+type Steer struct {
+	DeliveredAt time.Time `json:"delivered_at"`
+	Text        string    `json:"text"`
+}
+
+// MaxSteersPerWorking caps how many steer messages a single working leg may
+// receive before `argus worker steer` refuses further ones. Without a cap,
+// steer would become an unbounded side-channel a supervisor could lean on
+// instead of the phase-transition table itself — endlessly redirecting a
+// worker mid-turn rather than ever letting it reach a terminal phase.
+const MaxSteersPerWorking = 3
+
 // Status is the whole typed payload a worker writes to its status file. Fields
 // are ordered for struct alignment (fieldalignment-enforced), not logical order.
 type Status struct {
@@ -116,6 +133,14 @@ type Status struct {
 	// by that report's own JSON body (which never sends it).
 	Question *Question `json:"question,omitempty"`
 	Answer   *Answer   `json:"answer,omitempty"`
+	// Steers is the durable trace of every `argus worker steer` message
+	// delivered while this working leg is live. A worker's own report body
+	// never sets this key, and runWorkerReport does not carry it forward the
+	// way it does Base/Title/Question/Answer — so every worker-initiated
+	// phase transition resets it to empty, giving each fresh working leg its
+	// own MaxSteersPerWorking budget instead of accumulating across the whole
+	// worktree's lifetime.
+	Steers []Steer `json:"steers"`
 	// Plan is the worker's todo list, reported during the planning phase (issue
 	// #103). It is the typed evidence RequiresPlanEvidence checks before
 	// letting a report move planning -> working: a prose "write a todo list
