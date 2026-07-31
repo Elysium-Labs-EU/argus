@@ -41,6 +41,7 @@ func init() {
 	rootCmd.AddCommand(shipCmd)
 	rootCmd.AddCommand(rebaseCmd)
 	rootCmd.AddCommand(reworkCmd)
+	rootCmd.AddCommand(tendCmd)
 	rootCmd.AddCommand(worktreeCmd)
 	rootCmd.AddCommand(statsCmd)
 	rootCmd.AddCommand(systemCmd)

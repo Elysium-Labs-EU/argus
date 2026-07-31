@@ -42,6 +42,9 @@ func (f *fakePruneForge) FindPR(_ context.Context, owner, repo, branch string) (
 	f.lastOwner, f.lastRepo, f.lastBranch = owner, repo, branch
 	return f.pr, f.found, f.err
 }
+func (f *fakePruneForge) PRChecks(context.Context, string, string, int) ([]forge.Check, error) {
+	return nil, nil
+}
 
 func TestParseWorktreePorcelain(t *testing.T) {
 	out := `worktree /repo

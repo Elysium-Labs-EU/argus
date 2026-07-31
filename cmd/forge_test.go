@@ -19,11 +19,14 @@ import (
 // fakeForge is a Forge stub for tests: it returns canned issues and records the
 // PR it was asked to open.
 type fakeForge struct {
-	findPRErr   error
-	issues      map[int]forge.Issue
-	opened      *forge.PRRequest
-	findPR      forge.PR
-	findPRFound bool
+	findPRErr    error
+	prChecksErr  error
+	issues       map[int]forge.Issue
+	opened       *forge.PRRequest
+	prChecksByPR map[int][][]forge.Check
+	findPR       forge.PR
+	prChecksCall int
+	findPRFound  bool
 }
 
 func (f *fakeForge) Host() string { return "fake" }
@@ -36,6 +39,25 @@ func (f *fakeForge) OpenPR(_ context.Context, req *forge.PRRequest) (forge.PR, e
 }
 func (f *fakeForge) FindPR(_ context.Context, _, _, _ string) (forge.PR, bool, error) {
 	return f.findPR, f.findPRFound, f.findPRErr
+}
+
+// PRChecks returns the next queued batch of checks for number, letting a test
+// simulate a poll loop observing checks go from in-flight to terminal across
+// successive ticks. A call past the queued batches repeats the last one.
+func (f *fakeForge) PRChecks(_ context.Context, _, _ string, number int) ([]forge.Check, error) {
+	if f.prChecksErr != nil {
+		return nil, f.prChecksErr
+	}
+	batches := f.prChecksByPR[number]
+	if len(batches) == 0 {
+		return nil, nil
+	}
+	i := f.prChecksCall
+	if i >= len(batches) {
+		i = len(batches) - 1
+	}
+	f.prChecksCall++
+	return batches[i], nil
 }
 
 func TestIssuesToTasks(t *testing.T) {
