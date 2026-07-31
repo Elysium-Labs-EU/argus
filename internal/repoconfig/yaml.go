@@ -11,6 +11,19 @@ import (
 // for service.yaml — inline validation/autocomplete for free, no custom LSP.
 const configSchemaHeader = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/schemas/config.schema.json\n"
 
+// deprecatedKeyAliases maps a superseded .argus/config.yml key to its
+// current name. parseYAML still accepts every key here, assigning to the
+// same field the current name would, and records the mapping on
+// Config.Deprecated so a caller can warn an operator to migrate — argus is
+// young enough that names are still being corrected, and support for an old
+// name is expected to be temporary, not permanent API surface.
+var deprecatedKeyAliases = map[string]string{
+	"ship_lint":              "ship_verify_command",
+	"verify_command":         "gate_verify_command",
+	"worktree_setup_cmd":     "worktree_bootstrap_command",
+	"worktree_setup_command": "worktree_bootstrap_command",
+}
+
 // encodeYAML renders cfg as the minimal YAML document parseYAML can read
 // back: a leading comment, then any of the keys that are actually set, in
 // field order. Like internal/config's TOML encoder, this is deliberately not
@@ -50,14 +63,14 @@ func encodeYAML(cfg *Config) string {
 	if cfg.ReviewNote != "" {
 		fmt.Fprintf(&b, "review_note: %s\n", quoteYAML(cfg.ReviewNote))
 	}
-	if cfg.ShipLint != "" {
-		fmt.Fprintf(&b, "ship_lint: %s\n", quoteYAML(cfg.ShipLint))
+	if cfg.ShipVerifyCommand != "" {
+		fmt.Fprintf(&b, "ship_verify_command: %s\n", quoteYAML(cfg.ShipVerifyCommand))
 	}
-	if cfg.VerifyCommand != "" {
-		fmt.Fprintf(&b, "verify_command: %s\n", quoteYAML(cfg.VerifyCommand))
+	if cfg.GateVerifyCommand != "" {
+		fmt.Fprintf(&b, "gate_verify_command: %s\n", quoteYAML(cfg.GateVerifyCommand))
 	}
-	if cfg.WorktreeSetupCmd != "" {
-		fmt.Fprintf(&b, "worktree_setup_cmd: %s\n", quoteYAML(cfg.WorktreeSetupCmd))
+	if cfg.WorktreeBootstrapCommand != "" {
+		fmt.Fprintf(&b, "worktree_bootstrap_command: %s\n", quoteYAML(cfg.WorktreeBootstrapCommand))
 	}
 	if cfg.TitlePrefixTemplate != "" {
 		fmt.Fprintf(&b, "title_prefix_template: %s\n", quoteYAML(cfg.TitlePrefixTemplate))
@@ -121,9 +134,10 @@ func listFieldFor(cfg *Config, key string) *[]string {
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, top-level `key: value`
 // scalars (base_branch, worker_placement, launcher, forge, worktree_dir,
-// brief_note, review_note, ship_lint, verify_command, worktree_setup_cmd,
-// title_prefix_template, owner_stale_after, review_effort, max_diff_lines;
-// value optionally quoted), and a top-level list key (`allow`, `proof_required_paths`,
+// brief_note, review_note, ship_verify_command, gate_verify_command,
+// worktree_bootstrap_command, title_prefix_template, owner_stale_after,
+// review_effort, max_diff_lines; value optionally quoted, plus
+// deprecatedKeyAliases' old names), and a top-level list key (`allow`, `proof_required_paths`,
 // `always_review_paths`) followed by indented `- value` list items. Any
 // other top-level key is ignored (along with any indented block under it),
 // so a future config key this version doesn't know about doesn't break
@@ -146,6 +160,11 @@ func parseYAML(data string) (Config, error) {
 		}
 		key = strings.TrimSpace(key)
 		rest = strings.TrimSpace(rest)
+
+		if newKey, ok := deprecatedKeyAliases[key]; ok {
+			cfg.Deprecated = append(cfg.Deprecated, DeprecatedKeyUse{Old: key, New: newKey})
+			key = newKey
+		}
 
 		if dst := listFieldFor(&cfg, key); dst != nil {
 			if rest != "" {
@@ -181,10 +200,13 @@ func parseYAML(data string) (Config, error) {
 
 // assignScalarField sets cfg's field for one of parseYAML's scalar keys
 // (base_branch, worker_placement, launcher, forge, worktree_dir, brief_note,
-// review_note, ship_lint, verify_command, worktree_setup_cmd,
-// title_prefix_template, owner_stale_after, review_effort, max_diff_lines), reporting whether
-// key was recognized so parseYAML can still skip an unrecognized key's
-// indented block. line is the 1-based source line, for error messages.
+// review_note, ship_verify_command, gate_verify_command,
+// worktree_bootstrap_command, title_prefix_template, owner_stale_after,
+// review_effort, max_diff_lines — key is already the canonical name by the
+// time it reaches here, deprecatedKeyAliases having been applied by the
+// caller), reporting whether key was recognized so parseYAML can still skip
+// an unrecognized key's indented block. line is the 1-based source line,
+// for error messages.
 func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 	switch key {
 	case "base_branch":
@@ -201,12 +223,12 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 		cfg.BriefNote = value
 	case "review_note":
 		cfg.ReviewNote = value
-	case "ship_lint":
-		cfg.ShipLint = value
-	case "verify_command":
-		cfg.VerifyCommand = value
-	case "worktree_setup_cmd":
-		cfg.WorktreeSetupCmd = value
+	case "ship_verify_command":
+		cfg.ShipVerifyCommand = value
+	case "gate_verify_command":
+		cfg.GateVerifyCommand = value
+	case "worktree_bootstrap_command":
+		cfg.WorktreeBootstrapCommand = value
 	case "title_prefix_template":
 		cfg.TitlePrefixTemplate = value
 	case "owner_stale_after":

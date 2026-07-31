@@ -28,18 +28,39 @@ import (
 // It combines two sources because `git diff` alone would miss the common case of a
 // worker ADDING new files (untracked files are invisible to git diff, which once
 // let a 257-line new test file gate through as "2 lines"): the tracked diff via
-// `git diff --numstat <base>`, plus every untracked, non-ignored file counted as
-// added lines.
+// `git diff --numstat -z <base>`, plus every untracked, non-ignored file counted
+// as added lines. -z (not cosmetic) makes git emit a rename as two separate
+// NUL-terminated path tokens instead of an abbreviated, ambiguous
+// "old => new" / "prefix{old => new}suffix" text form — parseNumstat resolves
+// a rename to its current (post-change) path, so a worker can't smuggle an
+// edit to a control-plane or self-protection path past FilesTouched-keyed
+// checks by renaming an unrelated file onto it.
+//
+// Control-plane paths (isControlPlanePath, prune.go) are filtered out of the
+// parsed records here, after path resolution, rather than by pattern-matching
+// raw numstat text beforehand — the same resolved path is what both the
+// filter and the returned file list use, so the two can't diverge.
 func MeasureDiff(ctx context.Context, worktree, base string) (protocol.DiffStat, []string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--numstat", base) //nolint:gosec // fixed git binary; worktree/base are argus-derived
+	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--numstat", "-z", base) //nolint:gosec // fixed git binary; worktree/base are argus-derived
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
 		return protocol.DiffStat{}, nil, fmt.Errorf("measuring diff against %s: %w", base, err)
 	}
-	stat, files, err := parseNumstat(dropControlPlaneNumstat(out.String()))
+	records, err := parseNumstat(out.String())
 	if err != nil {
 		return protocol.DiffStat{}, nil, err
+	}
+	var stat protocol.DiffStat
+	files := []string{}
+	for _, r := range records {
+		if isControlPlanePath(r.path) {
+			continue
+		}
+		stat.Files++
+		stat.Insertions += r.insertions
+		stat.Deletions += r.deletions
+		files = append(files, r.path)
 	}
 
 	untracked, err := untrackedFiles(ctx, worktree)
@@ -98,24 +119,6 @@ func untrackedFiles(ctx context.Context, worktree string) ([]string, error) {
 	return files, nil
 }
 
-// dropControlPlaneNumstat removes numstat lines for control-plane paths (the
-// same ones ship unstages before opening a PR, isControlPlanePath in
-// prune.go) from raw `git diff --numstat` output, before it reaches
-// parseNumstat. A pre-existing or in-session edit to .claude/argus/status.json
-// is a normal tracked change like any other, so git diff --numstat reports it
-// unless filtered here — unlike untracked files, which git already omits.
-func dropControlPlaneNumstat(out string) string {
-	var kept []string
-	for line := range strings.SplitSeq(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 3 && isControlPlanePath(fields[2]) {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	return strings.Join(kept, "\n")
-}
-
 // countLines returns the number of lines in a file, best-effort (0 if unreadable
 // or binary). It is only a magnitude for the gate, not an exact stat. Binary
 // files report 0 lines, matching how parseNumstat treats tracked binary files
@@ -165,33 +168,54 @@ func isBinaryFile(path string) bool {
 	return bytes.IndexByte(buf[:n], 0) >= 0
 }
 
-// parseNumstat turns `git diff --numstat` output into a DiffStat and the list of
-// changed paths. Binary files report "-" for insertions/deletions; they count as
-// a touched file but contribute no line counts.
-func parseNumstat(out string) (protocol.DiffStat, []string, error) {
-	var stat protocol.DiffStat
-	files := []string{}
-	for line := range strings.SplitSeq(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			return protocol.DiffStat{}, nil, fmt.Errorf("unexpected numstat line %q", line)
-		}
-		stat.Files++
-		files = append(files, fields[2])
-		if fields[0] != "-" {
-			if n, err := strconv.Atoi(fields[0]); err == nil {
-				stat.Insertions += n
-			}
-		}
-		if fields[1] != "-" {
-			if n, err := strconv.Atoi(fields[1]); err == nil {
-				stat.Deletions += n
-			}
-		}
+// numstatFile is one `git diff --numstat -z` record: a file's line counts and
+// its current (post-change) path. Binary files report "-" for insertions/
+// deletions; they count as a touched file but contribute no line counts.
+type numstatFile struct {
+	path       string
+	insertions int
+	deletions  int
+}
+
+// parseNumstat parses `git diff --numstat -z` output into one record per
+// changed file. Each record is normally a single NUL-terminated token
+// "ins\tdel\tpath". For a rename or copy, git instead emits "ins\tdel\t"
+// (an empty path field) followed by two more NUL-terminated tokens — the old
+// path, then the new one — rather than folding both into one abbreviated,
+// ambiguous "old => new" text field the way plain --numstat (without -z)
+// does; a rename's resolved path here is always the new one, since that is
+// where the file's content now lives.
+func parseNumstat(out string) ([]numstatFile, error) {
+	tokens := strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
+	if len(tokens) == 1 && tokens[0] == "" {
+		return nil, nil
 	}
-	return stat, files, nil
+	var records []numstatFile
+	for i := 0; i < len(tokens); i++ {
+		fields := strings.SplitN(tokens[i], "\t", 3)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("unexpected numstat token %q", tokens[i])
+		}
+		ins, del, path := fields[0], fields[1], fields[2]
+		if path == "" {
+			if i+2 >= len(tokens) {
+				return nil, fmt.Errorf("truncated rename record after %q", tokens[i])
+			}
+			path = tokens[i+2]
+			i += 2
+		}
+		rec := numstatFile{path: path}
+		if ins != "-" {
+			if n, err := strconv.Atoi(ins); err == nil {
+				rec.insertions = n
+			}
+		}
+		if del != "-" {
+			if n, err := strconv.Atoi(del); err == nil {
+				rec.deletions = n
+			}
+		}
+		records = append(records, rec)
+	}
+	return records, nil
 }

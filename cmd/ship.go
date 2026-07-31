@@ -43,6 +43,7 @@ func newShipCmd() *cobra.Command {
 		owner               string
 		forceForeignOwner   bool
 		ownerStaleAfter     time.Duration
+		shipVerifyCmd       string
 	)
 
 	cmd := &cobra.Command{
@@ -72,6 +73,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 					owner: owner, forceForeignOwner: forceForeignOwner,
 					ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
 				},
+				shipVerifyCmd: shipVerifyCmd, shipVerifyCmdExplicit: cmd.Flags().Changed("ship-verify-command"),
 			})
 		},
 	}
@@ -92,6 +94,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 	cmd.Flags().StringVar(&owner, "owner", "", ownerFlagHelp)
 	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
 	cmd.Flags().DurationVar(&ownerStaleAfter, "owner-stale-after", ownership.DefaultStaleAfter, ownerStaleAfterFlagHelp)
+	cmd.Flags().StringVar(&shipVerifyCmd, "ship-verify-command", "", "controller-side gate command run before ship commits, in addition to argus's own built-in hook detection (lefthook/pre-commit-framework). Empty (default) runs no extra command. Without this flag, this repo's .argus/config.yml ship_verify_command key wins, then this default")
 	return cmd
 }
 
@@ -100,46 +103,25 @@ var shipCmd = newShipCmd()
 // shipArgs holds newShipCmd's flag values so runShip can be tested directly,
 // without going through cobra flag parsing.
 type shipArgs struct {
-	credentialEnv  map[string]string
-	worktree       string
-	base           string
-	title          string
-	repo           string
-	jiraIssue      string
-	jiraTransition string
-	jiraAssignee   string
-	forgeKind      string
-	// titlePrefixTemplate starts as the raw --title-prefix-template flag
-	// value and is overwritten in resolveShipContext with the fully
-	// resolved value (flag > repo config > "" no-enforcement), the same
-	// mutate-in-place pattern shipArgs.base uses for baseIsDefault. Callers
-	// building shipArgs directly for a test that wants to skip config
-	// resolution can just set this to the final value they want enforced.
-	titlePrefixTemplate string
-	owner               ownerFlags
-	issue               int
-	force               bool
-	dryRun              bool
-	// titlePrefixTemplateExplicit is true only when --title-prefix-template
-	// was actually passed, the same explicit-flag-wins signal
-	// forgeKindExplicit gives --forge.
+	credentialEnv               map[string]string
+	forgeKind                   string
+	shipVerifyCmd               string
+	title                       string
+	repo                        string
+	jiraIssue                   string
+	jiraTransition              string
+	jiraAssignee                string
+	worktree                    string
+	base                        string
+	titlePrefixTemplate         string
+	owner                       ownerFlags
+	issue                       int
+	force                       bool
+	dryRun                      bool
 	titlePrefixTemplateExplicit bool
-	// forgeKindExplicit is true only when --forge was actually passed
-	// (cmd.Flags().Changed("forge")): an operator-given flag always wins over
-	// this repo's .argus/config.yml forge key, the same explicit-flag-wins
-	// precedence baseIsDefault gives --base. Any caller building shipArgs
-	// directly (tests) leaves this false, which means "fall back to the
-	// repo's config, then auto-detect" — the pre-this-change behavior when no
-	// config key is set.
-	forgeKindExplicit bool
-	// baseIsDefault is true only when --base was left at its unset CLI
-	// default (cmd.Flags().Changed("base") == false): runShip then resolves
-	// the real base via supervisor.ResolveBase instead of trusting the
-	// flag's literal "main" default (see internal/repoconfig, issue
-	// #160/#161). Any caller building shipArgs directly (tests,
-	// shipChange's other callers) leaves this false, which means "trust
-	// base as given" — the pre-#161 behavior.
-	baseIsDefault bool
+	shipVerifyCmdExplicit       bool
+	forgeKindExplicit           bool
+	baseIsDefault               bool
 }
 
 // shipTarget is the forge/branch/PR identity runShip resolves before deciding
@@ -195,12 +177,12 @@ func resolveShipContext(ctx context.Context, out io.Writer, a *shipArgs) (*shipC
 	if verr := checkApproved(ctx, a.worktree, "origin/"+a.base, a.force); verr != nil {
 		return nil, verr
 	}
-	a.titlePrefixTemplate = resolveTitlePrefixTemplateValue(a.titlePrefixTemplateExplicit, a.titlePrefixTemplate, titlePrefixTemplateConfigDefault(ctx, a.worktree))
+	a.titlePrefixTemplate = resolveTitlePrefixTemplateValue(a.titlePrefixTemplateExplicit, a.titlePrefixTemplate, titlePrefixTemplateConfigDefault(ctx, out, a.worktree))
 	host, owner, name, err := resolveRepo(ctx, a.repo, a.worktree)
 	if err != nil {
 		return nil, err
 	}
-	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, forgeConfigDefault(ctx, a.worktree)))
+	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, forgeConfigDefault(ctx, out, a.worktree)))
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +260,7 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	logger, closeLog := openRunLog(cmd, "ship")
 	defer closeLog()
 
-	if gerr := enforceShipGate(ctx, a.worktree); gerr != nil {
+	if gerr := enforceShipGate(ctx, out, a.worktree, a.shipVerifyCmdExplicit, a.shipVerifyCmd); gerr != nil {
 		logger.Fail("ship_gate", target.branch, gerr)
 		return gerr
 	}
@@ -415,13 +397,14 @@ func warnJiraPostShip(out io.Writer, logger *eventlog.Logger, key string, err er
 
 // enforceShipGate runs this repo's hook/lint enforcement before shipChange
 // commits anything: any lefthook/pre-commit-framework config found in the
-// worktree (supervisor.EnforceHooks), then the repo's own optional ship_lint
-// command from .argus/config.yml (supervisor.RunShipLint). It is unconditional
-// — unlike checkApproved, --force does not skip it — because the point is to
-// close the --no-verify bypass even for a human who has decided to ship an
-// unreviewed change; letting --force also skip this would just relocate the
-// bypass rather than close it.
-func enforceShipGate(ctx context.Context, worktree string) error {
+// worktree (supervisor.EnforceHooks), then the repo's own optional
+// ship_verify_command from .argus/config.yml, or an explicit
+// --ship-verify-command flag override (supervisor.RunShipVerifyCommand). It
+// is unconditional — unlike checkApproved, --force does not skip it —
+// because the point is to close the --no-verify bypass even for a human who
+// has decided to ship an unreviewed change; letting --force also skip this
+// would just relocate the bypass rather than close it.
+func enforceShipGate(ctx context.Context, out io.Writer, worktree string, shipVerifyExplicit bool, shipVerifyFlag string) error {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
 		return fmt.Errorf("resolving repo root for ship gate: %w", err)
@@ -433,7 +416,8 @@ func enforceShipGate(ctx context.Context, worktree string) error {
 	if err != nil {
 		return fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)
 	}
-	return supervisor.RunShipLint(ctx, worktree, rc.ShipLint)
+	warnDeprecatedConfigKeys(out, &rc)
+	return supervisor.RunShipVerifyCommand(ctx, worktree, resolveShipVerifyCommand(shipVerifyExplicit, shipVerifyFlag, &rc))
 }
 
 // checkApproved refuses to ship a worktree that argus never cleared. supervise
@@ -508,7 +492,7 @@ func resolveRepo(ctx context.Context, override, worktree string) (host, owner, n
 // worktree outside any repo, or with no config file, simply has no default
 // to offer, falling through to whatever the caller does next (an explicit
 // --forge, or auto-detection).
-func forgeConfigDefault(ctx context.Context, worktree string) string {
+func forgeConfigDefault(ctx context.Context, out io.Writer, worktree string) string {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
 		return ""
@@ -517,13 +501,14 @@ func forgeConfigDefault(ctx context.Context, worktree string) string {
 	if err != nil {
 		return ""
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	return rc.Forge
 }
 
 // titlePrefixTemplateConfigDefault reads worktree's repo .argus/config.yml
 // title_prefix_template key, best-effort like forgeConfigDefault: a worktree
 // outside any repo, or with no config file, simply has no default to offer.
-func titlePrefixTemplateConfigDefault(ctx context.Context, worktree string) string {
+func titlePrefixTemplateConfigDefault(ctx context.Context, out io.Writer, worktree string) string {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
 		return ""
@@ -532,6 +517,7 @@ func titlePrefixTemplateConfigDefault(ctx context.Context, worktree string) stri
 	if err != nil {
 		return ""
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	return rc.TitlePrefixTemplate
 }
 

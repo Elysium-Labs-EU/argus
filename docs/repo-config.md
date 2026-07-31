@@ -1,7 +1,7 @@
 # Repo config: .argus/config.yml
 
 argus hardcodes no build/test toolchain — it assumes no default build, test,
-or lint command of its own. `verify_command` below is one such opt-in
+or lint command of its own. `gate_verify_command` below is one such opt-in
 exception: a repo owner sets a specific shell command via the key, and argus
 re-runs exactly that command as part of the gate, alongside `ship`'s
 required approving verdict (see `internal/supervisor/reviewer.go`). The only
@@ -66,20 +66,20 @@ All keys are optional; a missing file is equivalent to an empty one.
   diff-counting guidance that mirrors `MeasureDiff`'s own untracked-file
   handling) always follow it — those are argus's own pipeline invariants, not
   something a repo can opt out of.
-- **`verify_command`** — a shell command the gate re-runs inside a worker's
+- **`gate_verify_command`** — a shell command the gate re-runs inside a worker's
   worktree once it reaches a terminal phase (e.g. `"make lint"`,
   `"golangci-lint run"`), closing the gap where a diff earns a clean gate
   verdict and then fails at `ship`'s `git commit` because the repo's own
   pre-commit hooks ran a check the gate never reproduced. A non-zero exit
   (after one retry, to absorb shared-machine flakiness — see
-  `RunVerifyCommand`) is an unwaivable escalation: no reviewer verdict can
+  `RunGateVerifyCommand`) is an unwaivable escalation: no reviewer verdict can
   approve past it, the same treatment a reproduced test-claim mismatch gets.
-  Precedence: an explicit `--verify-cmd` flag, then this key, then unset (no
-  command runs — today's prior behavior). Unset by default; a repo owner
-  opts in.
-- **`worktree_setup_cmd`** — a shell command run once, synchronously, inside
+  Precedence: an explicit `--gate-verify-command` flag (`--verify-cmd` still
+  works as a deprecated alias), then this key, then unset (no command runs —
+  today's prior behavior). Unset by default; a repo owner opts in.
+- **`worktree_bootstrap_command`** — a shell command run once, synchronously, inside
   a freshly created worktree, right after `git worktree add` succeeds and
-  before the worker's agent is spawned (see `RunWorktreeSetupCmd`). Use this
+  before the worker's agent is spawned (see `RunWorktreeBootstrapCommand`). Use this
   when a repo's tasks depend on gitignored per-developer local config (env
   files, local settings) that exists only in the original checkout — a plain
   `git worktree add` never copies it, so without this hook a spawned worker
@@ -88,9 +88,10 @@ All keys are optional; a missing file is equivalent to an empty one.
   worktree creation the same way a `git worktree add` failure already does —
   no retry, since a bootstrap script is expected to be deterministic, not
   contend for shared-machine resources the way a build/test command might.
-  Precedence: an explicit `--worktree-setup-cmd` flag, then this key, then
-  unset (no command runs — today's prior behavior). Unset by default; a repo
-  owner opts in.
+  Precedence: an explicit `--worktree-bootstrap-command` flag
+  (`--worktree-setup-cmd` still works as a deprecated alias), then this key,
+  then unset (no command runs — today's prior behavior). Unset by default; a
+  repo owner opts in.
 - **`owner_stale_after`** — how long a worktree's owner-lease heartbeat
   (`.claude/argus/owner.json`, written by `internal/ownership`) may go quiet
   before `rework`/`rebase`/`ship`/`worker answer` let a *mismatched* caller

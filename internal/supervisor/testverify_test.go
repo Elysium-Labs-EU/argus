@@ -524,23 +524,23 @@ func TestReconcileCapturesReviewDiffBeforeTestSideEffects(t *testing.T) {
 	}
 }
 
-func TestRunVerifyCommandSkipsWhenUnconfigured(t *testing.T) {
+func TestRunGateVerifyCommandSkipsWhenUnconfigured(t *testing.T) {
 	wt := t.TempDir()
-	if m := RunVerifyCommand(context.Background(), wt, ""); m != "" {
+	if m := RunGateVerifyCommand(context.Background(), wt, ""); m != "" {
 		t.Errorf("mismatch = %q, want none — an empty verify command must not run anything", m)
 	}
 }
 
-func TestRunVerifyCommandAcceptsCleanRun(t *testing.T) {
+func TestRunGateVerifyCommandAcceptsCleanRun(t *testing.T) {
 	wt := t.TempDir()
-	if m := RunVerifyCommand(context.Background(), wt, "exit 0"); m != "" {
+	if m := RunGateVerifyCommand(context.Background(), wt, "exit 0"); m != "" {
 		t.Errorf("mismatch = %q, want none for a genuinely clean command", m)
 	}
 }
 
-func TestRunVerifyCommandFlagsRepeatedFailure(t *testing.T) {
+func TestRunGateVerifyCommandFlagsRepeatedFailure(t *testing.T) {
 	wt := t.TempDir()
-	m := RunVerifyCommand(context.Background(), wt, "echo lint-boom; exit 1")
+	m := RunGateVerifyCommand(context.Background(), wt, "echo lint-boom; exit 1")
 	if m == "" {
 		t.Fatal("mismatch = \"\", want a reason for a command that fails on both attempts")
 	}
@@ -549,29 +549,29 @@ func TestRunVerifyCommandFlagsRepeatedFailure(t *testing.T) {
 	}
 }
 
-func TestRunVerifyCommandRetriesOnceBeforeFlagging(t *testing.T) {
+func TestRunGateVerifyCommandRetriesOnceBeforeFlagging(t *testing.T) {
 	wt := t.TempDir()
 	marker := filepath.Join(wt, "verify-attempted")
 	cmd := "test -f " + marker + " && exit 0 || { touch " + marker + "; exit 1; }"
-	if m := RunVerifyCommand(context.Background(), wt, cmd); m != "" {
+	if m := RunGateVerifyCommand(context.Background(), wt, cmd); m != "" {
 		t.Fatalf("mismatch = %q, want none — a fail-then-pass pair is a flake, not a real mismatch", m)
 	}
 }
 
-// TestRunVerifyCommandReplaysUnquotedRunAlternationArgvStyle is the
+// TestRunGateVerifyCommandReplaysUnquotedRunAlternationArgvStyle is the
 // verify_command counterpart of
 // TestVerifyTestsReplaysUnquotedRunAlternationArgvStyle: the same unquoted
 // `-run` alternation reported as a repo's verify_command previously produced
 // an unwaivable exit-127 hard-gate failure (see gateVerdict/verifyMismatch),
 // even though the underlying tests genuinely pass.
-func TestRunVerifyCommandReplaysUnquotedRunAlternationArgvStyle(t *testing.T) {
+func TestRunGateVerifyCommandReplaysUnquotedRunAlternationArgvStyle(t *testing.T) {
 	dir := writeGoTestFixture(t)
-	if m := RunVerifyCommand(context.Background(), dir, "go test -run TestFoo|TestBar ./..."); m != "" {
+	if m := RunGateVerifyCommand(context.Background(), dir, "go test -run TestFoo|TestBar ./..."); m != "" {
 		t.Fatalf("mismatch = %q, want none — an unquoted -run alternation must replay as one go test invocation, not a shell pipeline", m)
 	}
 }
 
-func TestGateEscalatesWhenVerifyCommandFails(t *testing.T) {
+func TestGateEscalatesWhenGateVerifyCommandFails(t *testing.T) {
 	st := &workerState{
 		hasFile:        true,
 		measuredOK:     true,
@@ -595,21 +595,21 @@ func TestGateEscalatesWhenVerifyCommandFails(t *testing.T) {
 	}
 }
 
-func TestReconcileWiresVerifyCommandIntoVerifyMismatch(t *testing.T) {
+func TestReconcileWiresGateVerifyCommandIntoVerifyMismatch(t *testing.T) {
 	wt := gitWorktreeWithDiff(t)
 	states := []*workerState{{
 		hasFile: true,
 		plan:    &WorkerPlan{Worker: Worker{Task: "lint-failure", Worktree: wt}},
 		status:  protocol.Status{Phase: protocol.PhaseAwaitingReview},
 	}}
-	reconcile(context.Background(), &Config{Base: "HEAD", VerifyCommand: "exit 1"}, states)
+	reconcile(context.Background(), &Config{Base: "HEAD", GateVerifyCommand: "exit 1"}, states)
 
 	if states[0].verifyMismatch == "" {
-		t.Fatal("reconcile should have wired RunVerifyCommand's failure into st.verifyMismatch")
+		t.Fatal("reconcile should have wired RunGateVerifyCommand's failure into st.verifyMismatch")
 	}
 }
 
-func TestReconcileSkipsVerifyCommandWhenUnconfigured(t *testing.T) {
+func TestReconcileSkipsGateVerifyCommandWhenUnconfigured(t *testing.T) {
 	wt := gitWorktreeWithDiff(t)
 	states := []*workerState{{
 		hasFile: true,
@@ -623,14 +623,14 @@ func TestReconcileSkipsVerifyCommandWhenUnconfigured(t *testing.T) {
 	}
 }
 
-func TestReconcileSkipsVerifyCommandForNonTerminalPhase(t *testing.T) {
+func TestReconcileSkipsGateVerifyCommandForNonTerminalPhase(t *testing.T) {
 	wt := gitWorktreeWithDiff(t)
 	states := []*workerState{{
 		hasFile: true,
 		plan:    &WorkerPlan{Worker: Worker{Task: "still-working", Worktree: wt}},
 		status:  protocol.Status{Phase: protocol.PhaseWorking},
 	}}
-	reconcile(context.Background(), &Config{Base: "HEAD", VerifyCommand: "exit 1"}, states)
+	reconcile(context.Background(), &Config{Base: "HEAD", GateVerifyCommand: "exit 1"}, states)
 
 	if states[0].verifyMismatch != "" {
 		t.Fatalf("verify command must not run for a non-terminal phase, got %q", states[0].verifyMismatch)

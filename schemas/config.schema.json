@@ -30,7 +30,7 @@
     },
     "worktree_dir": {
       "type": "string",
-      "description": "Where a spawned worker's worktree is created. Empty/unset defaults to <repo>/.claude/worktrees/<branch>. A relative value is joined under the repo root, so \"..\" points at a sibling-of-repo convention (<parent>/<branch>); an absolute value is used as-is.",
+      "description": "Where a spawned worker's worktree is created. Empty/unset defaults to <repo>/.claude/worktrees/<branch>. A relative value is joined under the repo root, so \"..\" points at a sibling-of-repo convention (<parent>/<branch>); an absolute value is used as-is. Changing this shifts the worktree's nesting depth relative to the original checkout — see worktree_bootstrap_command's own note if that command hardcodes a relative hop count back to it.",
       "examples": ["..", "../worktrees", "/Users/me/worktrees"]
     },
     "brief_note": {
@@ -43,20 +43,36 @@
       "description": "Free-text note appended verbatim to the reviewer's prompt.",
       "examples": ["Pay extra attention to internal/supervisor changes."]
     },
-    "ship_lint": {
+    "ship_verify_command": {
       "type": "string",
       "description": "Controller-side gate command run before ship commits, in addition to argus's own built-in hook detection. Empty/unset runs no extra command.",
       "examples": ["make lint", "task lint"]
     },
+    "gate_verify_command": {
+      "type": "string",
+      "description": "Shell command the gate runs in a worker's worktree once it reaches a terminal phase, before a verdict is recorded. This is also the general-purpose escape hatch for any repo-specific mechanical rule ReviewPolicy has no dedicated field for (max_diff_lines/proof_required_paths/always_review_paths are a closed set): express the rule as a script that exits non-zero on violation and its failure becomes an unwaivable escalation, no argus code change needed. It only fires at that one gate checkpoint, not continuously during planning/working, so a violation surfaces at review time rather than the moment it's introduced. Empty/unset skips this check. (Renamed from verify_command — the old name still works, see Config.Deprecated.)",
+      "examples": ["make test", "npm test"]
+    },
+    "worktree_bootstrap_command": {
+      "type": "string",
+      "description": "Shell command run once, synchronously, in a freshly created worktree, right after `git worktree add` succeeds and before the worker's agent is spawned. A non-zero exit fails worktree creation. Use this to bootstrap gitignored per-developer local config (env files, local settings) that only exists in the original checkout. Empty/unset runs no extra command. It runs with cwd already at the resolved worktree_dir location, after `git worktree add` already succeeded there — it must never attempt to create or relocate the worktree itself (git will refuse, surfacing as a raw git error wrapped in this command's own failure message). A script that hardcodes a relative hop count back to the original checkout (e.g. `cp ../../.env .env`, assuming the default two-levels-deep layout) breaks if worktree_dir changes the nesting depth; prefer deriving the repo root at runtime (`git rev-parse --show-toplevel`) over a hardcoded hop count. (Renamed from worktree_setup_command, itself renamed from worktree_setup_cmd — both old names still work, see Config.Deprecated.)",
+      "examples": ["cp ../.env .env", "cp .env.local.example .env.local"]
+    },
+    "ship_lint": {
+      "type": "string",
+      "description": "Deprecated: renamed to ship_verify_command. Still accepted — argus prints a one-line migration warning when it's read — but new configs should use the new name."
+    },
     "verify_command": {
       "type": "string",
-      "description": "Shell command the gate runs in a worker's worktree before a verdict is recorded. Empty/unset skips this check.",
-      "examples": ["make test", "npm test"]
+      "description": "Deprecated: renamed to gate_verify_command. Still accepted — argus prints a one-line migration warning when it's read — but new configs should use the new name."
     },
     "worktree_setup_cmd": {
       "type": "string",
-      "description": "Shell command run once, synchronously, in a freshly created worktree, right after `git worktree add` succeeds and before the worker's agent is spawned. A non-zero exit fails worktree creation. Use this to bootstrap gitignored per-developer local config (env files, local settings) that only exists in the original checkout. Empty/unset runs no extra command.",
-      "examples": ["cp ../.env .env", "cp .env.local.example .env.local"]
+      "description": "Deprecated: renamed to worktree_bootstrap_command. Still accepted — argus prints a one-line migration warning when it's read — but new configs should use the new name."
+    },
+    "worktree_setup_command": {
+      "type": "string",
+      "description": "Deprecated: renamed to worktree_bootstrap_command. Still accepted — argus prints a one-line migration warning when it's read — but new configs should use the new name."
     },
     "title_prefix_template": {
       "type": "string",
@@ -87,12 +103,12 @@
     },
     "proof_required_paths": {
       "type": "array",
-      "description": "Path globs whose changes require real_world_proof in a worker's report before the review gate accepts it.",
+      "description": "Path globs whose changes require real_world_proof in a worker's report before the review gate accepts it. Setting this key entirely replaces argus's own built-in default list rather than merging with it.",
       "items": { "type": "string" }
     },
     "always_review_paths": {
       "type": "array",
-      "description": "Path globs that always escalate to human/reviewer attention regardless of diff size.",
+      "description": "Path globs that always escalate to human/reviewer attention regardless of diff size. Setting this key entirely replaces argus's own built-in default list rather than merging with it. The one exception is .argus/config.yml itself: it is always checked regardless of this list, since it governs next run's own gate policy and can't be allowed to silently drop out by omission.",
       "items": { "type": "string" }
     }
   }

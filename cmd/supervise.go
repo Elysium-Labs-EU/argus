@@ -38,10 +38,13 @@ func newSuperviseCmd() *cobra.Command {
 		alwaysReviewPaths     []string
 		reviewModel           string
 		reviewEffort          string
+		reviewNote            string
+		briefNote             string
 		review                bool
 		maxDiffLines          int
-		verifyCmd             string
-		worktreeSetupCmd      string
+		gateVerifyCmd         string
+		worktreeBootstrapCmd  string
+		worktreeDir           string
 		interval              time.Duration
 		timeout               time.Duration
 		reviewConcurrency     int
@@ -104,10 +107,11 @@ each pane's directory in --panes mode).`,
 				}
 				workers, err = attachWorkers(cmd.Context(), client, workspace, worktrees)
 			} else {
-				workers, err = spawnWorkers(cmd.Context(), client, cmd.OutOrStdout(), &workerInput{
+				workers, err = spawnWorkers(cmd.Context(), cmd.OutOrStdout(), client, &workerInput{
 					panes: panes, branches: branches, labels: labels, tasks: tasks, tasksFile: tasksFile, repo: repo,
 				}, issues, jiraIssues, overrides, jiraSpawnOpts{assignToCaller: jiraAssignOnSpawn, transition: jiraTransitionOnSpawn},
-					forgeKind, cmd.Flags().Changed("forge"))
+					forgeKind, cmd.Flags().Changed("forge"),
+					briefNoteOverride{explicit: cmd.Flags().Changed("brief-note"), value: briefNote})
 			}
 			if err != nil {
 				return err
@@ -129,8 +133,9 @@ each pane's directory in --panes mode).`,
 				if err != nil {
 					return &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
 				}
+				warnDeprecatedConfigKeys(cmd.OutOrStdout(), &rc)
 			}
-			applyRepoWorktreeDir(workers, rc.WorktreeDir)
+			applyRepoWorktreeDir(workers, resolveWorktreeDir(cmd.Flags().Changed("worktree-dir"), worktreeDir, &rc))
 
 			resolvedBase := resolveSuperviseBase(cmd.Context(), cmd.Flags().Changed("base"), base, repoRoot, &rc)
 			policy := resolveGatePolicy(gateFlags{
@@ -141,18 +146,20 @@ each pane's directory in --panes mode).`,
 				proofRequiredExplicit: cmd.Flags().Changed("proof-required-path"),
 				alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
 			}, &rc)
-			verifyCommand := resolveVerifyCommand(cmd.Flags().Changed("verify-cmd"), verifyCmd, &rc)
-			worktreeSetupCommand := resolveWorktreeSetupCmd(cmd.Flags().Changed("worktree-setup-cmd"), worktreeSetupCmd, &rc)
+			gateVerifyExplicit := cmd.Flags().Changed("gate-verify-command") || cmd.Flags().Changed("verify-cmd")
+			worktreeBootstrapExplicit := cmd.Flags().Changed("worktree-bootstrap-command") || cmd.Flags().Changed("worktree-setup-cmd")
+			gateVerifyCommand := resolveGateVerifyCommand(gateVerifyExplicit, gateVerifyCmd, &rc)
+			worktreeBootstrapCommand := resolveWorktreeBootstrapCommand(worktreeBootstrapExplicit, worktreeBootstrapCmd, &rc)
 
 			return runSupervision(cmd, client, workers, &superviseOpts{
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
 				base: resolvedBase, launcher: resolveLauncher(cmd.Flags().Changed("launcher"), launcher, &rc), workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewEffort: resolveReviewEffort(cmd.Flags().Changed("review-effort"), reviewEffort, &rc), reviewConcurrency: reviewConcurrency,
-				policy: policy, verifyCommand: verifyCommand, worktreeSetupCmd: worktreeSetupCommand,
+				policy: policy, gateVerifyCommand: gateVerifyCommand, worktreeBootstrapCmd: worktreeBootstrapCommand,
 				allow: allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
 				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
-				reviewNote:      rc.ReviewNote,
+				reviewNote:      resolveReviewNote(cmd.Flags().Changed("review-note"), reviewNote, &rc),
 			})
 		},
 	}
@@ -174,11 +181,18 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
-	bindVerifyCmdFlag(cmd, &verifyCmd, "review gate: shell command re-run in a worker's worktree once it reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing — today's behavior. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
-	cmd.Flags().StringVar(&worktreeSetupCmd, "worktree-setup-cmd", "", "shell command run once, synchronously, in a freshly created worktree, right after `git worktree add` succeeds and before the worker's agent is spawned (e.g. copying in gitignored per-developer local config); a non-zero exit fails worktree creation the same way a `git worktree add` failure already does. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml worktree_setup_cmd wins, then this default")
+	cmd.Flags().StringVar(&gateVerifyCmd, "gate-verify-command", "", "review gate: shell command re-run in a worker's worktree once it reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing — today's behavior. Without this flag, this repo's .argus/config.yml gate_verify_command wins, then this default")
+	cmd.Flags().StringVar(&gateVerifyCmd, "verify-cmd", "", "deprecated: renamed to --gate-verify-command")
+	_ = cmd.Flags().MarkDeprecated("verify-cmd", "use --gate-verify-command instead")
+	cmd.Flags().StringVar(&worktreeBootstrapCmd, "worktree-bootstrap-command", "", "shell command run once, synchronously, in a freshly created worktree, right after `git worktree add` succeeds and before the worker's agent is spawned (e.g. copying in gitignored per-developer local config); a non-zero exit fails worktree creation the same way a `git worktree add` failure already does. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml worktree_bootstrap_command wins, then this default. See schemas/config.schema.json's worktree_bootstrap_command for the full cwd/worktree_dir interaction it must respect")
+	cmd.Flags().StringVar(&worktreeBootstrapCmd, "worktree-setup-cmd", "", "deprecated: renamed to --worktree-bootstrap-command")
+	_ = cmd.Flags().MarkDeprecated("worktree-setup-cmd", "use --worktree-bootstrap-command instead")
+	cmd.Flags().StringVar(&worktreeDir, "worktree-dir", "", "where a spawned worker's worktree is created. Empty (default) uses <repo>/.claude/worktrees/<branch>; a relative value is joined under the repo root (\"..\" for a sibling-of-repo layout), an absolute value is used as-is. Without this flag, this repo's .argus/config.yml worktree_dir wins, then this default. If worktree_bootstrap_command hardcodes a relative hop count back to the checkout, changing this can break it (see schemas/config.schema.json)")
 	cmd.Flags().BoolVar(&review, "review", false, "on gate escalation, run a headless claude -p review instead of only surfacing to you")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for --review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for --review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
+	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
+	cmd.Flags().StringVar(&briefNote, "brief-note", "", "free-text note appended verbatim to a generated worker brief. Currently only reaches workers spawned from --issues/--jira-issues, not plain --tasks workers. Without this flag, this repo's .argus/config.yml brief_note wins, then this default (no note)")
 	cmd.Flags().IntVar(&reviewConcurrency, "review-concurrency", 0, "max concurrent claude -p --review calls when the gate escalates several workers at once (0 = supervisor.defaultReviewConcurrency)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan and exit without creating worktrees or spawning workers")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front worker API traffic with the credential proxy; workers inherit the host's real ANTHROPIC_API_KEY")
@@ -198,27 +212,27 @@ each pane's directory in --panes mode).`,
 // RunE can pass them through without runSupervision growing a 15-argument
 // signature.
 type superviseOpts struct {
-	credentialEnv     map[string]string
-	reviewModel       string
-	reviewEffort      string
-	base              string
-	launcher          string
-	workerRuntime     string
-	workerPlacement   string
-	reviewNote        string
-	verifyCommand     string
-	worktreeSetupCmd  string
-	policy            *supervisor.ReviewPolicy
-	allow             []string
-	repoAllow         []string
-	interval          time.Duration
-	timeout           time.Duration
-	reviewConcurrency int
-	attach            bool
-	dryRun            bool
-	noCredProxy       bool
-	review            bool
-	repoExplicit      bool
+	credentialEnv        map[string]string
+	reviewModel          string
+	reviewEffort         string
+	base                 string
+	launcher             string
+	workerRuntime        string
+	workerPlacement      string
+	reviewNote           string
+	gateVerifyCommand    string
+	worktreeBootstrapCmd string
+	policy               *supervisor.ReviewPolicy
+	allow                []string
+	repoAllow            []string
+	interval             time.Duration
+	timeout              time.Duration
+	reviewConcurrency    int
+	attach               bool
+	dryRun               bool
+	noCredProxy          bool
+	review               bool
+	repoExplicit         bool
 }
 
 // --worker-placement values. workerPlacementPane is accepted so the flag's
@@ -352,10 +366,11 @@ func resolveLauncher(explicit bool, flagValue string, rc *repoconfig.Config) str
 // applyRepoWorktreeDir sets WorktreeDir on every worker that doesn't already
 // carry an explicit Worktree, so BuildPlan's default-worktree derivation
 // (internal/supervisor.WorktreePath, only consulted when Worktree is empty)
-// honors this repo's .argus/config.yml worktree_dir instead of always
-// falling back to .claude/worktrees. --attach's workers already set Worktree
-// explicitly (the existing directory being observed), so they pass through
-// unchanged.
+// honors the already-resolved worktree_dir (an explicit --worktree-dir flag,
+// this repo's .argus/config.yml worktree_dir, or the default — see
+// resolveWorktreeDir) instead of always falling back to .claude/worktrees.
+// --attach's workers already set Worktree explicitly (the existing directory
+// being observed), so they pass through unchanged.
 func applyRepoWorktreeDir(workers []supervisor.Worker, worktreeDir string) {
 	for i := range workers {
 		if workers[i].Worktree == "" {
@@ -385,25 +400,25 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 	}
 
 	cfg := &supervisor.Config{
-		Out:               cmd.OutOrStdout(),
-		Now:               time.Now,
-		Client:            client,
-		Log:               logger,
-		Base:              o.base,
-		Home:              home,
-		Launcher:          o.launcher,
-		ParentWorkspace:   parentWS,
-		ScrubEnv:          append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
-		Interval:          o.interval,
-		Timeout:           o.timeout,
-		ReviewConcurrency: o.reviewConcurrency,
-		WorkerRuntime:     o.workerRuntime,
-		RepoAllow:         o.repoAllow,
-		ExtraAllow:        o.allow,
-		Policy:            o.policy,
-		ReviewNote:        o.reviewNote,
-		VerifyCommand:     o.verifyCommand,
-		WorktreeSetupCmd:  o.worktreeSetupCmd,
+		Out:                      cmd.OutOrStdout(),
+		Now:                      time.Now,
+		Client:                   client,
+		Log:                      logger,
+		Base:                     o.base,
+		Home:                     home,
+		Launcher:                 o.launcher,
+		ParentWorkspace:          parentWS,
+		ScrubEnv:                 append(forge.StandardTokenVars(), credential.ScrubVars(o.credentialEnv)...),
+		Interval:                 o.interval,
+		Timeout:                  o.timeout,
+		ReviewConcurrency:        o.reviewConcurrency,
+		WorkerRuntime:            o.workerRuntime,
+		RepoAllow:                o.repoAllow,
+		ExtraAllow:               o.allow,
+		Policy:                   o.policy,
+		ReviewNote:               o.reviewNote,
+		GateVerifyCommand:        o.gateVerifyCommand,
+		WorktreeBootstrapCommand: o.worktreeBootstrapCmd,
 		// Resolved once for this whole invocation (supervise has no --owner
 		// flag of its own — see ownership.ResolveOwnerID's doc) so every
 		// worker this run spawns shares one lease identity rather than each
@@ -554,7 +569,7 @@ type jiraSpawnOpts struct {
 // value and whether it was actually passed, needed only for --issues (the one
 // forge.New call this path makes, to fetch issue bodies before any worker
 // exists).
-func spawnWorkers(ctx context.Context, client herdr.Client, w io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) ([]supervisor.Worker, error) {
+func spawnWorkers(ctx context.Context, out io.Writer, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool, bn briefNoteOverride) ([]supervisor.Worker, error) {
 	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && in.tasksFile == "" && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
@@ -565,13 +580,13 @@ func spawnWorkers(ctx context.Context, client herdr.Client, w io.Writer, in *wor
 		return nil, err
 	}
 	if in.tasksFile != "" {
-		fileTasks, err := loadTasksFile(w, in.tasksFile)
+		fileTasks, err := loadTasksFile(out, in.tasksFile)
 		if err != nil {
 			return nil, err
 		}
 		in.tasks = append(in.tasks, fileTasks...)
 	}
-	if err := foldIssueSources(ctx, in, issues, jiraIssues, credentialOverrides, jiraSpawn, forgeKindFlag, forgeKindExplicit); err != nil {
+	if err := foldIssueSources(ctx, out, in, issues, jiraIssues, credentialOverrides, jiraSpawn, forgeKindFlag, forgeKindExplicit, bn); err != nil {
 		return nil, err
 	}
 	return buildWorkers(ctx, client, in)
@@ -702,14 +717,14 @@ func warnAnomalousTaskLineLengths(w io.Writer, path string, tasks []string) {
 // Split out of spawnWorkers to keep each source's fetch-and-fold step
 // independently testable and readable. forgeKindFlag/forgeKindExplicit only
 // matter to the --issues path (see resolveIssueForgeKind).
-func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool) error {
+func foldIssueSources(ctx context.Context, out io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool, bn briefNoteOverride) error {
 	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
-		kind, err := resolveIssueForgeKind(ctx, in.repo, forgeKindExplicit, forgeKindFlag)
+		kind, err := resolveIssueForgeKind(ctx, out, in.repo, forgeKindExplicit, forgeKindFlag)
 		if err != nil {
 			return err
 		}
-		fetched, brs, err := tasksFromIssues(ctx, in.repo, issues, credentialOverrides, kind)
+		fetched, brs, err := tasksFromIssues(ctx, out, in.repo, issues, credentialOverrides, kind, bn)
 		if err != nil {
 			return err
 		}
@@ -721,7 +736,7 @@ func foldIssueSources(ctx context.Context, in *workerInput, issues []int, jiraIs
 	// Jira is an issue tracker with no git-host concept to resolve from the
 	// origin remote.
 	if len(jiraIssues) > 0 {
-		fetched, brs, err := jiraTasksFromIssues(ctx, in.repo, jiraIssues, jiraSpawn)
+		fetched, brs, err := jiraTasksFromIssues(ctx, out, in.repo, jiraIssues, jiraSpawn, bn)
 		if err != nil {
 			return err
 		}
@@ -926,12 +941,12 @@ func at(s []string, i int) string {
 // each issue and renders it into a worker brief. It works for GitHub, GitLab, and
 // Codeberg/Gitea-family hosts without extra flags, plus a self-hosted GitLab or
 // Gitea/Forgejo host when kind says which shape it is.
-func tasksFromIssues(ctx context.Context, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind) (tasks, branches []string, err error) {
+func tasksFromIssues(ctx context.Context, out io.Writer, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind, bn briefNoteOverride) (tasks, branches []string, err error) {
 	f, owner, name, err := resolveForge(ctx, repoPath, credentialOverrides, kind)
 	if err != nil {
 		return nil, nil, err
 	}
-	return issuesToTasks(ctx, f, owner, name, repoPath, issues)
+	return issuesToTasks(ctx, out, f, owner, name, repoPath, issues, bn)
 }
 
 // resolveIssueForgeKind applies --forge > this repo's .argus/config.yml forge
@@ -942,25 +957,40 @@ func tasksFromIssues(ctx context.Context, repoPath string, issues []int, credent
 // config here — best-effort, matching supervisor.ResolveBase's own lookup: a
 // repo path that doesn't resolve, or has no config file, just falls through
 // to auto-detect.
-func resolveIssueForgeKind(ctx context.Context, repoPath string, explicit bool, flagValue string) (forge.Kind, error) {
+func resolveIssueForgeKind(ctx context.Context, out io.Writer, repoPath string, explicit bool, flagValue string) (forge.Kind, error) {
 	var configValue string
 	if repoRoot, err := supervisor.RepoRoot(ctx, repoPath); err == nil {
 		if rc, err := repoconfig.Load(repoconfig.Path(repoRoot)); err == nil {
+			warnDeprecatedConfigKeys(out, &rc)
 			configValue = rc.Forge
 		}
 	}
 	return parseForgeKind(resolveForgeKindValue(explicit, flagValue, configValue))
 }
 
-// repoBriefNote reads this repo's optional .argus/config.yml brief_note (see
-// internal/repoconfig), best-effort: a missing or unreadable config file just
-// means no note to append, not a hard failure of task generation.
-func repoBriefNote(repoPath string) string {
+// briefNoteOverride carries an explicit --brief-note flag value through the
+// --issues/--jira-issues fetch chain (spawnWorkers -> foldIssueSources ->
+// tasksFromIssues/jiraTasksFromIssues -> issuesToTasks/jiraIssuesToTasks) to
+// repoBriefNote, the same explicit-flag-wins shape resolveBriefNote applies
+// for its own (unthreaded) callers. Bundled into one value instead of two
+// bare parameters threaded through every function in that chain.
+type briefNoteOverride struct {
+	value    string
+	explicit bool
+}
+
+// repoBriefNote resolves bn (an explicit --brief-note flag) over this repo's
+// optional .argus/config.yml brief_note (see internal/repoconfig) over ""
+// (no note to append), best-effort: a missing or unreadable config file
+// just means the repo-config source is unavailable, not a hard failure of
+// task generation.
+func repoBriefNote(out io.Writer, repoPath string, bn briefNoteOverride) string {
 	rc, err := repoconfig.Load(repoconfig.Path(repoPath))
 	if err != nil {
-		return ""
+		return bn.value
 	}
-	return rc.BriefNote
+	warnDeprecatedConfigKeys(out, &rc)
+	return resolveBriefNote(bn.explicit, bn.value, &rc)
 }
 
 // fixedBriefTail appends argus's own non-negotiable ship-pipeline invariants
@@ -973,8 +1003,8 @@ func repoBriefNote(repoPath string) string {
 // repo owner can disable.
 //
 // The lint/build/pre-commit sentence below closes the other half of the same
-// gap a configured verify_command closes on the gate side (see
-// resolveVerifyCommand): `argus ship`'s `git commit` runs whatever hooks the
+// gap a configured gate_verify_command closes on the gate side (see
+// resolveGateVerifyCommand): `argus ship`'s `git commit` runs whatever hooks the
 // target repo has wired up (e.g. lefthook running golangci-lint), so a diff
 // that never ran them locally can earn a clean gate verdict and still fail
 // at commit time. It stays deliberately toolchain-agnostic — argus has no
@@ -1031,8 +1061,8 @@ func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[
 // network. repoPath resolves this repo's optional brief_note (see
 // repoBriefNote) — argus itself supplies no toolchain-flavored text of its
 // own when no config is present, only the fixed "don't commit" invariant.
-func issuesToTasks(ctx context.Context, f forge.Forge, owner, name, repoPath string, issues []int) (tasks, branches []string, err error) {
-	tail := fixedBriefTail(repoBriefNote(repoPath))
+func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, name, repoPath string, issues []int, bn briefNoteOverride) (tasks, branches []string, err error) {
+	tail := fixedBriefTail(repoBriefNote(out, repoPath, bn))
 	for _, n := range issues {
 		iss, ferr := f.FetchIssue(ctx, owner, name, n)
 		if ferr != nil {
@@ -1067,7 +1097,7 @@ type jiraSpawnClient interface {
 // JIRA_API_TOKEN and fetches each key. Unlike tasksFromIssues this does not go
 // through internal/forge or the origin remote: Jira is an issue tracker, not a
 // git host, so there is no owner/repo or PR concept to resolve.
-func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
+func jiraTasksFromIssues(ctx context.Context, out io.Writer, repoPath string, keys []string, jiraSpawn jiraSpawnOpts, bn briefNoteOverride) (tasks, branches []string, err error) {
 	c, err := jira.NewFromEnv(nil)
 	if err != nil {
 		return nil, nil, &ui.UserError{
@@ -1075,7 +1105,7 @@ func jiraTasksFromIssues(ctx context.Context, repoPath string, keys []string, ji
 			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN, or write them to a JSON config file at $JIRA_CONFIG_FILE or ~/.argus/jira.json, to fetch --jira-issues",
 		}
 	}
-	return jiraIssuesToTasks(ctx, c, repoPath, repoBranchPrefix(ctx, repoPath), keys, jiraSpawn)
+	return jiraIssuesToTasks(ctx, out, c, repoPath, repoBranchPrefix(ctx, repoPath), keys, jiraSpawn, bn)
 }
 
 // repoBranchPrefix names the git repo at repoPath for branch prefixing, so
@@ -1104,8 +1134,8 @@ func repoBranchPrefix(ctx context.Context, repoPath string) string {
 // finding out the claim never took before workers pile onto an
 // apparently-unclaimed ticket. repoPath resolves this repo's optional
 // brief_note the same way issuesToTasks does.
-func jiraIssuesToTasks(ctx context.Context, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts) (tasks, branches []string, err error) {
-	tail := fixedBriefTail(repoBriefNote(repoPath))
+func jiraIssuesToTasks(ctx context.Context, out io.Writer, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts, bn briefNoteOverride) (tasks, branches []string, err error) {
+	tail := fixedBriefTail(repoBriefNote(out, repoPath, bn))
 
 	var callerAccountID string
 	if jiraSpawn.assignToCaller {

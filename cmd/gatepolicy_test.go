@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,49 +84,49 @@ func TestResolveGatePolicyRepoConfigMaxDiffLinesZeroIsMeaningful(t *testing.T) {
 	}
 }
 
-func TestResolveVerifyCommandExplicitFlagWinsOutright(t *testing.T) {
-	rc := repoconfig.Config{VerifyCommand: "make ci"}
-	got := resolveVerifyCommand(true, "make lint", &rc)
+func TestResolveGateVerifyCommandExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{GateVerifyCommand: "make ci"}
+	got := resolveGateVerifyCommand(true, "make lint", &rc)
 	if got != "make lint" {
-		t.Errorf("resolveVerifyCommand = %q, want the explicit flag value", got)
+		t.Errorf("resolveGateVerifyCommand = %q, want the explicit flag value", got)
 	}
 }
 
-func TestResolveVerifyCommandPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
-	rc := repoconfig.Config{VerifyCommand: "make ci"}
-	got := resolveVerifyCommand(false, "", &rc)
+func TestResolveGateVerifyCommandPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{GateVerifyCommand: "make ci"}
+	got := resolveGateVerifyCommand(false, "", &rc)
 	if got != "make ci" {
-		t.Errorf("resolveVerifyCommand = %q, want the repo config value", got)
+		t.Errorf("resolveGateVerifyCommand = %q, want the repo config value", got)
 	}
 }
 
-func TestResolveVerifyCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
-	got := resolveVerifyCommand(false, "", &repoconfig.Config{})
+func TestResolveGateVerifyCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveGateVerifyCommand(false, "", &repoconfig.Config{})
 	if got != "" {
-		t.Errorf("resolveVerifyCommand = %q, want empty (no verify command configured anywhere)", got)
+		t.Errorf("resolveGateVerifyCommand = %q, want empty (no verify command configured anywhere)", got)
 	}
 }
 
-func TestResolveWorktreeSetupCmdExplicitFlagWinsOutright(t *testing.T) {
-	rc := repoconfig.Config{WorktreeSetupCmd: "cp ../.env .env"}
-	got := resolveWorktreeSetupCmd(true, "cp ../.env.local .env.local", &rc)
+func TestResolveWorktreeBootstrapCommandExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{WorktreeBootstrapCommand: "cp ../.env .env"}
+	got := resolveWorktreeBootstrapCommand(true, "cp ../.env.local .env.local", &rc)
 	if got != "cp ../.env.local .env.local" {
-		t.Errorf("resolveWorktreeSetupCmd = %q, want the explicit flag value", got)
+		t.Errorf("resolveWorktreeBootstrapCommand = %q, want the explicit flag value", got)
 	}
 }
 
-func TestResolveWorktreeSetupCmdPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
-	rc := repoconfig.Config{WorktreeSetupCmd: "cp ../.env .env"}
-	got := resolveWorktreeSetupCmd(false, "", &rc)
+func TestResolveWorktreeBootstrapCommandPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{WorktreeBootstrapCommand: "cp ../.env .env"}
+	got := resolveWorktreeBootstrapCommand(false, "", &rc)
 	if got != "cp ../.env .env" {
-		t.Errorf("resolveWorktreeSetupCmd = %q, want the repo config value", got)
+		t.Errorf("resolveWorktreeBootstrapCommand = %q, want the repo config value", got)
 	}
 }
 
-func TestResolveWorktreeSetupCmdFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
-	got := resolveWorktreeSetupCmd(false, "", &repoconfig.Config{})
+func TestResolveWorktreeBootstrapCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveWorktreeBootstrapCommand(false, "", &repoconfig.Config{})
 	if got != "" {
-		t.Errorf("resolveWorktreeSetupCmd = %q, want empty (no worktree setup command configured anywhere)", got)
+		t.Errorf("resolveWorktreeBootstrapCommand = %q, want empty (no worktree setup command configured anywhere)", got)
 	}
 }
 
@@ -176,5 +178,123 @@ func TestResolveOwnerStaleAfterExplicitFlagSkipsMalformedConfigValue(t *testing.
 	}
 	if got != 5*time.Minute {
 		t.Errorf("resolveOwnerStaleAfter = %v, want the explicit flag value", got)
+	}
+}
+
+func TestResolveWorktreeDirExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{WorktreeDir: ".."}
+	got := resolveWorktreeDir(true, "../worktrees", &rc)
+	if got != "../worktrees" {
+		t.Errorf("resolveWorktreeDir = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveWorktreeDirPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{WorktreeDir: ".."}
+	got := resolveWorktreeDir(false, "", &rc)
+	if got != ".." {
+		t.Errorf("resolveWorktreeDir = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveWorktreeDirFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveWorktreeDir(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveWorktreeDir = %q, want empty (no worktree dir configured anywhere)", got)
+	}
+}
+
+func TestWarnDeprecatedConfigKeysWritesOneLinePerKey(t *testing.T) {
+	rc := &repoconfig.Config{Deprecated: []repoconfig.DeprecatedKeyUse{
+		{Old: "ship_lint", New: "ship_verify_command"},
+		{Old: "verify_command", New: "gate_verify_command"},
+	}}
+	var buf bytes.Buffer
+	warnDeprecatedConfigKeys(&buf, rc)
+	got := buf.String()
+	for _, want := range []string{
+		`warning: .argus/config.yml key "ship_lint" is deprecated, use "ship_verify_command" instead (both still work)`,
+		`warning: .argus/config.yml key "verify_command" is deprecated, use "gate_verify_command" instead (both still work)`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q missing line %q", got, want)
+		}
+	}
+}
+
+func TestWarnDeprecatedConfigKeysNoOutputWhenNoneDeprecated(t *testing.T) {
+	var buf bytes.Buffer
+	warnDeprecatedConfigKeys(&buf, &repoconfig.Config{})
+	if buf.Len() != 0 {
+		t.Errorf("output = %q, want empty when Deprecated is empty", buf.String())
+	}
+}
+
+func TestResolveShipVerifyCommandExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{ShipVerifyCommand: "make ci"}
+	got := resolveShipVerifyCommand(true, "make lint", &rc)
+	if got != "make lint" {
+		t.Errorf("resolveShipVerifyCommand = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveShipVerifyCommandPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{ShipVerifyCommand: "make ci"}
+	got := resolveShipVerifyCommand(false, "", &rc)
+	if got != "make ci" {
+		t.Errorf("resolveShipVerifyCommand = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveShipVerifyCommandFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveShipVerifyCommand(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveShipVerifyCommand = %q, want empty (no ship verify command configured anywhere)", got)
+	}
+}
+
+func TestResolveReviewNoteExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{ReviewNote: "from config"}
+	got := resolveReviewNote(true, "from flag", &rc)
+	if got != "from flag" {
+		t.Errorf("resolveReviewNote = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveReviewNotePrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{ReviewNote: "from config"}
+	got := resolveReviewNote(false, "", &rc)
+	if got != "from config" {
+		t.Errorf("resolveReviewNote = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveReviewNoteFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveReviewNote(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveReviewNote = %q, want empty (no review note configured anywhere)", got)
+	}
+}
+
+func TestResolveBriefNoteExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{BriefNote: "from config"}
+	got := resolveBriefNote(true, "from flag", &rc)
+	if got != "from flag" {
+		t.Errorf("resolveBriefNote = %q, want the explicit flag value", got)
+	}
+}
+
+func TestResolveBriefNotePrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rc := repoconfig.Config{BriefNote: "from config"}
+	got := resolveBriefNote(false, "", &rc)
+	if got != "from config" {
+		t.Errorf("resolveBriefNote = %q, want the repo config value", got)
+	}
+}
+
+func TestResolveBriefNoteFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveBriefNote(false, "", &repoconfig.Config{})
+	if got != "" {
+		t.Errorf("resolveBriefNote = %q, want empty (no brief note configured anywhere)", got)
 	}
 }

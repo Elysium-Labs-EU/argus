@@ -100,7 +100,15 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.ProofRequiredPaths = promptList(reader, out, "proof_required_paths", suggested.ProofRequiredPaths)
 		cfg.AlwaysReviewPaths = promptList(reader, out, "always_review_paths", suggested.AlwaysReviewPaths)
 		cfg.WorkerPlacement = promptLine(reader, out, "worker_placement (workspace|tab)", suggested.WorkerPlacement)
-		cfg.ShipLint = promptLine(reader, out, "ship_lint (controller-side gate command run before commit)", suggested.ShipLint)
+		cfg.ShipVerifyCommand = promptLine(reader, out, "ship_verify_command (controller-side gate command run before commit)", suggested.ShipVerifyCommand)
+		cfg.GateVerifyCommand = promptLine(reader, out, "gate_verify_command (gate: shell command re-run in a worker's worktree before a verdict is recorded)", suggested.GateVerifyCommand)
+		cfg.WorktreeBootstrapCommand = promptLine(reader, out, "worktree_bootstrap_command (runs once in a fresh worktree, right after git worktree add, before the worker's agent starts)", suggested.WorktreeBootstrapCommand)
+		cfg.ReviewEffort = promptLine(reader, out, "review_effort (low|medium|high|xhigh|max)", suggested.ReviewEffort)
+		cfg.Launcher = promptLine(reader, out, "launcher (command started in each worker pane)", suggested.Launcher)
+		cfg.WorktreeDir = promptLine(reader, out, "worktree_dir (blank for <repo>/.claude/worktrees/<branch>; \"..\" for a sibling-of-repo layout)", suggested.WorktreeDir)
+		cfg.OwnerStaleAfter = promptLine(reader, out, "owner_stale_after (how long a worktree's owner-lease heartbeat may go quiet before a mismatched caller proceeds anyway, e.g. \"30m\"; blank for the built-in default)", suggested.OwnerStaleAfter)
+		cfg.TitlePrefixTemplate = promptLine(reader, out, "title_prefix_template (required PR/commit title prefix, e.g. \"TICKET-{issue}: \")", suggested.TitlePrefixTemplate)
+		cfg.ReviewNote = promptLine(reader, out, "review_note (free-text note appended to the reviewer's prompt)", suggested.ReviewNote)
 		cfg.Forge = promptLine(reader, out, "forge (self-hosted only: gitlab|gitea, blank for hosted/auto-detected)", suggested.Forge)
 	}
 
@@ -114,10 +122,10 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 // toolchainGuess is one entry in detectRepoConfig's ordered detection table:
 // a marker file to peek for, and the allow/brief_note it suggests.
 type toolchainGuess struct {
-	marker    string
-	briefNote string
-	shipLint  string
-	allow     []string
+	marker            string
+	briefNote         string
+	shipVerifyCommand string
+	allow             []string
 }
 
 // toolchainGuesses is checked in order, first match wins — a repo carrying
@@ -125,28 +133,28 @@ type toolchainGuess struct {
 // likely wants the more specific runner's own allow pattern, not go's.
 var toolchainGuesses = []toolchainGuess{
 	{
-		marker:    "Taskfile.yml",
-		allow:     []string{"Bash(task *)"},
-		briefNote: "Add a focused test and keep task ci green.",
-		shipLint:  "task lint",
+		marker:            "Taskfile.yml",
+		allow:             []string{"Bash(task *)"},
+		briefNote:         "Add a focused test and keep task ci green.",
+		shipVerifyCommand: "task lint",
 	},
 	{
-		marker:    "Makefile",
-		allow:     []string{"Bash(make *)"},
-		briefNote: "Add a focused test and keep make ci green. Follow the repo STYLE.md.",
-		shipLint:  "make lint",
+		marker:            "Makefile",
+		allow:             []string{"Bash(make *)"},
+		briefNote:         "Add a focused test and keep make ci green. Follow the repo STYLE.md.",
+		shipVerifyCommand: "make lint",
 	},
 	{
-		marker:    "package.json",
-		allow:     []string{"Bash(npm *)"},
-		briefNote: "Add a focused test and keep npm test green.",
-		shipLint:  "npm run lint",
+		marker:            "package.json",
+		allow:             []string{"Bash(npm *)"},
+		briefNote:         "Add a focused test and keep npm test green.",
+		shipVerifyCommand: "npm run lint",
 	},
 	{
-		marker:    "go.mod",
-		allow:     []string{"Bash(go build *)", "Bash(go test *)", "Bash(go vet *)"},
-		briefNote: "Add a focused test and keep go test ./... green.",
-		shipLint:  "golangci-lint run",
+		marker:            "go.mod",
+		allow:             []string{"Bash(go build *)", "Bash(go test *)", "Bash(go vet *)"},
+		briefNote:         "Add a focused test and keep go test ./... green.",
+		shipVerifyCommand: "golangci-lint run",
 	},
 }
 
@@ -162,7 +170,7 @@ func detectRepoConfig(ctx context.Context, repoRoot string) repoconfig.Config {
 		if _, err := os.Stat(filepath.Join(repoRoot, g.marker)); err == nil {
 			cfg.Allow = g.allow
 			cfg.BriefNote = g.briefNote
-			cfg.ShipLint = g.shipLint
+			cfg.ShipVerifyCommand = g.shipVerifyCommand
 			break
 		}
 	}

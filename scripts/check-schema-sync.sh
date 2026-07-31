@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # schemas/config.schema.json hand-mirrors the key set internal/repoconfig/
-# yaml.go's parseYAML/listFieldFor switches recognize. Two hand-duplicated
-# sources drift silently if only one is updated, so this gate diffs the
-# key sets on every run instead of trusting them to stay in sync by hand.
+# yaml.go's parseYAML/listFieldFor switches recognize, plus the deprecated
+# aliases deprecatedKeyAliases still accepts. Three hand-duplicated sources
+# drift silently if only one is updated, so this gate diffs the key sets on
+# every run instead of trusting them to stay in sync by hand.
 set -euo pipefail
 
 TARGET="${1:-.}"
@@ -13,7 +14,7 @@ for f in "$GO_FILE" "$SCHEMA_FILE"; do
   [ -f "$f" ] || { echo "check-schema-sync: $f not found" >&2; exit 1; }
 done
 
-go_keys="$(grep -oE 'case "[a-z_]+":' "$GO_FILE" | sed -E 's/case "([a-z_]+)":/\1/' | sort -u)"
+go_keys="$(grep -oE '(case )?"[a-z_]+":' "$GO_FILE" | sed -E 's/^(case )?"([a-z_]+)":$/\2/' | sort -u)"
 schema_keys="$(python3 -c '
 import json, sys
 with open(sys.argv[1]) as f:

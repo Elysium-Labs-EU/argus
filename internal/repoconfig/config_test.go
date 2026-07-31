@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -92,10 +93,10 @@ func TestSaveLoadRoundTripGateKeys(t *testing.T) {
 	}
 }
 
-func TestSaveLoadRoundTripShipLint(t *testing.T) {
+func TestSaveLoadRoundTripShipVerifyCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".argus", "config.yml")
-	want := Config{ShipLint: "make ci"}
+	want := Config{ShipVerifyCommand: "make ci"}
 	if err := Save(path, &want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -108,10 +109,10 @@ func TestSaveLoadRoundTripShipLint(t *testing.T) {
 	}
 }
 
-func TestSaveLoadRoundTripVerifyCommand(t *testing.T) {
+func TestSaveLoadRoundTripGateVerifyCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".argus", "config.yml")
-	want := Config{VerifyCommand: "make lint"}
+	want := Config{GateVerifyCommand: "make lint"}
 	if err := Save(path, &want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -172,10 +173,10 @@ func TestSaveLoadRoundTripLauncher(t *testing.T) {
 	}
 }
 
-func TestSaveLoadRoundTripWorktreeSetupCmd(t *testing.T) {
+func TestSaveLoadRoundTripWorktreeBootstrapCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".argus", "config.yml")
-	want := Config{WorktreeSetupCmd: "cp ../.env .env"}
+	want := Config{WorktreeBootstrapCommand: "cp ../.env .env"}
 	if err := Save(path, &want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -341,6 +342,125 @@ func TestLoadUnknownKeyIgnored(t *testing.T) {
 	}
 	if got.BaseBranch != "main" {
 		t.Errorf("BaseBranch = %q, want main", got.BaseBranch)
+	}
+}
+
+func TestLoadDeprecatedKeyAliasesStillParse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	content := "ship_lint: \"make ci\"\nverify_command: \"make lint\"\nworktree_setup_cmd: \"cp ../.env .env\"\n"
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.ShipVerifyCommand != "make ci" {
+		t.Errorf("ShipVerifyCommand = %q, want %q (from deprecated ship_lint)", got.ShipVerifyCommand, "make ci")
+	}
+	if got.GateVerifyCommand != "make lint" {
+		t.Errorf("GateVerifyCommand = %q, want %q (from deprecated verify_command)", got.GateVerifyCommand, "make lint")
+	}
+	if got.WorktreeBootstrapCommand != "cp ../.env .env" {
+		t.Errorf("WorktreeBootstrapCommand = %q, want %q (from deprecated worktree_setup_cmd)", got.WorktreeBootstrapCommand, "cp ../.env .env")
+	}
+}
+
+func TestLoadDeprecatedKeyUseRecorded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	content := "ship_lint: \"make ci\"\nverify_command: \"make lint\"\nworktree_setup_cmd: \"cp ../.env .env\"\n"
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []DeprecatedKeyUse{
+		{Old: "ship_lint", New: "ship_verify_command"},
+		{Old: "verify_command", New: "gate_verify_command"},
+		{Old: "worktree_setup_cmd", New: "worktree_bootstrap_command"},
+	}
+	if !reflect.DeepEqual(got.Deprecated, want) {
+		t.Errorf("Deprecated = %+v, want %+v", got.Deprecated, want)
+	}
+}
+
+// TestLoadIntermediateWorktreeSetupCommandNameStillParses covers
+// worktree_setup_command specifically: it was briefly the canonical name
+// before worktree_bootstrap_command superseded it, so it's now a second
+// deprecated alias (alongside the original worktree_setup_cmd) pointing at
+// the same final field, not a dead end.
+func TestLoadIntermediateWorktreeSetupCommandNameStillParses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "worktree_setup_command: \"cp ../.env .env\"\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.WorktreeBootstrapCommand != "cp ../.env .env" {
+		t.Errorf("WorktreeBootstrapCommand = %q, want %q (from deprecated worktree_setup_command)", got.WorktreeBootstrapCommand, "cp ../.env .env")
+	}
+	want := []DeprecatedKeyUse{{Old: "worktree_setup_command", New: "worktree_bootstrap_command"}}
+	if !reflect.DeepEqual(got.Deprecated, want) {
+		t.Errorf("Deprecated = %+v, want %+v", got.Deprecated, want)
+	}
+}
+
+func TestLoadDeprecatedEmptyWhenOnlyNewNamesUsed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	content := "ship_verify_command: \"make ci\"\ngate_verify_command: \"make lint\"\nworktree_bootstrap_command: \"cp ../.env .env\"\n"
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Deprecated) != 0 {
+		t.Errorf("Deprecated = %+v, want empty when only new names are used", got.Deprecated)
+	}
+}
+
+func TestEncodeYAMLNeverEmitsOldKeyNamesAfterLoadingOldNamedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	if err := writeFile(path, "ship_lint: \"make ci\"\nverify_command: \"make lint\"\nworktree_setup_cmd: \"cp ../.env .env\"\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if serr := Save(path, &loaded); serr != nil {
+		t.Fatalf("Save: %v", serr)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		for _, old := range []string{"ship_lint:", "verify_command:", "worktree_setup_cmd:", "worktree_setup_command:"} {
+			if strings.HasPrefix(line, old) {
+				t.Errorf("saved config line %q starts with deprecated key %q, want only new names", line, old)
+			}
+		}
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load (reload): %v", err)
+	}
+	if reloaded.ShipVerifyCommand != "make ci" || reloaded.GateVerifyCommand != "make lint" || reloaded.WorktreeBootstrapCommand != "cp ../.env .env" {
+		t.Errorf("reloaded values = %+v, want the same values under the new names", reloaded)
+	}
+	if len(reloaded.Deprecated) != 0 {
+		t.Errorf("Deprecated = %+v, want empty on the second load (file now uses new names only)", reloaded.Deprecated)
 	}
 }
 

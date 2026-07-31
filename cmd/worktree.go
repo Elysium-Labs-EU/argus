@@ -105,7 +105,7 @@ type pruneTargets struct {
 // has to branch on the outcome. Split out because this is the bulk of
 // runWorktreePrune's own decision points; isolating them here keeps both
 // functions independently testable and each under the CRAP gate.
-func resolvePruneTargets(ctx context.Context, a *worktreePruneArgs) (*pruneTargets, error) {
+func resolvePruneTargets(ctx context.Context, out io.Writer, a *worktreePruneArgs) (*pruneTargets, error) {
 	resolvedRepo, err := supervisor.ResolveWorktree(a.repo)
 	if err != nil {
 		return nil, err
@@ -126,7 +126,7 @@ func resolvePruneTargets(ctx context.Context, a *worktreePruneArgs) (*pruneTarge
 		}
 	}
 
-	owner, name, client, err := resolvePruneForgeClient(ctx, repoRoot, a)
+	owner, name, client, err := resolvePruneForgeClient(ctx, out, repoRoot, a)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func resolvePruneTargets(ctx context.Context, a *worktreePruneArgs) (*pruneTarge
 // builds the forge.Forge client prunePlan needs to check PR merge state.
 // Split out of resolvePruneTargets so each half of the resolution stays small
 // and independently testable.
-func resolvePruneForgeClient(ctx context.Context, repoRoot string, a *worktreePruneArgs) (owner, name string, client forge.Forge, err error) {
+func resolvePruneForgeClient(ctx context.Context, out io.Writer, repoRoot string, a *worktreePruneArgs) (owner, name string, client forge.Forge, err error) {
 	host, owner, name, err := resolveRepo(ctx, "", repoRoot)
 	if err != nil {
 		return "", "", nil, err
@@ -146,6 +146,7 @@ func resolvePruneForgeClient(ctx context.Context, repoRoot string, a *worktreePr
 	if err != nil {
 		return "", "", nil, fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	kind, err := parseForgeKind(resolveForgeKindValue(a.forgeKindExplicit, a.forgeKind, rc.Forge))
 	if err != nil {
 		return "", "", nil, err
@@ -168,7 +169,7 @@ func runWorktreePrune(cmd *cobra.Command, a *worktreePruneArgs) error {
 	}
 
 	ctx := cmd.Context()
-	targets, err := resolvePruneTargets(ctx, a)
+	targets, err := resolvePruneTargets(ctx, cmd.OutOrStdout(), a)
 	if err != nil {
 		return err
 	}

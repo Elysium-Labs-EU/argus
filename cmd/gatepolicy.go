@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
@@ -47,38 +48,43 @@ func resolveGatePolicy(f gateFlags, rc *repoconfig.Config) *supervisor.ReviewPol
 	return p
 }
 
-// resolveVerifyCommand applies an explicit --verify-cmd flag over this repo's
-// .argus/config.yml verify_command over "" (no command configured — the
-// gate's prior behavior), the same explicit-flag-wins precedence
-// resolveGatePolicy and resolveSuperviseBase apply for their own sources.
-// It is not folded into gateFlags/resolveGatePolicy: unlike ReviewPolicy's
-// fields, VerifyCommand is not consumed by the pure Assess/gateVerdict
-// policy check, it is a shell command supervisor.Config threads to
-// RunVerifyCommand. explicit is cmd.Flags().Changed("verify-cmd"). rc is a
-// pointer solely to avoid copying the struct at the call site.
-func resolveVerifyCommand(explicit bool, flagValue string, rc *repoconfig.Config) string {
+// resolveGateVerifyCommand applies an explicit --gate-verify-command flag
+// (or its deprecated alias --verify-cmd) over this repo's .argus/config.yml
+// gate_verify_command over "" (no command configured — the gate's prior
+// behavior), the same explicit-flag-wins precedence resolveGatePolicy and
+// resolveSuperviseBase apply for their own sources. It is not folded into
+// gateFlags/resolveGatePolicy: unlike ReviewPolicy's fields,
+// GateVerifyCommand is not consumed by the pure Assess/gateVerdict policy
+// check, it is a shell command supervisor.Config threads to
+// RunGateVerifyCommand. explicit is
+// cmd.Flags().Changed("gate-verify-command") ||
+// cmd.Flags().Changed("verify-cmd"). rc is a pointer solely to avoid
+// copying the struct at the call site.
+func resolveGateVerifyCommand(explicit bool, flagValue string, rc *repoconfig.Config) string {
 	if explicit {
 		return flagValue
 	}
-	if rc.VerifyCommand != "" {
-		return rc.VerifyCommand
+	if rc.GateVerifyCommand != "" {
+		return rc.GateVerifyCommand
 	}
 	return flagValue
 }
 
-// resolveWorktreeSetupCmd applies an explicit --worktree-setup-cmd flag over
-// this repo's .argus/config.yml worktree_setup_cmd over "" (no command
-// configured — a bare `git worktree add` with no bootstrap step, the prior
-// behavior), the same explicit-flag-wins precedence resolveVerifyCommand
-// applies for its own source. explicit is
-// cmd.Flags().Changed("worktree-setup-cmd"). rc is a pointer solely to avoid
-// copying the struct at the call site.
-func resolveWorktreeSetupCmd(explicit bool, flagValue string, rc *repoconfig.Config) string {
+// resolveWorktreeBootstrapCommand applies an explicit
+// --worktree-bootstrap-command flag (or its deprecated alias
+// --worktree-setup-cmd) over this repo's .argus/config.yml
+// worktree_bootstrap_command over "" (no command configured — a bare `git
+// worktree add` with no bootstrap step, the prior behavior), the same
+// explicit-flag-wins precedence resolveGateVerifyCommand applies for its
+// own source. explicit is cmd.Flags().Changed("worktree-bootstrap-command")
+// || cmd.Flags().Changed("worktree-setup-cmd"). rc is a pointer solely to
+// avoid copying the struct at the call site.
+func resolveWorktreeBootstrapCommand(explicit bool, flagValue string, rc *repoconfig.Config) string {
 	if explicit {
 		return flagValue
 	}
-	if rc.WorktreeSetupCmd != "" {
-		return rc.WorktreeSetupCmd
+	if rc.WorktreeBootstrapCommand != "" {
+		return rc.WorktreeBootstrapCommand
 	}
 	return flagValue
 }
@@ -103,4 +109,86 @@ func resolveOwnerStaleAfter(explicit bool, flagValue time.Duration, rc *repoconf
 		return 0, &ui.UserError{Err: fmt.Errorf("%s: owner_stale_after: %w", configPath, err)}
 	}
 	return d, nil
+}
+
+// resolveShipVerifyCommand applies an explicit --ship-verify-command flag
+// over this repo's .argus/config.yml ship_verify_command over "" (no
+// extra command — ship's built-in hook detection is still enforced
+// regardless), the same explicit-flag-wins precedence resolveGateVerifyCommand
+// applies for its own source. explicit is
+// cmd.Flags().Changed("ship-verify-command"). rc is a pointer solely to
+// avoid copying the struct at the call site.
+func resolveShipVerifyCommand(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.ShipVerifyCommand != "" {
+		return rc.ShipVerifyCommand
+	}
+	return flagValue
+}
+
+// resolveReviewNote applies an explicit --review-note flag over this
+// repo's .argus/config.yml review_note over "" (no repo-specific criteria
+// appended to the reviewer's prompt), the same explicit-flag-wins
+// precedence resolveGateVerifyCommand applies for its own source. explicit
+// is cmd.Flags().Changed("review-note"). rc is a pointer solely to avoid
+// copying the struct at the call site.
+func resolveReviewNote(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.ReviewNote != "" {
+		return rc.ReviewNote
+	}
+	return flagValue
+}
+
+// resolveBriefNote applies an explicit --brief-note flag over this repo's
+// .argus/config.yml brief_note over "" (no note appended), the same
+// explicit-flag-wins precedence resolveGateVerifyCommand applies for its
+// own source. explicit is cmd.Flags().Changed("brief-note"). rc is a
+// pointer solely to avoid copying the struct at the call site.
+//
+// Note brief_note's own scope limitation, unrelated to this resolver: it
+// (and therefore this flag) currently only reaches workers spawned from
+// --issues/--jira-issues (see repoBriefNote's callers, issuesToTasks and
+// jiraIssuesToTasks) — a plain --tasks worker's brief never consults it.
+func resolveBriefNote(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.BriefNote != "" {
+		return rc.BriefNote
+	}
+	return flagValue
+}
+
+// resolveWorktreeDir applies an explicit --worktree-dir flag over this
+// repo's .argus/config.yml worktree_dir over "" (the flag's own default —
+// argus's own <repo>/.claude/worktrees/<branch> convention, see
+// supervisor.WorktreePath), the same explicit-flag-wins precedence
+// resolveWorktreeBootstrapCommand applies for its own source. explicit is
+// cmd.Flags().Changed("worktree-dir"). rc is a pointer solely to avoid
+// copying the struct at the call site.
+func resolveWorktreeDir(explicit bool, flagValue string, rc *repoconfig.Config) string {
+	if explicit {
+		return flagValue
+	}
+	if rc.WorktreeDir != "" {
+		return rc.WorktreeDir
+	}
+	return flagValue
+}
+
+// warnDeprecatedConfigKeys prints one line per deprecated .argus/config.yml
+// key Load found, so a repo migrates opportunistically instead of needing a
+// dedicated "check config" pass. Called at every command that loads repo
+// config directly with access to command output; supervisor.ResolveBase's
+// own internal Load stays silent — it has no output channel and is already
+// documented as best-effort.
+func warnDeprecatedConfigKeys(out io.Writer, rc *repoconfig.Config) {
+	for _, d := range rc.Deprecated {
+		_, _ = fmt.Fprintf(out, "warning: .argus/config.yml key %q is deprecated, use %q instead (both still work)\n", d.Old, d.New)
+	}
 }

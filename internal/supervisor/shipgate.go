@@ -72,14 +72,14 @@ func EnforceHooks(ctx context.Context, worktree string) error {
 	return nil
 }
 
-// RunShipLint runs a repo's optional ship_lint command (.argus/config.yml)
+// RunShipVerifyCommand runs a repo's optional ship_lint command (.argus/config.yml)
 // controller-side, before commit. Unlike EnforceHooks this does not depend on
 // the repo having any hook manager wired up at all — the intended use is
 // running the same pinned command CI runs (e.g. "make ci"), so a local
 // toolchain/version mismatch that a hook might paper over still fails ship
 // instead of only showing up after the PR is already open. An empty command
 // (the default: no ship_lint key) is a no-op.
-func RunShipLint(ctx context.Context, worktree, command string) error {
+func RunShipVerifyCommand(ctx context.Context, worktree, command string) error {
 	if strings.TrimSpace(command) == "" {
 		return nil
 	}

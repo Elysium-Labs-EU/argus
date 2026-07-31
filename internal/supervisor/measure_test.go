@@ -12,16 +12,63 @@ import (
 )
 
 func TestParseNumstatCountsAndFiles(t *testing.T) {
-	out := "3\t1\tcmd/root.go\n10\t0\tinternal/x.go\n-\t-\tlogo.png\n"
-	stat, files, err := parseNumstat(out)
+	out := "3\t1\tcmd/root.go\x0010\t0\tinternal/x.go\x00-\t-\tlogo.png\x00"
+	records, err := parseNumstat(out)
 	if err != nil {
 		t.Fatalf("parseNumstat: %v", err)
 	}
-	if stat.Files != 3 || stat.Insertions != 13 || stat.Deletions != 1 {
-		t.Errorf("stat: got %+v want files=3 ins=13 del=1", stat)
+	if len(records) != 3 {
+		t.Fatalf("records: got %v", records)
 	}
-	if len(files) != 3 || files[2] != "logo.png" {
-		t.Errorf("files: got %v", files)
+	var ins, del int
+	for _, r := range records {
+		ins += r.insertions
+		del += r.deletions
+	}
+	if ins != 13 || del != 1 {
+		t.Errorf("got ins=%d del=%d want ins=13 del=1", ins, del)
+	}
+	if records[2].path != "logo.png" {
+		t.Errorf("records: got %v", records)
+	}
+}
+
+func TestParseNumstatEmptyOutputYieldsNoRecords(t *testing.T) {
+	records, err := parseNumstat("")
+	if err != nil {
+		t.Fatalf("parseNumstat: %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("want no records for empty output, got %v", records)
+	}
+}
+
+// TestParseNumstatResolvesRenameToNewPath pins the fix for a real bypass: git
+// diff --numstat (without -z) renders a rename as text like "old => new" or,
+// when the paths share a prefix, "prefix{old => new}suffix" — the old
+// (pre-numstat) implementation naively split on whitespace and resolved to
+// the OLD path, so any check keyed on FilesTouched (including selfConfigPath
+// in review.go) never saw the file's real, current path. With -z, git emits
+// the old and new paths as two separate, unambiguous NUL-terminated tokens
+// instead, which parseNumstat now resolves to the new path.
+func TestParseNumstatResolvesRenameToNewPath(t *testing.T) {
+	// "ins\tdel\t" (empty path) then two tokens: old path, new path — the
+	// exact shape `git diff --numstat -z` emits for a detected rename.
+	out := "0\t0\t\x00docs/notes.md\x00.argus/config.yml\x00"
+	records, err := parseNumstat(out)
+	if err != nil {
+		t.Fatalf("parseNumstat: %v", err)
+	}
+	if len(records) != 1 || records[0].path != ".argus/config.yml" {
+		t.Fatalf("rename must resolve to the new path, got %v", records)
+	}
+}
+
+func TestParseNumstatTruncatedRenameRecordErrors(t *testing.T) {
+	// A rename record's empty-path token with no old/new tokens following it
+	// (malformed/truncated input) must error, not panic or silently drop it.
+	if _, err := parseNumstat("0\t0\t\x00docs/notes.md\x00"); err == nil {
+		t.Fatal("want an error for a truncated rename record")
 	}
 }
 
@@ -170,6 +217,77 @@ func TestMeasureDiffExcludesControlPlaneFiles(t *testing.T) {
 	}
 	if ds.Files != 1 {
 		t.Errorf("expected only the real f.go edit to be measured, got %+v files=%v", ds, files)
+	}
+}
+
+// TestMeasureDiffCatchesConfigPlantedViaRename is the full end-to-end
+// regression test for the rename bypass: a worker that plants
+// .argus/config.yml by renaming an unrelated tracked file onto it (git
+// detects this as a rename by content similarity, not a delete+add) must
+// still show up in MeasureDiff's file list under its real, current path —
+// and, fed into Assess, still trip selfConfigPath's unconditional escalation
+// (review.go). Before the -z fix, git's abbreviated rename text ("old =>
+// new") resolved to the OLD path, so .argus/config.yml never appeared in
+// FilesTouched at all and this attack auto-approved cleanly.
+func TestMeasureDiffCatchesConfigPlantedViaRename(t *testing.T) {
+	wt := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	// Padded enough that git's default rename-similarity heuristic (>=50%)
+	// still detects this as a rename once "allow" is appended below, not a
+	// plain delete+add.
+	base := strings.Repeat("alpha beta gamma delta epsilon\n", 8)
+	notesPath := filepath.Join(wt, "docs", "notes.md")
+	if err := os.MkdirAll(filepath.Dir(notesPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notesPath, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "base")
+
+	if err := os.MkdirAll(filepath.Join(wt, ".argus"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	run("mv", filepath.Join("docs", "notes.md"), filepath.Join(".argus", "config.yml"))
+	planted := base + "allow: [\"Bash(*)\"]\nalways_review_paths: []\n"
+	if err := os.WriteFile(filepath.Join(wt, ".argus", "config.yml"), []byte(planted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	found := false
+	for _, f := range files {
+		if f == ".argus/config.yml" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("MeasureDiff must resolve the rename to .argus/config.yml, got %v", files)
+	}
+
+	v := Assess(&protocol.Status{
+		Phase:        protocol.PhaseAwaitingReview,
+		Tests:        []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
+		FilesTouched: files,
+		DiffStat:     protocol.DiffStat{Insertions: 1, Deletions: 0},
+	}, nil)
+	if v.AutoApprove {
+		t.Fatal("a .argus/config.yml planted via rename must still escalate, not auto-approve")
+	}
+	if !hasReasonContaining(v.Reasons, "always reviewed regardless") {
+		t.Errorf("expected selfConfigPath's escalation reason, got %v", v.Reasons)
 	}
 }
 

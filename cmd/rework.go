@@ -30,13 +30,14 @@ func newReworkCmd() *cobra.Command {
 		workerRuntime      string
 		reviewModel        string
 		reviewEffort       string
+		reviewNote         string
 		proofRequiredPaths []string
 		alwaysReviewPaths  []string
 		credentialEnv      map[string]string
 		interval           time.Duration
 		maxRounds          int
 		maxDiffLines       int
-		verifyCmd          string
+		gateVerifyCmd      string
 		dryRun             bool
 		noCredProxy        bool
 		owner              string
@@ -78,6 +79,8 @@ outcome instead of retrying forever.`,
 				reviewModel:          reviewModel,
 				reviewEffort:         reviewEffort,
 				reviewEffortExplicit: cmd.Flags().Changed("review-effort"),
+				reviewNote:           reviewNote,
+				reviewNoteExplicit:   cmd.Flags().Changed("review-note"),
 				gate: gateFlags{
 					maxDiffLines:          maxDiffLines,
 					proofRequiredPaths:    proofRequiredPaths,
@@ -86,8 +89,8 @@ outcome instead of retrying forever.`,
 					proofRequiredExplicit: cmd.Flags().Changed("proof-required-path"),
 					alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
 				},
-				verifyCmd:         verifyCmd,
-				verifyCmdExplicit: cmd.Flags().Changed("verify-cmd"),
+				gateVerifyCmd:         gateVerifyCmd,
+				gateVerifyCmdExplicit: cmd.Flags().Changed("gate-verify-command") || cmd.Flags().Changed("verify-cmd"),
 				owner: ownerFlags{
 					owner: owner, forceForeignOwner: forceForeignOwner,
 					ownerStaleAfter: ownerStaleAfter, ownerStaleAfterExplicit: cmd.Flags().Changed("owner-stale-after"),
@@ -107,10 +110,13 @@ outcome instead of retrying forever.`,
 	cmd.Flags().IntVar(&maxRounds, "max-rounds", supervisor.DefaultMaxReworkRounds, "give up and escalate after this many request-changes rounds")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for the review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
+	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
-	bindVerifyCmdFlag(cmd, &verifyCmd, "review gate: shell command re-run in the worktree once the reworked worker reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
+	cmd.Flags().StringVar(&gateVerifyCmd, "gate-verify-command", "", "review gate: shell command re-run in the worktree once the reworked worker reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml gate_verify_command wins, then this default")
+	cmd.Flags().StringVar(&gateVerifyCmd, "verify-cmd", "", "deprecated: renamed to --gate-verify-command")
+	_ = cmd.Flags().MarkDeprecated("verify-cmd", "use --gate-verify-command instead")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan without dispatching a worker")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front the rework worker's API traffic with the credential proxy; it inherits the host's real ANTHROPIC_API_KEY")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
@@ -125,26 +131,28 @@ var reworkCmd = newReworkCmd()
 // reworkOpts carries newReworkCmd's flag values into runRework, mirroring
 // rebaseOpts's split of constructor-flag-registration from RunE logic.
 type reworkOpts struct {
-	credentialEnv        map[string]string
-	verifyCmd            string
-	workerRuntime        string
-	base                 string
-	task                 string
-	launcher             string
-	worktree             string
-	reviewModel          string
-	reviewEffort         string
-	findings             []string
-	owner                ownerFlags
-	gate                 gateFlags
-	livenessTimeout      time.Duration
-	maxRounds            int
-	interval             time.Duration
-	livenessInterval     time.Duration
-	dryRun               bool
-	noCredProxy          bool
-	verifyCmdExplicit    bool
-	reviewEffortExplicit bool
+	credentialEnv         map[string]string
+	gateVerifyCmd         string
+	workerRuntime         string
+	base                  string
+	task                  string
+	launcher              string
+	worktree              string
+	reviewModel           string
+	reviewEffort          string
+	reviewNote            string
+	findings              []string
+	owner                 ownerFlags
+	gate                  gateFlags
+	livenessTimeout       time.Duration // internal knob, mirrors rebaseOpts; zero = package default
+	maxRounds             int
+	interval              time.Duration
+	livenessInterval      time.Duration
+	dryRun                bool
+	noCredProxy           bool
+	gateVerifyCmdExplicit bool
+	reviewEffortExplicit  bool
+	reviewNoteExplicit    bool
 }
 
 // dispatchTarget builds dispatchIntoPane's input from a reworkOpts, mirroring
@@ -206,7 +214,7 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 		return nil
 	}
 
-	cfg, repoRoot, err := buildReworkConfig(ctx, opts, reviewer, logger)
+	cfg, repoRoot, err := buildReworkConfig(ctx, out, opts, reviewer, logger)
 	if err != nil {
 		return err
 	}
@@ -228,7 +236,7 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 // resolving the repo root, loading its repoconfig, defaulting the reviewer,
 // and reading $HOME — split out so this one-time setup doesn't inflate
 // runRework's own branching.
-func buildReworkConfig(ctx context.Context, opts *reworkOpts, reviewer supervisor.Reviewer, logger *eventlog.Logger) (*supervisor.Config, string, error) {
+func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, reviewer supervisor.Reviewer, logger *eventlog.Logger) (*supervisor.Config, string, error) {
 	repoRoot, err := supervisor.RepoRoot(ctx, opts.worktree)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolving repo root for %s: %w", opts.worktree, err)
@@ -237,6 +245,7 @@ func buildReworkConfig(ctx context.Context, opts *reworkOpts, reviewer superviso
 	if err != nil {
 		return nil, "", &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
 	}
+	warnDeprecatedConfigKeys(out, &rc)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, "", fmt.Errorf("resolving home dir: %w", err)
@@ -245,14 +254,14 @@ func buildReworkConfig(ctx context.Context, opts *reworkOpts, reviewer superviso
 		reviewer = newReviewer(opts.reviewModel, resolveReviewEffort(opts.reviewEffortExplicit, opts.reviewEffort, &rc), logger)
 	}
 	cfg := &supervisor.Config{
-		Now:           time.Now,
-		Log:           logger,
-		Policy:        resolveGatePolicy(opts.gate, &rc),
-		Home:          home,
-		Base:          opts.base,
-		Reviewer:      reviewer,
-		ReviewNote:    rc.ReviewNote,
-		VerifyCommand: resolveVerifyCommand(opts.verifyCmdExplicit, opts.verifyCmd, &rc),
+		Now:               time.Now,
+		Log:               logger,
+		Policy:            resolveGatePolicy(opts.gate, &rc),
+		Home:              home,
+		Base:              opts.base,
+		Reviewer:          reviewer,
+		ReviewNote:        resolveReviewNote(opts.reviewNoteExplicit, opts.reviewNote, &rc),
+		GateVerifyCommand: resolveGateVerifyCommand(opts.gateVerifyCmdExplicit, opts.gateVerifyCmd, &rc),
 	}
 	return cfg, repoRoot, nil
 }

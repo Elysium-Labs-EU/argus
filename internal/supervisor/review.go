@@ -32,20 +32,28 @@ type ReviewPolicy struct {
 // DefaultReviewPolicy is a conservative starting gate: modest diff ceiling, the
 // OS-integration surfaces the supervise-agents skill calls out as needing
 // real-world testing, and the behavior-critical (degraded-mode) surfaces that
-// must never auto-approve on diff size alone. .argus/config.yml is in that last
-// set too: a worker can't widen its own RepoAllow this run (base.go bakes it in
-// before the worker touches anything), but an undetected change merges straight
-// into next run's config, so the gate must flag it even at a one-line diff. No
-// default shared/prod-path restrictions until the caller sets them via
-// AlwaysReviewPaths — this default set never populated the old SharedGlobs
-// either, so the consolidation above changes no default behavior.
+// must never auto-approve on diff size alone. See selfConfigPath's own comment
+// for why .argus/config.yml is checked unconditionally in Assess instead of
+// living in this droppable list. No default shared/prod-path restrictions
+// until the caller sets them via AlwaysReviewPaths — this default set never
+// populated the old SharedGlobs either, so the consolidation above changes no
+// default behavior.
 func DefaultReviewPolicy() ReviewPolicy {
 	return ReviewPolicy{
 		MaxDiffLines:       400,
 		ProofRequiredPaths: []string{"systemd", "openrc", "launchd", "install", "/etc/"},
-		AlwaysReviewPaths:  []string{"monitor", "daemon", "restart", "health", "liveness", ".argus/config.yml"},
+		AlwaysReviewPaths:  []string{"monitor", "daemon", "restart", "health", "liveness"},
 	}
 }
+
+// selfConfigPath is checked unconditionally by Assess, independent of
+// AlwaysReviewPaths, because it is a true security invariant rather than a
+// matter of taste: a worker can't widen its own RepoAllow this run (base.go
+// bakes it in before the worker touches anything), but an undetected change
+// here merges straight into next run's config, so the gate must flag it even
+// at a one-line diff — including for a repo whose own always_review_paths
+// replaces the default list and never re-lists it.
+const selfConfigPath = ".argus/config.yml"
 
 // Verdict is the gate's decision for one worker. When AutoApprove is false,
 // Reasons lists every trigger that forced escalation, in evaluation order.
@@ -114,6 +122,10 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 	}
 
 	for _, f := range s.FilesTouched {
+		if filepath.ToSlash(f) == selfConfigPath {
+			reasons = append(reasons, fmt.Sprintf("touches %s — always reviewed regardless of always_review_paths (an unreviewed change here silently governs next run's own gate policy)", selfConfigPath))
+			continue
+		}
 		if g, ok := matchAny(f, p.AlwaysReviewPaths); ok {
 			reasons = append(reasons, fmt.Sprintf("touches behavior-critical path %q (matched %q) — always reviewed", f, g))
 		}
@@ -169,7 +181,7 @@ func underReportReason(st *workerState) string {
 // escalates too via st.testUnverifiable, but only as a waivable reason: it
 // is not proof the claim is false, just that this gate couldn't confirm it),
 // when this repo's own configured verify command fails to reproduce clean
-// (st.verifyMismatch, from RunVerifyCommand — the same bar `argus ship`'s
+// (st.verifyMismatch, from RunGateVerifyCommand — the same bar `argus ship`'s
 // `git commit` enforces via the repo's own hooks), and when herdr's own
 // agent_status — not status.json — is the only evidence of the worker's real
 // state (checkHerdrStuck in loop.go), which forces escalation even if
