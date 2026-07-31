@@ -207,16 +207,30 @@ gh auth status                   # or: [ -n "$GITHUB_TOKEN" ] (don't echo the to
   equivalent) is already done. `--jira-issues`/`--jira-issue` additionally need
   `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN`.
 
-**Bash-permission allowlist (do this once per repo, or every `argus` call prompts for
-manual approval and defeats the point of using it):**
+**Bash-permission allowlist and herdr-pane denylist (do this once per clone, or
+every `argus` call prompts for manual approval and raw herdr pane mutation stays
+uncoordinated with argus's own dispatch):**
 
 ```bash
 argus config check --repo . --write --entry "Bash(argus supervise *)"   # scoped: leaves ship gated
 argus config check           # read-only: reports what's missing without touching the file
 ```
 
-`check` only ever reads/writes `permissions.allow` — every other key in the file
-(hooks, model, unrelated permissions) is round-tripped untouched.
+`check --write` also adds a `permissions.deny` entry for `herdr pane
+send-text`/`send-keys`/`run`: those calls return as soon as herdr accepts the
+text, whether or not a live agent turn ever reads it, so a supervising
+session calling them directly gets no delivery confirmation at all — `argus
+worker steer`/`answer` already cover every legitimate need to drive a live
+pane, with a real receipt. Read-only `pane list`/`read`/`get` are left alone.
+`check` only ever reads/writes `permissions.allow`/`permissions.deny` — every
+other key in the file (hooks, model, unrelated permissions) is round-tripped
+untouched.
+
+**`.claude/settings.json` is untracked and per-clone, not per-repo** — it can't
+propagate to a worker's worktree or a teammate's clone via git. Every operator
+running argus from their own checkout needs to run `config check --write`
+themselves once; workers never call herdr directly so they don't need the
+deny entries, but a supervising session does.
 
 **Scope the entry away from `ship`, not just to a subcommand.** Bash allow-glob
 only matches a command *prefix* — there is no syntax to permit `argus ship`
