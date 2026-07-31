@@ -55,7 +55,22 @@ const (
 	// unwaivable hard reason, or a blocked worker). This is the only kind an
 	// operator must hand-read.
 	ProvenanceAwaitingHuman Provenance = "surfaced-awaiting-human"
+	// ProvenanceReworkBudgetExceeded: rework's cumulative restart budget —
+	// spanning every separate `argus rework` invocation against this
+	// worktree, not just one invocation's own --max-rounds — was exhausted
+	// with no approving verdict ever reached. Distinct from
+	// ProvenanceAwaitingHuman so a report can say *why* a human is needed
+	// (the worker kept failing review, not merely "review found something")
+	// instead of folding it into every other escalation.
+	ProvenanceReworkBudgetExceeded Provenance = "rework-budget-exceeded"
 )
+
+// SourceReworkBudget is the Approval.Source rework writes when the worktree's
+// cumulative restart budget is exceeded before any approving verdict — the
+// one Source value Provenance() checks for directly, since "budget exceeded"
+// is not a gate or review outcome at all, just rework declining to dispatch
+// another round.
+const SourceReworkBudget = "rework-budget"
 
 // Provenance derives who cleared this verdict from Source+Approved rather than
 // storing a separate field, so a verdict.json written before this existed still
@@ -64,6 +79,9 @@ const (
 // overrides both with Approved=false, and either way a human must look.
 func (a *Approval) Provenance() Provenance {
 	if !a.Approved {
+		if a.Source == SourceReworkBudget {
+			return ProvenanceReworkBudgetExceeded
+		}
 		return ProvenanceAwaitingHuman
 	}
 	if a.Source == "review" {
@@ -73,11 +91,11 @@ func (a *Approval) Provenance() Provenance {
 }
 
 // NeedsHumanRead reports whether the operator should hand-read this worker's diff
-// before ship. Only a surfaced-awaiting-human worker does; a gate- or
-// reviewer-approved one has already been verified and re-reading it is the
-// avoidable spend this signal exists to cut.
+// before ship. Only a surfaced-awaiting-human or budget-exceeded worker does; a
+// gate- or reviewer-approved one has already been verified and re-reading it is
+// the avoidable spend this signal exists to cut.
 func (p Provenance) NeedsHumanRead() bool {
-	return p == ProvenanceAwaitingHuman
+	return p == ProvenanceAwaitingHuman || p == ProvenanceReworkBudgetExceeded
 }
 
 // VerdictPath is where a worker's Approval lives inside its worktree. It sits

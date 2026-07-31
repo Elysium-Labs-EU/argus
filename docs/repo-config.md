@@ -105,6 +105,19 @@ All keys are optional; a missing file is equivalent to an empty one.
   every session claims the same lease identity or silently bypasses every
   mismatch for every developer — this key is a repo-wide policy choice, the
   same shape as `max_diff_lines`.
+- **`rework_budget`** — the restart budget for `argus rework`: the total
+  number of rework rounds a worktree may ever be dispatched for, across every
+  separate `rework` invocation over its lifetime — distinct from `rework`'s
+  own `--max-rounds`, which only bounds one invocation's internal loop.
+  Without this ceiling, a supervisor that keeps re-invoking `rework` after
+  each invocation's own rounds are exhausted can loop the same worker
+  indefinitely. Exceeding the budget records an unwaivable
+  `rework-budget-exceeded` verdict (`.claude/argus/verdict.json`) instead of
+  dispatching another round, distinct from a plain `surfaced-awaiting-human`
+  escalation so a report shows *why* it needed a human. `0` disables the
+  budget entirely (unbounded, the prior behavior); unset falls back to
+  `supervisor.DefaultMaxReworkBudget`. Precedence: an explicit
+  `--max-rework-budget` flag, then this key, then the built-in default.
 
 ## Why this is safe from a worker
 

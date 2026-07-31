@@ -8,7 +8,8 @@
 // review_note appended verbatim to the reviewer's prompt, cmd/gatepolicy.go's
 // review-gate precedence, supervise's --worker-placement default, the gate's
 // own re-run of verify_command in the worktree before a verdict is recorded,
-// and ship_lint — the one key that does run a command, controller-side,
+// rework's own cumulative restart budget (rework_budget), and ship_lint —
+// the one key that does run a command, controller-side,
 // before ship commits) — the two exceptions to "argus runs no build/test/
 // lint command of its own" are verify_command and ship_lint themselves,
 // since a repo owner opts into each specific command by setting the key;
@@ -132,7 +133,16 @@ type Config struct {
 	// explicit --owner-stale-after flag always overrides this.
 	OwnerStaleAfter string
 	MaxDiffLines    *int
-	Allow           []string
+	// ReworkBudget overrides how many rework rounds a worktree may be
+	// dispatched for in total, across every separate `argus rework`
+	// invocation over its lifetime — not the same knob as rework's own
+	// --max-rounds, which only bounds one invocation's internal loop. A
+	// pointer for the same reason as MaxDiffLines: 0 is a legal value
+	// (disables the budget entirely) that must stay distinguishable from
+	// "key not present". See supervisor.DefaultMaxReworkBudget for the
+	// default when neither this nor --max-rework-budget is set.
+	ReworkBudget *int
+	Allow        []string
 	// ProofRequiredPaths, when set, entirely replaces
 	// supervisor.DefaultReviewPolicy's own built-in list rather than merging
 	// with it — the same "config wins outright, no additive merge" shape

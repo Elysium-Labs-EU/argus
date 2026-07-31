@@ -208,7 +208,7 @@ func logRunSummary(cfg *Config, states []*workerState, blocked, blockedOnQuestio
 	// workers still need a human read, so the operator can trust the aggregate
 	// the same way the per-worker report's provenance line lets them trust each
 	// diff (see renderProvenance).
-	gateApproved, reviewerApproved, awaitingHuman := 0, 0, 0
+	gateApproved, reviewerApproved, awaitingHuman, reworkBudgetExceeded := 0, 0, 0, 0
 	for _, st := range states {
 		workers++
 		if !st.hasFile && st.herdrEscalation == "" {
@@ -230,6 +230,8 @@ func logRunSummary(cfg *Config, states []*workerState, blocked, blockedOnQuestio
 				reviewerApproved++
 			case protocol.ProvenanceAwaitingHuman:
 				awaitingHuman++
+			case protocol.ProvenanceReworkBudgetExceeded:
+				reworkBudgetExceeded++
 			}
 		}
 	}
@@ -237,15 +239,16 @@ func logRunSummary(cfg *Config, states []*workerState, blocked, blockedOnQuestio
 		Action:  "run_summary",
 		Outcome: fmt.Sprintf("%d/%d approved", approved, workers),
 		Fields: map[string]any{
-			"workers":             workers,
-			"reported":            reported,
-			"escalated":           escalated,
-			"approved":            approved,
-			"gate_approved":       gateApproved,
-			"reviewer_approved":   reviewerApproved,
-			"awaiting_human":      awaitingHuman,
-			"blocked":             blocked,
-			"blocked_on_question": blockedOnQuestion,
+			"workers":                workers,
+			"reported":               reported,
+			"escalated":              escalated,
+			"approved":               approved,
+			"gate_approved":          gateApproved,
+			"reviewer_approved":      reviewerApproved,
+			"awaiting_human":         awaitingHuman,
+			"rework_budget_exceeded": reworkBudgetExceeded,
+			"blocked":                blocked,
+			"blocked_on_question":    blockedOnQuestion,
 		},
 	})
 }
@@ -322,6 +325,9 @@ func renderProvenance(out io.Writer, worktree string) {
 	case protocol.ProvenanceAwaitingHuman:
 		_, _ = fmt.Fprintf(out, "    approval: %s surfaced-awaiting-human — hand-read this diff and decide\n",
 			ui.LabelWarning.Render("○"))
+	case protocol.ProvenanceReworkBudgetExceeded:
+		_, _ = fmt.Fprintf(out, "    approval: %s %s — %s\n",
+			ui.LabelError.Render("✗"), protocol.ProvenanceReworkBudgetExceeded, a.Summary)
 	}
 }
 

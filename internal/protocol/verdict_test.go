@@ -55,6 +55,7 @@ func TestProvenanceClassifiesApproval(t *testing.T) {
 		{"reviewer approved", "review", ProvenanceReviewerApproved, true, false},
 		{"gate auto-approved", "gate", ProvenanceGateApproved, true, false},
 		{"approved by any non-review source", "other", ProvenanceGateApproved, true, false},
+		{"rework budget exceeded", SourceReworkBudget, ProvenanceReworkBudgetExceeded, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

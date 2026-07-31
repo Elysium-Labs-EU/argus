@@ -81,6 +81,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.MaxDiffLines != nil {
 		fmt.Fprintf(&b, "max_diff_lines: %d\n", *cfg.MaxDiffLines)
 	}
+	if cfg.ReworkBudget != nil {
+		fmt.Fprintf(&b, "rework_budget: %d\n", *cfg.ReworkBudget)
+	}
 	writeYAMLList(&b, "proof_required_paths", cfg.ProofRequiredPaths)
 	writeYAMLList(&b, "always_review_paths", cfg.AlwaysReviewPaths)
 	return b.String()
@@ -136,7 +139,7 @@ func listFieldFor(cfg *Config, key string) *[]string {
 // scalars (base_branch, worker_placement, launcher, forge, worktree_dir,
 // brief_note, review_note, ship_verify_command, gate_verify_command,
 // worktree_bootstrap_command, title_prefix_template, owner_stale_after,
-// review_effort, max_diff_lines; value optionally quoted, plus
+// review_effort, max_diff_lines, rework_budget; value optionally quoted, plus
 // deprecatedKeyAliases' old names), and a top-level list key (`allow`, `proof_required_paths`,
 // `always_review_paths`) followed by indented `- value` list items. Any
 // other top-level key is ignored (along with any indented block under it),
@@ -202,7 +205,7 @@ func parseYAML(data string) (Config, error) {
 // (base_branch, worker_placement, launcher, forge, worktree_dir, brief_note,
 // review_note, ship_verify_command, gate_verify_command,
 // worktree_bootstrap_command, title_prefix_template, owner_stale_after,
-// review_effort, max_diff_lines — key is already the canonical name by the
+// review_effort, max_diff_lines, rework_budget — key is already the canonical name by the
 // time it reaches here, deprecatedKeyAliases having been applied by the
 // caller), reporting whether key was recognized so parseYAML can still skip
 // an unrecognized key's indented block. line is the 1-based source line,
@@ -241,6 +244,12 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 			return true, fmt.Errorf("config: line %d: max_diff_lines: %w", line, err)
 		}
 		cfg.MaxDiffLines = &n
+	case "rework_budget":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return true, fmt.Errorf("config: line %d: rework_budget: %w", line, err)
+		}
+		cfg.ReworkBudget = &n
 	default:
 		return false, nil
 	}

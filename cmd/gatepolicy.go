@@ -48,6 +48,22 @@ func resolveGatePolicy(f gateFlags, rc *repoconfig.Config) *supervisor.ReviewPol
 	return p
 }
 
+// resolveMaxReworkBudget applies an explicit --max-rework-budget flag over
+// this repo's .argus/config.yml rework_budget over flagValue (already
+// supervisor.DefaultMaxReworkBudget when nothing was passed — see
+// newReworkCmd's own flag registration), the same explicit-flag-wins
+// precedence resolveGatePolicy applies for MaxDiffLines. rc.ReworkBudget is a
+// pointer for the same reason rc.MaxDiffLines is: 0 is a legal value
+// (disables the budget entirely) that must stay distinguishable from "key
+// not present". rc is a pointer solely to avoid copying the struct at the
+// call site.
+func resolveMaxReworkBudget(explicit bool, flagValue int, rc *repoconfig.Config) int {
+	if !explicit && rc.ReworkBudget != nil {
+		return *rc.ReworkBudget
+	}
+	return flagValue
+}
+
 // resolveGateVerifyCommand applies an explicit --gate-verify-command flag
 // (or its deprecated alias --verify-cmd) over this repo's .argus/config.yml
 // gate_verify_command over "" (no command configured — the gate's prior

@@ -84,6 +84,44 @@ func TestResolveGatePolicyRepoConfigMaxDiffLinesZeroIsMeaningful(t *testing.T) {
 	}
 }
 
+func TestResolveMaxReworkBudgetExplicitFlagWinsOutright(t *testing.T) {
+	rcBudget := 10
+	rc := repoconfig.Config{ReworkBudget: &rcBudget}
+	got := resolveMaxReworkBudget(true, 3, &rc)
+	if got != 3 {
+		t.Errorf("resolveMaxReworkBudget = %d, want the explicit flag value 3", got)
+	}
+}
+
+func TestResolveMaxReworkBudgetPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rcBudget := 10
+	rc := repoconfig.Config{ReworkBudget: &rcBudget}
+	got := resolveMaxReworkBudget(false, 3, &rc)
+	if got != 10 {
+		t.Errorf("resolveMaxReworkBudget = %d, want 10 from repo config", got)
+	}
+}
+
+func TestResolveMaxReworkBudgetFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveMaxReworkBudget(false, 3, &repoconfig.Config{})
+	if got != 3 {
+		t.Errorf("resolveMaxReworkBudget = %d, want the flag's own default 3", got)
+	}
+}
+
+// TestResolveMaxReworkBudgetRepoConfigZeroIsMeaningful checks that a repo
+// config explicitly disabling the budget (rework_budget: 0) is honored
+// rather than treated as "not set" — the whole reason
+// repoconfig.Config.ReworkBudget is a pointer.
+func TestResolveMaxReworkBudgetRepoConfigZeroIsMeaningful(t *testing.T) {
+	zero := 0
+	rc := repoconfig.Config{ReworkBudget: &zero}
+	got := resolveMaxReworkBudget(false, 3, &rc)
+	if got != 0 {
+		t.Errorf("resolveMaxReworkBudget = %d, want 0 (explicit disable from repo config)", got)
+	}
+}
+
 func TestResolveGateVerifyCommandExplicitFlagWinsOutright(t *testing.T) {
 	rc := repoconfig.Config{GateVerifyCommand: "make ci"}
 	got := resolveGateVerifyCommand(true, "make lint", &rc)
