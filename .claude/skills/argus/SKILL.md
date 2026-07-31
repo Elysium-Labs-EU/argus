@@ -38,6 +38,7 @@ covers it is how a stale verdict or an unenforced instruction reaches a PR.
 | Ship for real | `argus ship --worktree <path> --issue <N>` |
 | Hand off a worktree after a sibling PR merged first | `argus rebase --worktree <path> --base main` |
 | Poll a shipped PR's CI checks to a terminal state (GitHub only) | `argus tend --worktree <path> --dry-run` |
+| Clean up a worktree once its PR merged | `argus worktree prune --branch <name> --dry-run` |
 | See escalation rate / token cost | `argus stats` |
 | Check/fix the Bash allowlist argus itself needs | `argus config check --write` |
 | Set up a repo's own base branch/allow list/brief note (see `docs/repo-config.md`) | `argus init` |
@@ -116,7 +117,7 @@ These are enforced in code, not conventions the worker is merely asked to follow
   worktree with no lease at all (predates this feature, or never went through
   `supervise`'s own spawn path) is treated as unowned and never refused.
   **What this does not do**: reap or clean up a worktree with a stale lease —
-  that's `argus worktree prune`, still not shipped (see below). A stale lease
+  that's `argus worktree prune` (see section 6). A stale lease
   only ever changes whether a *mismatched* caller may proceed; it is not
   itself a cleanup mechanism. `--owner`/`--force-foreign-owner` are
   necessarily per-invocation flags (an override is a human decision, not
@@ -126,6 +127,12 @@ These are enforced in code, not conventions the worker is merely asked to follow
   as this repo's `.argus/config.yml` `owner_stale_after` key instead of
   repeated on every invocation (see `docs/repo-config.md`); an explicit
   `--owner-stale-after` flag still wins over the config key.
+- **A malformed `--gate-verify-command`/worktree-bootstrap command fails before
+  any worker spawns, not partway through a run.** `supervise` shell-parses
+  every configured command upfront (`internal/supervisor/preflight.go`); a
+  syntax error in one is reported immediately, against every planned worker
+  at once, instead of surfacing only once that specific worker reaches the
+  gate — no wasted worker turns on a config typo.
 
 ## Known gaps — still manual, no first-class command yet
 
@@ -154,16 +161,6 @@ These are enforced in code, not conventions the worker is merely asked to follow
   `argus rebase` is not a substitute here — it is scoped specifically to
   sibling-PR-merge-conflict handoff, not review feedback (`argus rework` is
   the general-rework analog, and shares its live-pane-reuse dispatch logic).
-- **`argus worktree prune` does not exist yet.** A cleanup command for detecting
-  merged PRs and safely removing stale worktrees is in progress but not shipped —
-  it has already been through one request-changes round (dead lifecycle-wiring
-  code, missing `--credential-env` parity) and a fresh review just caught a real
-  bug (`--dry-run` silently mutating `lifecycle.json` despite claiming to be
-  preview-only) that is still being fixed. Until it lands, treat worktree cleanup
-  as fully manual (see below) — do not invoke a prune subcommand that doesn't
-  exist. The owner-lease `heartbeat_at`/`Stale` check above is what a future
-  `prune` would read to decide a worktree is abandoned — the lease already
-  exists, only the reaping command itself does not yet.
 - **Pre-spawn failures leave zero trace anywhere in argus's own logs.** If
   `argus supervise` errors before any worker spawns (e.g. "error creating worktree
   ... already exists"), nothing is written to `~/.argus/runs/*.jsonl` — that log
@@ -187,6 +184,13 @@ These are enforced in code, not conventions the worker is merely asked to follow
   set this repo's `.argus/config.yml` `forge` key once instead of repeating
   the flag on every invocation (see `docs/repo-config.md`) — an explicit
   `--forge` flag still wins over the config key.
+- **A self-hosted forge also has no built-in status-page entry for a
+  host-shaped request/push failure.** `internal/svcstatus`'s map only covers
+  `github.com`/`gitlab.com`/`codeberg.org`. `ship`'s `--status-page-url` flag
+  (or this repo's `.argus/config.yml` `status_page` key, same flag-wins-over-config
+  precedence as `--forge`) points it at the right page for anything else —
+  without one, a self-hosted host's failure error just omits the status-page
+  hint rather than guessing wrong.
 
 ## Preflight
 
@@ -331,8 +335,8 @@ argus supervise --repo <path> --jira-issues PROJ-123,PROJ-124 --review \
 **If this errors with "error creating worktree ... already exists"** — a worktree
 directory or git-registered worktree entry for that branch name is already there (a
 leftover from a prior manual worktree, or a previous run's worktree/branch that was
-never cleaned up). There is no argus command to clear this yet; clean it up manually
-before retrying:
+never cleaned up). If its PR already merged, `argus worktree prune --branch <name>`
+clears it (see section 6). Otherwise clean it up manually before retrying:
 
 ```bash
 trash <path>            # or your repo's guarded delete flow, if it enforces one
@@ -531,6 +535,15 @@ This one command does everything the old manual loop required by hand:
    decision is needed, not another automatic retry. After the round cap is exhausted
    it also stops and prints an escalation rather than looping forever.
 
+`--max-rounds` only bounds one `rework` invocation's own loop. Separately,
+`--max-rework-budget` (default `supervisor.DefaultMaxReworkBudget`) is a persisted,
+cross-invocation restart budget for the worktree itself — total rework rounds it
+may ever be dispatched for, across every separate `rework` call you make against
+it, not just this one. `0` disables it. Without the flag, this repo's
+`.argus/config.yml` `rework_budget` key wins, then the built-in default. Once the
+budget is exhausted, `rework` refuses rather than dispatching another round,
+regardless of `--max-rounds`.
+
 Sanity-check the result with `argus ship --worktree <path> --issue <N> --dry-run`
 before shipping for real. And don't assume an approve means every prior finding was
 fixed — each round's review is a fresh holistic pass, not a checklist against what was
@@ -629,8 +642,6 @@ binary (checksum-only, no signature verification yet).
 - Don't treat a standalone `argus review` verdict as something `ship` will see — it
   isn't persisted. Use `supervise --attach --review` instead, then confirm with
   `ship --dry-run`.
-- Don't invoke a worktree-prune/cleanup subcommand — it doesn't exist yet; clean up
-  stale worktrees with `trash <path>` + `git worktree prune` instead.
 - Don't reach for `--force` on `ship` unless the user explicitly authorized it.
 - Don't `--dry-run`-skip on a first real run against an unfamiliar repo.
 - Don't assume a supervise error before spawn is recorded anywhere — if it errors
