@@ -303,9 +303,19 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	// --force-with-lease`, but nothing about a terminal status.json proves
 	// that push actually reached origin (a pre-push hook rejection the worker
 	// didn't check, or a run killed mid-push). Verify against the remote
-	// directly before ever printing "rebased and ready".
+	// directly before ever printing "rebased and ready" — but only when the
+	// branch actually has commits beyond base to publish: a worktree whose
+	// worker never committed (uncommitted-diff-only, per its brief) or whose
+	// rebase fast-forwarded onto a sibling PR's identical change legitimately
+	// has nothing to push, and no origin ref is expected to exist yet.
 	if status.Phase == protocol.PhaseAwaitingReview || status.Phase == protocol.PhaseDone {
-		if verr := supervisor.VerifyPushLanded(ctx, opts.worktree, branch); verr != nil {
+		ahead, cerr := supervisor.CommitsAheadOfBase(ctx, opts.worktree, opts.base)
+		if cerr != nil {
+			return cerr
+		}
+		if ahead == 0 {
+			logger.Action("rebase", branch, "no-push-needed", "zero commits beyond origin/"+opts.base+" after rebase")
+		} else if verr := supervisor.VerifyPushLanded(ctx, opts.worktree, branch); verr != nil {
 			logger.Action("rebase", branch, "push-not-landed", verr.Error())
 			return fmt.Errorf("%s worker reported %s but the force-push did not reach origin: %w", branch, status.Phase, verr)
 		}

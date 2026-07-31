@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,6 +173,30 @@ func RemoteBranchSHA(ctx context.Context, worktree, branch string) (string, erro
 		return "", nil
 	}
 	return fields[0], nil
+}
+
+// CommitsAheadOfBase counts worktree's local HEAD commits not reachable from
+// the local origin/<base> remote-tracking ref. Zero means a force-push has
+// nothing to publish: a rebase round that fast-forwards HEAD exactly onto
+// base (a sibling PR already carried an identical change), or a worktree
+// whose worker never made a commit of its own to begin with, both land here
+// — distinct from a branch with real history that genuinely needs to reach
+// origin. Deliberately uses the local ref rather than a fresh `ls-remote`
+// (mirroring hasUnpushedCommits' @{u}..HEAD in prune.go): a live SHA queried
+// mid-dispatch can advance past what FetchBase and the worker's own `git
+// fetch origin <base>` step (see RebaseBrief) already pulled into the local
+// object DB, and rev-list on an object git has never fetched fails outright
+// — aborting a dispatch whose push actually landed fine.
+func CommitsAheadOfBase(ctx context.Context, worktree, base string) (int, error) {
+	out, err := git(ctx, worktree, "rev-list", "--count", "origin/"+base+"..HEAD")
+	if err != nil {
+		return 0, fmt.Errorf("counting commits ahead of origin/%s: %w", base, err)
+	}
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		return 0, fmt.Errorf("parsing commit count %q: %w", out, err)
+	}
+	return n, nil
 }
 
 // ForcePushBranch force-pushes worktree's HEAD to origin/<branch>, using

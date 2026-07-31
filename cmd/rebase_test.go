@@ -45,7 +45,12 @@ func initGitDir(t *testing.T) string {
 // succeeds against branch itself, the TestRunRebaseDryRunForcesPastNoConflict
 // trick) — needed to test --worktree resolution against a specific relative
 // path/cwd combination, which requires the repo living at an exact,
-// predictable location. Every caller works against the same "feat-x" branch.
+// predictable location. Every caller works against the same "feat-x" branch;
+// "main" also exists (pointing at the same commit, never checked out). The
+// trailing fetch populates the local origin/* remote-tracking refs
+// CommitsAheadOfBase reads — in production those come from detectRebaseConflict's
+// FetchBase plus the worker's own `git fetch origin <base>` step (RebaseBrief),
+// neither of which a test calling dispatchRebaseWorker directly goes through.
 func initGitDirAt(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -62,7 +67,9 @@ func initGitDirAt(t *testing.T, dir string) {
 	run("config", "user.name", "t")
 	run("checkout", "-q", "-b", "feat-x")
 	run("commit", "-q", "--allow-empty", "-m", "work")
+	run("branch", "main")
 	run("remote", "add", "origin", dir)
+	run("fetch", "-q", "origin")
 }
 
 // fakeRebaseClient routes "herdr worktree ..." and "herdr pane ..." calls to
@@ -595,6 +602,74 @@ func TestDispatchRebaseWorkerReportsSuccessButPushNeverLandedFails(t *testing.T)
 	}
 	if strings.Contains(buf.String(), "rebased and ready") {
 		t.Errorf("must not print the success message when the push never landed:\n%s", buf.String())
+	}
+}
+
+// setupRebaseZeroDivergence reproduces argus#348: a worktree whose branch was
+// checked out straight off origin/main and never committed to (the worker
+// only ever made uncommitted changes, per its brief — "do NOT git commit or
+// push; argus ships"). origin/feat-x never existed, and after a rebase round
+// HEAD is still exactly origin/main — zero commits of its own to publish.
+func setupRebaseZeroDivergence(t *testing.T) (worktree string) {
+	t.Helper()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare init: %v\n%s", err, out)
+	}
+	seed := t.TempDir()
+	git(seed, "init", "-q")
+	git(seed, "config", "user.email", "t@t")
+	git(seed, "config", "user.name", "t")
+	git(seed, "checkout", "-q", "-b", "main")
+	git(seed, "commit", "-q", "--allow-empty", "-m", "base")
+	git(seed, "remote", "add", "origin", remote)
+	git(seed, "push", "-q", "-u", "origin", "main")
+
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", remote, wt).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+	git(wt, "config", "user.email", "t@t")
+	git(wt, "config", "user.name", "t")
+	git(wt, "checkout", "-q", "-b", "feat-x", "origin/main")
+	return wt
+}
+
+// TestDispatchRebaseWorkerZeroDivergenceSucceedsWithNoOriginRef reproduces
+// argus#348: a worker that resolves its rebase without ever having a commit
+// of its own to force-push (HEAD lands exactly on origin/main) correctly
+// performs no push at all — origin/feat-x staying absent is expected, not a
+// failure, and dispatchRebaseWorker must report success rather than
+// misreading the missing ref as a push that silently didn't land.
+func TestDispatchRebaseWorkerZeroDivergenceSucceedsWithNoOriginRef(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := setupRebaseZeroDivergence(t)
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+	var buf bytes.Buffer
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		fresh := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now()}
+		_ = protocol.Write(protocol.StatusPath(worktree), fresh)
+	}()
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("dispatchRebaseWorker should succeed when the branch has zero commits beyond base: %v", err)
+	}
+	if !strings.Contains(buf.String(), "rebased and ready") {
+		t.Errorf("expected the success message, got:\n%s", buf.String())
 	}
 }
 

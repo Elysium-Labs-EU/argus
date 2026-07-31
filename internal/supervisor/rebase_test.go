@@ -543,6 +543,74 @@ func TestRemoteBranchSHAMissingBranchReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestCommitsAheadOfBaseCountsLocalOnlyCommits confirms CommitsAheadOfBase
+// reports zero right after a clone (HEAD == origin/<base>, nothing of its
+// own to publish) and counts up as local-only commits are added — the
+// distinction a rebase dispatch needs to tell "this branch never diverged"
+// apart from "this branch has history that must reach origin".
+func TestCommitsAheadOfBaseCountsLocalOnlyCommits(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGitRepo(t)
+
+	n, err := CommitsAheadOfBase(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("CommitsAheadOfBase: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("commits ahead right after a clone = %d, want 0", n)
+	}
+
+	writeAndCommit2 := func(content, msg string) {
+		if werr := os.WriteFile(filepath.Join(wt, "f.txt"), []byte(content), 0o644); werr != nil {
+			t.Fatal(werr)
+		}
+		gitDo(t, wt, "add", "-A")
+		gitDo(t, wt, "commit", "-q", "-m", msg)
+	}
+	writeAndCommit2("line1\nline2\n", "one local commit")
+
+	n, err = CommitsAheadOfBase(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("CommitsAheadOfBase after one commit: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("commits ahead after one local commit = %d, want 1", n)
+	}
+}
+
+// TestCommitsAheadOfBaseSurvivesOriginAdvancingPastLocalFetch reproduces the
+// hazard a live ls-remote resolution would hit: base gets a new commit on
+// origin — plausible mid-dispatch, since sibling rebases are exactly why
+// this command exists — after the worktree's own local origin/<base> ref was
+// last refreshed, but before CommitsAheadOfBase runs. Because it counts
+// against the local ref rather than re-querying origin, the object it
+// compares against is guaranteed to already be in the local object DB, so
+// this must succeed rather than fail with "unknown revision".
+func TestCommitsAheadOfBaseSurvivesOriginAdvancingPastLocalFetch(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGitRepo(t)
+	origin := mustRemote(t, wt)
+
+	// A sibling clone advances origin/main past what wt's local origin/main
+	// ref (populated by the initial clone) still points at.
+	other := gitTempDir(t)
+	gitDo(t, filepath.Dir(other), "clone", "-q", origin, filepath.Base(other))
+	if werr := os.WriteFile(filepath.Join(other, "sibling.txt"), []byte("from-sibling\n"), 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	gitDo(t, other, "add", "-A")
+	gitDo(t, other, "commit", "-q", "-m", "sibling advances main")
+	gitDo(t, other, "push", "-q", "origin", base)
+
+	n, err := CommitsAheadOfBase(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("CommitsAheadOfBase must not fail when origin has advanced past the local fetch: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("commits ahead = %d, want 0 (wt's own HEAD never moved)", n)
+	}
+}
+
 func TestRebaseBriefCarriesRebaseSteps(t *testing.T) {
 	b := RebaseBrief("feat-x", "main")
 	for _, want := range []string{"feat-x", "git rebase origin/main", "--force-with-lease", protocol.WriterBrief("origin/main")} {
