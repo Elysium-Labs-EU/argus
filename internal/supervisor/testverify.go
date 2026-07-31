@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -46,8 +47,17 @@ const maxCapturedOutput = 4000
 // this check is unwaivable — so before reporting a mismatch, a failing
 // re-run is confirmed with one retry. Only two failures in a row, with both
 // runs' captured output, are reported.
-func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun, timeout time.Duration) []string {
-	var mismatches []string
+//
+// A stripped/reshaped Cmd (see replayCommands) can still turn out not to be
+// literal shell — a descriptive label this codebase doesn't yet know the
+// shape of. sh -c's own diagnostic for that (exit 2, "syntax error") means
+// the string was never actually re-executed, which is not evidence the
+// underlying claim is false the way a real non-zero exit is — so unlike a
+// reproduced failure, that case is not retried (a parse failure is
+// deterministic) and is returned separately in unverifiable rather than
+// mismatches, so the gate can treat it as a waivable reason instead of an
+// unwaivable one (see gateVerdict).
+func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun, timeout time.Duration) (mismatches, unverifiable []string) {
 	for _, t := range tests {
 		if t.Cmd == "" || t.Result != protocol.ResultPass || isGitMutation(t.Cmd) {
 			continue
@@ -61,6 +71,12 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 			if first.timedOut {
 				mismatches = append(mismatches, fmt.Sprintf(
 					"could not verify claimed pass of %q: re-run exceeded %s and was killed", rc.cmd, timeout))
+				break
+			}
+			if isShellSyntaxError(rc.cmd, first) {
+				unverifiable = append(unverifiable, fmt.Sprintf(
+					"could not verify claimed pass of %q: re-run could not be parsed as shell syntax (%v) rather than actually executed — %q reads as a descriptive label, not a literal command\n--- output (tail) ---\n%s",
+					rc.cmd, first.err, rc.cmd, tail(first.output)))
 				break
 			}
 
@@ -80,7 +96,7 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 			break
 		}
 	}
-	return mismatches
+	return mismatches, unverifiable
 }
 
 // replayCommands recomposes the exact command line(s) to re-run for a
@@ -233,6 +249,30 @@ func stripTrailingParenthetical(cmd string) string {
 		return strings.TrimSpace(cmd[:loc[0]])
 	}
 	return cmd
+}
+
+// shellSyntaxErrorPattern matches the diagnostic a POSIX shell prints on a
+// genuine parse failure — bash's "sh: -c: line 0: syntax error near
+// unexpected token `(`" and dash/ash's "Syntax error: unexpected ..." both
+// contain this substring, case differences aside.
+var shellSyntaxErrorPattern = regexp.MustCompile(`(?i)syntax error`)
+
+// isShellSyntaxError reports whether res is sh -c's own parse failure for
+// cmdStr rather than a real command that ran and exited non-zero on its own.
+// Exit code 2 alone is not enough signal — a worker's own script can
+// legitimately exit 2 — so this also confirms cmdStr actually went through
+// the sh -c fallback (directArgv false; see execArgvOrShell) before trusting
+// the output's "syntax error" text: only together do they mean the string
+// was rejected as unparsable, never executed at all.
+func isShellSyntaxError(cmdStr string, res verifyResult) bool {
+	if _, direct := directArgv(cmdStr); direct {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(res.err, &exitErr) || exitErr.ExitCode() != 2 {
+		return false
+	}
+	return shellSyntaxErrorPattern.Match(res.output)
 }
 
 // verifyCommandTimeout bounds one run of a repo's configured verify_command

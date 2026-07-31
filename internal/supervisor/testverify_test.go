@@ -16,7 +16,7 @@ func TestVerifyTestsFlagsFabricatedPass(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "exit 1", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 1 {
 		t.Fatalf("mismatches = %v, want 1 entry for a claimed pass that actually fails", mismatches)
 	}
@@ -27,7 +27,7 @@ func TestVerifyTestsAcceptsGenuinePass(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "exit 0", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none for a genuinely passing command", mismatches)
 	}
@@ -47,7 +47,7 @@ func TestVerifyTestsJoinsCmdAndTarget(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "test -f", Target: "marker.txt", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — re-run must join Cmd and Target, not run Cmd alone", mismatches)
 	}
@@ -67,7 +67,7 @@ func TestVerifyTestsMakeTargetIgnoresStrayTrailingTokens(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "make check golangci-lint", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — the stray trailing token must not be replayed as a second make target", mismatches)
 	}
@@ -86,7 +86,7 @@ func TestVerifyTestsMakeTargetDropsAppendedTarget(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "make nilcheck", Target: "./...", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — Target must not be appended to a make invocation", mismatches)
 	}
@@ -111,7 +111,7 @@ func TestVerifyTestsMakeTargetRunsFromTargetSubdirWhenItExists(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "make crap", Target: "eos-sink-logbench", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — a directory-valued Target must set cwd for a make replay too, not just the bare-append case", mismatches)
 	}
@@ -127,7 +127,7 @@ func TestVerifyTestsSkipsRedundantTargetAlreadyInCmd(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: `f() { [ "$#" -eq 1 ]; }; f marker.txt`, Target: "marker.txt", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — Target already present in Cmd must not be appended again", mismatches)
 	}
@@ -151,7 +151,7 @@ func TestVerifyTestsRunsFromTargetSubdirWhenItExists(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "test -f go.mod", Target: "eos-sink-logbench", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — a directory-valued Target must set cwd, not become a positional argument", mismatches)
 	}
@@ -168,7 +168,7 @@ func TestVerifyTestsSplitsCommaSeparatedTargetIntoOneRunEach(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: `f() { [ "$#" -eq 1 ] || exit 1; }; f`, Target: "a.txt, b.txt", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — each comma-separated target must be replayed as its own single-arg run", mismatches)
 	}
@@ -183,7 +183,7 @@ func TestVerifyTestsSkipsLabelShapedTarget(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: `f() { [ "$#" -eq 0 ]; }; f`, Target: "frontend unit tests (vitest)", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — a human-readable label must not be appended to Cmd", mismatches)
 	}
@@ -200,7 +200,7 @@ func TestVerifyTestsSkipsTrailingParentheticalInCmd(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "exit 0 (lefthook pre-commit: format, lint, fieldalignment, test)", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — a trailing parenthetical aside in Cmd must be stripped before replay", mismatches)
 	}
@@ -214,9 +214,33 @@ func TestVerifyTestsFlagsGenuineFailureWithTrailingParenthetical(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "exit 1 (lefthook pre-commit: format, lint, fieldalignment, test)", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 1 {
 		t.Fatalf("mismatches = %v, want 1 entry — a genuine failure must still be flagged after stripping the aside", mismatches)
+	}
+}
+
+// TestVerifyTestsReportsUnparsableCmdAsUnverifiable is the regression for the
+// gate treating a shell *parse* failure the same as a real reproduced
+// failure: a Cmd with a descriptive aside embedded before its end (so
+// stripTrailingParenthetical's trailing-only match doesn't apply) is not
+// literal shell, and sh -c rejects it with a syntax error rather than ever
+// running it. That must land in unverifiable, not mismatches — it says
+// nothing about whether the worker's underlying claim was true.
+func TestVerifyTestsReportsUnparsableCmdAsUnverifiable(t *testing.T) {
+	wt := t.TempDir()
+	tests := []protocol.TestRun{
+		{Cmd: "exit 0 (extra parenthetical) tail-word", Result: protocol.ResultPass},
+	}
+	mismatches, unverifiable := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 0 {
+		t.Fatalf("mismatches = %v, want none — a shell parse failure is not a reproduced failure", mismatches)
+	}
+	if len(unverifiable) != 1 {
+		t.Fatalf("unverifiable = %v, want 1 entry for an unparsable Cmd", unverifiable)
+	}
+	if !strings.Contains(unverifiable[0], "tail-word") {
+		t.Errorf("unverifiable entry should name the offending cmd, got %q", unverifiable[0])
 	}
 }
 
@@ -235,7 +259,7 @@ func TestVerifyTestsSkipsGitMutationClaims(t *testing.T) {
 		{Cmd: "git merge --ff-only origin/main", Result: protocol.ResultPass},
 		{Cmd: "git rebase origin/main", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — git commit/push/merge/rebase claims must not be re-run", mismatches)
 	}
@@ -247,7 +271,7 @@ func TestVerifyTestsSkipsFailAndSkippedClaims(t *testing.T) {
 		{Cmd: "exit 1", Result: protocol.ResultFail},
 		{Cmd: "exit 1", Result: protocol.ResultSkipped},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — only claimed-pass results are re-verified", mismatches)
 	}
@@ -263,7 +287,7 @@ func TestVerifyTestsRetriesOnceBeforeFlagging(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "test -f " + marker + " && exit 0 || { touch " + marker + "; exit 1; }", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — a fail-then-pass pair is a flake, not a real mismatch", mismatches)
 	}
@@ -278,7 +302,7 @@ func TestVerifyTestsFlagsRepeatedFailureWithBothOutputs(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "echo boom-output-here; exit 2", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, time.Second)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 1 {
 		t.Fatalf("mismatches = %v, want 1 entry for a command that fails on both attempts", mismatches)
 	}
@@ -295,7 +319,7 @@ func TestVerifyTestsReportsTimeout(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "sleep 5", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), wt, tests, 50*time.Millisecond)
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, 50*time.Millisecond)
 	if len(mismatches) != 1 {
 		t.Fatalf("mismatches = %v, want 1 timeout entry", mismatches)
 	}
@@ -336,7 +360,7 @@ func TestVerifyTestsReplaysUnquotedRunAlternationArgvStyle(t *testing.T) {
 	tests := []protocol.TestRun{
 		{Cmd: "go test -run TestFoo|TestBar ./...", Result: protocol.ResultPass},
 	}
-	mismatches := VerifyTests(context.Background(), dir, tests, 30*time.Second)
+	mismatches, _ := VerifyTests(context.Background(), dir, tests, 30*time.Second)
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches = %v, want none — an unquoted -run alternation must replay as one go test invocation, not a shell pipeline", mismatches)
 	}
@@ -363,6 +387,40 @@ func TestGateEscalatesWhenClaimedTestPassDoesNotReproduce(t *testing.T) {
 	}
 	if !hasReasonContaining(v.HardReasons, "re-running it failed") {
 		t.Errorf("expected an unwaivable test-mismatch reason, got %v", v.HardReasons)
+	}
+}
+
+// TestGateTreatsUnverifiableTestClaimAsWaivable is the regression for a
+// claimed pass that could not even be re-run (a Cmd that doesn't parse as
+// shell syntax): it must still escalate for review — the claim is
+// unconfirmed — but as a waivable reason, not a HardReason, since a parse
+// failure is not evidence the claim is false. A reviewer's "approve" must be
+// enough to ship, unlike TestGateEscalatesWhenClaimedTestPassDoesNotReproduce
+// above where the failure genuinely reproduced.
+func TestGateTreatsUnverifiableTestClaimAsWaivable(t *testing.T) {
+	st := &workerState{
+		hasFile:          true,
+		measuredOK:       true,
+		measured:         protocol.DiffStat{Files: 1, Insertions: 3},
+		measuredFiles:    []string{"cmd/root.go"},
+		testUnverifiable: []string{`could not verify claimed pass of "git commit (lefthook pre-commit)": re-run could not be parsed as shell syntax`},
+		plan:             &WorkerPlan{Worker: Worker{Task: "descriptive-cmd"}},
+		status: protocol.Status{
+			Phase:        protocol.PhaseAwaitingReview,
+			Tests:        []protocol.TestRun{{Cmd: "git commit (lefthook pre-commit)", Result: protocol.ResultPass}},
+			FilesTouched: []string{"cmd/root.go"},
+			DiffStat:     protocol.DiffStat{Insertions: 3},
+		},
+	}
+	v := gateVerdict(st, nil)
+	if v.AutoApprove {
+		t.Fatal("gate must not auto-approve while a test claim is unverified")
+	}
+	if !hasReasonContaining(v.Reasons, "could not be parsed") {
+		t.Errorf("expected a reviewable reason for the unverifiable claim, got %v", v.Reasons)
+	}
+	if hasReasonContaining(v.HardReasons, "could not be parsed") {
+		t.Errorf("an unverifiable (not reproduced-failing) claim must not be a HardReason, got %v", v.HardReasons)
 	}
 }
 
