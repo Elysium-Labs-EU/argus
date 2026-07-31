@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 )
 
 // DefaultAllowEntry is the broadest entry that satisfies the check: every
@@ -25,6 +26,26 @@ import (
 // "Bash(argus ship *)") can pass that instead — Check and Ensure both accept
 // any entry shaped like coverageRe.
 const DefaultAllowEntry = "Bash(argus *)"
+
+// denyTargets are the raw herdr subcommands that bypass argus's own
+// delivery-confirmed dispatch (deliverPaneMessage, behind `argus worker
+// steer`/`answer`): herdr accepts the text and returns immediately whether or
+// not a live agent turn ever picks it up, so a stalled prompt and a
+// delivered one look identical from the caller's side. Read-only pane
+// commands (list/read/get) are how a supervising session checks on things,
+// not a coordination risk, and are deliberately excluded.
+var denyTargets = []string{"pane send-text", "pane send-keys", "pane run"}
+
+// DefaultDenyEntries is the permissions.deny entry CheckDeny/EnsureDeny add
+// for each of denyTargets, derived from the single denyTargets list so the
+// two can't silently drift apart.
+func DefaultDenyEntries() []string {
+	entries := make([]string, len(denyTargets))
+	for i, t := range denyTargets {
+		entries[i] = "Bash(herdr " + t + ":*)"
+	}
+	return entries
+}
 
 // coverageRe matches a Bash allow entry that covers argus invocations: the
 // bare command ("Bash(argus)"), the wildcard ("Bash(argus *)"), or a
@@ -55,6 +76,38 @@ func CoversShipForce(entry string) bool {
 	return shipForceRe.MatchString(entry)
 }
 
+// entryPrefix returns the literal command prefix a Bash(...) permission
+// entry matches against, stripping the trailing wildcard ("*" or ":*") the
+// glob syntax allows. ok is false if entry isn't Bash(...)-shaped at all.
+func entryPrefix(entry string) (prefix string, ok bool) {
+	inner, ok := strings.CutPrefix(entry, "Bash(")
+	if !ok {
+		return "", false
+	}
+	inner, ok = strings.CutSuffix(inner, ")")
+	if !ok {
+		return "", false
+	}
+	inner = strings.TrimSuffix(inner, ":*")
+	inner = strings.TrimSuffix(inner, "*")
+	return strings.TrimRight(inner, " "), true
+}
+
+// denyEntryCovers reports whether entry (one string from permissions.deny)
+// already denies the raw herdr invocation "herdr <target>" — either that
+// exact subcommand (with its own wildcard, or bare), or a broader prefix of
+// it, e.g. "Bash(herdr pane *)" or "Bash(herdr *)" both already deny "herdr
+// pane send-text". Word-boundary aware, same as coverageRe, so "herdr pane
+// send" doesn't false-positive against "herdr pane send-text".
+func denyEntryCovers(entry, target string) bool {
+	prefix, ok := entryPrefix(entry)
+	if !ok {
+		return false
+	}
+	want := "herdr " + target
+	return want == prefix || strings.HasPrefix(want, prefix+" ")
+}
+
 // SettingsPath is where Claude Code reads a project's committed permission
 // settings, relative to repo.
 func SettingsPath(repo string) string {
@@ -81,7 +134,11 @@ func load(path string) (rawSettings, error) {
 	return raw, nil
 }
 
-func allowList(raw rawSettings) ([]string, map[string]json.RawMessage, error) {
+// permList returns the string list at permissions.<key> (e.g. "allow" or
+// "deny"), along with the raw permissions block so a caller can rewrite it
+// without dropping sibling keys. A missing block or key returns a nil list,
+// not an empty one, so callers can't assume either is already initialized.
+func permList(raw rawSettings, key string) ([]string, map[string]json.RawMessage, error) {
 	permsRaw, ok := raw["permissions"]
 	if !ok {
 		return nil, map[string]json.RawMessage{}, nil
@@ -90,15 +147,23 @@ func allowList(raw rawSettings) ([]string, map[string]json.RawMessage, error) {
 	if err := json.Unmarshal(permsRaw, &perms); err != nil {
 		return nil, nil, fmt.Errorf("parsing permissions block: %w", err)
 	}
-	allowRaw, ok := perms["allow"]
+	listRaw, ok := perms[key]
 	if !ok {
 		return nil, perms, nil
 	}
-	var allow []string
-	if err := json.Unmarshal(allowRaw, &allow); err != nil {
-		return nil, nil, fmt.Errorf("parsing permissions.allow: %w", err)
+	var list []string
+	if err := json.Unmarshal(listRaw, &list); err != nil {
+		return nil, nil, fmt.Errorf("parsing permissions.%s: %w", key, err)
 	}
-	return allow, perms, nil
+	return list, perms, nil
+}
+
+func allowList(raw rawSettings) ([]string, map[string]json.RawMessage, error) {
+	return permList(raw, "allow")
+}
+
+func denyList(raw rawSettings) ([]string, map[string]json.RawMessage, error) {
+	return permList(raw, "deny")
 }
 
 // Check reports whether the settings file at path already has a
@@ -140,7 +205,7 @@ func Ensure(path, entry string) (added bool, err error) {
 		return false, nil
 	}
 
-	raw, err = withAllowEntry(raw, perms, allow, entry)
+	raw, err = withEntries(raw, perms, "allow", allow, entry)
 	if err != nil {
 		return false, err
 	}
@@ -150,20 +215,77 @@ func Ensure(path, entry string) (added bool, err error) {
 	return true, nil
 }
 
-// withAllowEntry returns raw with entry appended to permissions.allow,
-// filling in the permissions block (and raw itself) when either was absent —
-// load/allowList return nil maps for a missing file or missing block rather
-// than empty ones, so callers can't assume they're already initialized.
-func withAllowEntry(raw rawSettings, perms map[string]json.RawMessage, allow []string, entry string) (rawSettings, error) {
-	allow = append(allow, entry)
-	allowData, err := json.Marshal(allow)
+// CheckDeny reports, for each of DefaultDenyEntries's targets, whether the
+// settings file at path already denies it (exactly or via a broader deny
+// entry), mirroring Check's allow-side report. missing lists the raw herdr
+// pane-mutation entries (in DefaultDenyEntries's own form) not yet covered —
+// empty when every target is already denied. A missing settings file is not
+// an error — nothing in it is denied yet.
+func CheckDeny(path string) (missing []string, err error) {
+	raw, err := load(path)
 	if err != nil {
-		return nil, fmt.Errorf("encoding allow list: %w", err)
+		return nil, err
+	}
+	deny, _, err := denyList(raw)
+	if err != nil {
+		return nil, err
+	}
+	for i, target := range denyTargets {
+		if !slices.ContainsFunc(deny, func(entry string) bool { return denyEntryCovers(entry, target) }) {
+			missing = append(missing, DefaultDenyEntries()[i])
+		}
+	}
+	return missing, nil
+}
+
+// EnsureDeny adds whichever of DefaultDenyEntries aren't yet covered (exactly
+// or by a broader existing deny entry) to permissions.deny at path, creating
+// the file/directory if necessary and leaving every other key untouched.
+// added lists exactly the entries this call wrote — empty when every target
+// was already covered, matching Ensure's idempotency contract.
+func EnsureDeny(path string) (added []string, err error) {
+	raw, err := load(path)
+	if err != nil {
+		return nil, err
+	}
+	deny, perms, err := denyList(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, target := range denyTargets {
+		if !slices.ContainsFunc(deny, func(entry string) bool { return denyEntryCovers(entry, target) }) {
+			added = append(added, DefaultDenyEntries()[i])
+		}
+	}
+	if len(added) == 0 {
+		return nil, nil
+	}
+
+	raw, err = withEntries(raw, perms, "deny", deny, added...)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeSettingsFile(path, raw); err != nil {
+		return nil, err
+	}
+	return added, nil
+}
+
+// withEntries returns raw with entries appended to permissions.<key>,
+// filling in the permissions block (and raw itself) when either was absent —
+// load/permList return nil maps for a missing file or missing block rather
+// than empty ones, so callers can't assume they're already initialized.
+func withEntries(raw rawSettings, perms map[string]json.RawMessage, key string, list []string, entries ...string) (rawSettings, error) {
+	list = append(list, entries...)
+	listData, err := json.Marshal(list)
+	if err != nil {
+		return nil, fmt.Errorf("encoding %s list: %w", key, err)
 	}
 	if perms == nil {
 		perms = map[string]json.RawMessage{}
 	}
-	perms["allow"] = allowData
+	perms[key] = listData
 	permsData, err := json.Marshal(perms)
 	if err != nil {
 		return nil, fmt.Errorf("encoding permissions block: %w", err)

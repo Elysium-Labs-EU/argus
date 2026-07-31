@@ -214,6 +214,187 @@ func TestEnsurePreservesUnrelatedKeys(t *testing.T) {
 	}
 }
 
+func TestDenyEntryCovers(t *testing.T) {
+	cases := []struct {
+		entry, target string
+		want          bool
+	}{
+		{"Bash(herdr pane send-text:*)", "pane send-text", true},
+		{"Bash(herdr pane send-text *)", "pane send-text", true},
+		{"Bash(herdr pane send-text)", "pane send-text", true},
+		{"Bash(herdr pane *)", "pane send-text", true},
+		{"Bash(herdr *)", "pane run", true},
+		{"Bash(herdr)", "pane run", true},
+		{"Bash(herdr pane send-keys:*)", "pane send-text", false},
+		{"Bash(herdr pane send:*)", "pane send-text", false},
+		{"Bash(git *)", "pane run", false},
+		{"Edit(herdr/**)", "pane run", false},
+	}
+	for _, c := range cases {
+		if got := denyEntryCovers(c.entry, c.target); got != c.want {
+			t.Errorf("denyEntryCovers(%q, %q) = %v, want %v", c.entry, c.target, got, c.want)
+		}
+	}
+}
+
+func TestDefaultDenyEntries(t *testing.T) {
+	want := []string{
+		"Bash(herdr pane send-text:*)",
+		"Bash(herdr pane send-keys:*)",
+		"Bash(herdr pane run:*)",
+	}
+	got := DefaultDenyEntries()
+	if len(got) != len(want) {
+		t.Fatalf("DefaultDenyEntries() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("DefaultDenyEntries()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestCheckDenyMissingFileReportsAllMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".claude", "settings.json")
+	missing, err := CheckDeny(path)
+	if err != nil {
+		t.Fatalf("CheckDeny: %v", err)
+	}
+	if len(missing) != len(DefaultDenyEntries()) {
+		t.Errorf("missing = %v, want all %d default deny entries", missing, len(DefaultDenyEntries()))
+	}
+}
+
+func TestCheckDenyAllPresent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"deny":["Bash(herdr pane send-text:*)","Bash(herdr pane send-keys:*)","Bash(herdr pane run:*)"]}}`)
+	missing, err := CheckDeny(path)
+	if err != nil {
+		t.Fatalf("CheckDeny: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none", missing)
+	}
+}
+
+func TestCheckDenyBroaderEntryCoversAll(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"deny":["Bash(herdr pane *)"]}}`)
+	missing, err := CheckDeny(path)
+	if err != nil {
+		t.Fatalf("CheckDeny: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none: a broader \"herdr pane *\" deny already covers every target", missing)
+	}
+}
+
+func TestEnsureDenyCreatesFileAndDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".claude", "settings.json")
+	added, err := EnsureDeny(path)
+	if err != nil {
+		t.Fatalf("EnsureDeny: %v", err)
+	}
+	if len(added) != len(DefaultDenyEntries()) {
+		t.Fatalf("added = %v, want all %d default deny entries", added, len(DefaultDenyEntries()))
+	}
+	missing, err := CheckDeny(path)
+	if err != nil {
+		t.Fatalf("CheckDeny after EnsureDeny: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing after EnsureDeny = %v, want none", missing)
+	}
+}
+
+func TestEnsureDenyIsIdempotentWhenAllPresent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"deny":["Bash(herdr pane send-text:*)","Bash(herdr pane send-keys:*)","Bash(herdr pane run:*)"]}}`)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, err := EnsureDeny(path)
+	if err != nil {
+		t.Fatalf("EnsureDeny: %v", err)
+	}
+	if len(added) != 0 {
+		t.Errorf("expected no entries added, got %v", added)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("EnsureDeny rewrote the file even though nothing needed to change")
+	}
+}
+
+func TestEnsureDenyAppendsToExistingDifferentDenyBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"deny":["Bash(rm -rf *)"]}}`)
+	added, err := EnsureDeny(path)
+	if err != nil {
+		t.Fatalf("EnsureDeny: %v", err)
+	}
+	if len(added) != len(DefaultDenyEntries()) {
+		t.Fatalf("added = %v, want all %d default deny entries", added, len(DefaultDenyEntries()))
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+	deny, ok := raw["permissions"].(map[string]any)["deny"].([]any)
+	if !ok || len(deny) != 4 {
+		t.Fatalf("deny = %v, want the pre-existing entry plus 3 new ones", raw["permissions"])
+	}
+	if deny[0] != "Bash(rm -rf *)" {
+		t.Errorf("pre-existing deny entry disturbed: %v", deny)
+	}
+}
+
+func TestEnsureDenyPreservesUnrelatedKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{
+  "model": "opus",
+  "permissions": {
+    "allow": ["Bash(argus *)"]
+  }
+}`)
+	added, err := EnsureDeny(path)
+	if err != nil {
+		t.Fatalf("EnsureDeny: %v", err)
+	}
+	if len(added) != len(DefaultDenyEntries()) {
+		t.Fatalf("added = %v, want all %d default deny entries", added, len(DefaultDenyEntries()))
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+	if raw["model"] != "opus" {
+		t.Errorf("model was dropped or changed: %v", raw["model"])
+	}
+	perms, ok := raw["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("permissions block missing or wrong shape: %v", raw["permissions"])
+	}
+	allow, ok := perms["allow"].([]any)
+	if !ok || len(allow) != 1 || allow[0] != "Bash(argus *)" {
+		t.Errorf("allow list was dropped or changed: %v", perms["allow"])
+	}
+}
+
 func TestEnsureCustomEntry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	added, err := Ensure(path, "Bash(argus ship *)")

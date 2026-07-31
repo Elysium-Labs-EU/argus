@@ -2,10 +2,13 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Elysium-Labs-EU/argus/internal/permission"
 )
 
 func TestConfigSetWritesCredentialOverride(t *testing.T) {
@@ -78,6 +81,14 @@ func TestConfigCheckReportsMissingAllowlistEntry(t *testing.T) {
 	if !strings.Contains(buf.String(), "Bash(argus *)") {
 		t.Errorf("expected the fix snippet to name the default entry, got %q", buf.String())
 	}
+	if !strings.Contains(buf.String(), "raw herdr pane-mutation calls are not denied") {
+		t.Errorf("expected the deny gap reported alongside the allow gap, got %q", buf.String())
+	}
+	for _, e := range permission.DefaultDenyEntries() {
+		if !strings.Contains(buf.String(), e) {
+			t.Errorf("expected the fix snippet to name %s, got %q", e, buf.String())
+		}
+	}
 }
 
 func TestConfigCheckReportsExistingAllowlistEntry(t *testing.T) {
@@ -86,7 +97,12 @@ func TestConfigCheckReportsExistingAllowlistEntry(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(settingsPath, []byte(`{"permissions":{"allow":["Bash(argus *)"]}}`), 0o644); err != nil {
+	denyJSON, err := json.Marshal(permission.DefaultDenyEntries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"permissions":{"allow":["Bash(argus *)"],"deny":` + string(denyJSON) + `}}`
+	if err := os.WriteFile(settingsPath, []byte(settings), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,8 +161,13 @@ func TestConfigCheckWriteAddsEntry(t *testing.T) {
 	if !strings.Contains(buf.String(), "added Bash(argus *)") {
 		t.Errorf("expected a confirmation naming the added entry, got %q", buf.String())
 	}
+	for _, e := range permission.DefaultDenyEntries() {
+		if !strings.Contains(buf.String(), e) {
+			t.Errorf("expected the deny write to report %s, got %q", e, buf.String())
+		}
+	}
 
-	// A second run must find it already covered rather than writing again.
+	// A second run must find both already covered rather than writing again.
 	cmd2 := newConfigCheckCmd()
 	buf2 := &bytes.Buffer{}
 	cmd2.SetOut(buf2)
@@ -156,6 +177,83 @@ func TestConfigCheckWriteAddsEntry(t *testing.T) {
 	}
 	if !strings.Contains(buf2.String(), "argus is allowlisted") {
 		t.Errorf("expected the written entry to be picked up, got %q", buf2.String())
+	}
+	if !strings.Contains(buf2.String(), "raw herdr pane-mutation calls are denied") {
+		t.Errorf("expected the written deny block to be picked up, got %q", buf2.String())
+	}
+}
+
+func TestConfigCheckWriteAppendsDenyToExistingDifferentBlock(t *testing.T) {
+	repo := t.TempDir()
+	settingsPath := filepath.Join(repo, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"permissions":{"deny":["Bash(rm -rf *)"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newConfigCheckCmd()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--repo", repo, "--write"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config check --write: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+	deny, ok := raw["permissions"].(map[string]any)["deny"].([]any)
+	if !ok {
+		t.Fatalf("deny list missing or wrong shape: %v", raw["permissions"])
+	}
+	if len(deny) != 1+len(permission.DefaultDenyEntries()) {
+		t.Fatalf("deny = %v, want the pre-existing entry plus %d new ones", deny, len(permission.DefaultDenyEntries()))
+	}
+	if deny[0] != "Bash(rm -rf *)" {
+		t.Errorf("pre-existing deny entry disturbed: %v", deny)
+	}
+}
+
+func TestConfigCheckWriteIsNoOpWhenAllDenyEntriesPresent(t *testing.T) {
+	repo := t.TempDir()
+	settingsPath := filepath.Join(repo, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	denyJSON, err := json.Marshal(permission.DefaultDenyEntries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"permissions":{"allow":["Bash(argus *)"],"deny":` + string(denyJSON) + `}}`
+	if err = os.WriteFile(settingsPath, []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newConfigCheckCmd()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--repo", repo, "--write"})
+	if err = cmd.Execute(); err != nil {
+		t.Fatalf("config check --write: %v", err)
+	}
+
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("--write rewrote the file even though every deny entry was already present")
 	}
 }
 
