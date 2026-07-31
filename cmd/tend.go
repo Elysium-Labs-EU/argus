@@ -94,8 +94,10 @@ type TendOutcome struct {
 	MergeReady  bool
 }
 
-// runTend is newTendCmd's RunE body, extracted so the resolution and poll
-// logic is independently testable against a fake forge.Forge.
+// runTend is newTendCmd's RunE body: worktree validation plus resolving and
+// dispatching to the forge-facing half, extracted so each stays independently
+// testable — resolveTendTarget against real (network-free) git plumbing,
+// tendChange against a fake forge.Forge.
 func runTend(cmd *cobra.Command, opts *tendOpts) error {
 	if opts.worktree == "" {
 		return &ui.UserError{Err: fmt.Errorf("no worktree given"), Hint: "argus tend --worktree <path>"}
@@ -105,30 +107,44 @@ func runTend(cmd *cobra.Command, opts *tendOpts) error {
 		return err
 	}
 	opts.worktree = abs
+
+	client, branch, owner, repo, err := resolveTendTarget(cmd, opts)
+	if err != nil {
+		return err
+	}
+	return tendChange(cmd, client, opts, branch, owner, repo)
+}
+
+// resolveTendTarget resolves everything runTend needs to hand off to
+// tendChange: the ownership-lease check, the worktree's current branch, its
+// forge identity, and a constructed forge.Forge client. Every step here is
+// local git plumbing or object construction — forge.New itself makes no
+// network call, only OpenPR/FindPR/PRChecks do — so this whole chain is
+// testable against a real temp git repo without a fake HTTP server.
+func resolveTendTarget(cmd *cobra.Command, opts *tendOpts) (client forge.Forge, branch, owner, repo string, err error) {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 	if oerr := enforceOwnership(ctx, out, opts.worktree, opts.owner, time.Now()); oerr != nil {
-		return oerr
+		return nil, "", "", "", oerr
 	}
 
-	branch, err := supervisor.CurrentBranch(ctx, opts.worktree)
+	branch, err = supervisor.CurrentBranch(ctx, opts.worktree)
 	if err != nil {
-		return err
+		return nil, "", "", "", err
 	}
 	host, repoOwner, repoName, err := resolveRepo(ctx, "", opts.worktree)
 	if err != nil {
-		return err
+		return nil, "", "", "", err
 	}
 	kind, err := parseForgeKind(resolveForgeKindValue(opts.forgeKindExplicit, opts.forgeKind, forgeConfigDefault(ctx, out, opts.worktree)))
 	if err != nil {
-		return err
+		return nil, "", "", "", err
 	}
-	client, err := forge.New(host, forge.TokenForHost(host, opts.credentialEnv), nil, kind)
+	client, err = forge.New(host, forge.TokenForHost(host, opts.credentialEnv), nil, kind)
 	if err != nil {
-		return err
+		return nil, "", "", "", err
 	}
-
-	return tendChange(cmd, client, opts, branch, repoOwner, repoName)
+	return client, branch, repoOwner, repoName, nil
 }
 
 // tendChange is runTend's forge-facing half, split out (mirroring

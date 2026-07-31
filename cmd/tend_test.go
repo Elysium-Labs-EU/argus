@@ -20,6 +20,86 @@ func TestRunTendRequiresWorktree(t *testing.T) {
 	}
 }
 
+// tendTargetOpts builds a tendOpts with the ownership-lease defaults
+// resolveOwnerStaleAfter expects a real `argus tend` invocation to already
+// carry (see newTendCmd's --owner-stale-after flag default) — a test
+// constructing tendOpts by hand bypasses cobra's flag defaults entirely, so
+// this fills in the same default explicitly rather than leaving it at
+// time.Duration's zero value, which Stale() would read as "always stale."
+func tendTargetOpts(worktree string) *tendOpts {
+	return &tendOpts{
+		worktree: worktree,
+		owner:    ownerFlags{ownerStaleAfter: ownership.DefaultStaleAfter},
+	}
+}
+
+func TestResolveTendTargetHappyPath(t *testing.T) {
+	wt := gitRepo(t,
+		[]string{"checkout", "-q", "-b", "feat-x"},
+		[]string{"remote", "add", "origin", "git@github.com:acme/widget.git"},
+	)
+	cmd, _ := newTendTestCmd(t)
+	client, branch, owner, repo, err := resolveTendTarget(cmd, tendTargetOpts(wt))
+	if err != nil {
+		t.Fatalf("resolveTendTarget: %v", err)
+	}
+	if branch != "feat-x" || owner != "acme" || repo != "widget" {
+		t.Errorf("branch/owner/repo = %q/%q/%q, want feat-x/acme/widget", branch, owner, repo)
+	}
+	if client.Host() != "github.com" {
+		t.Errorf("client.Host() = %q, want github.com", client.Host())
+	}
+}
+
+func TestResolveTendTargetNoOriginRemoteErrors(t *testing.T) {
+	wt := gitRepo(t, []string{"checkout", "-q", "-b", "feat-x"}) // no `remote add origin`
+	cmd, _ := newTendTestCmd(t)
+	if _, _, _, _, err := resolveTendTarget(cmd, tendTargetOpts(wt)); err == nil {
+		t.Error("want an error when the worktree has no origin remote")
+	}
+}
+
+func TestResolveTendTargetBadForgeKindErrors(t *testing.T) {
+	wt := gitRepo(t,
+		[]string{"checkout", "-q", "-b", "feat-x"},
+		[]string{"remote", "add", "origin", "git@github.com:acme/widget.git"},
+	)
+	cmd, _ := newTendTestCmd(t)
+	opts := tendTargetOpts(wt)
+	opts.forgeKind = "bogus"
+	opts.forgeKindExplicit = true
+	if _, _, _, _, err := resolveTendTarget(cmd, opts); err == nil {
+		t.Error("want an error for an unrecognized --forge value")
+	}
+}
+
+func TestResolveTendTargetUnsupportedHostErrors(t *testing.T) {
+	wt := gitRepo(t,
+		[]string{"checkout", "-q", "-b", "feat-x"},
+		[]string{"remote", "add", "origin", "https://git.company.internal/acme/widget.git"},
+	)
+	cmd, _ := newTendTestCmd(t)
+	if _, _, _, _, err := resolveTendTarget(cmd, tendTargetOpts(wt)); err == nil {
+		t.Error("want an error for a self-hosted host outside the auto-detected allowlist with no --forge override")
+	}
+}
+
+func TestResolveTendTargetOwnershipConflictErrors(t *testing.T) {
+	wt := gitRepo(t,
+		[]string{"checkout", "-q", "-b", "feat-x"},
+		[]string{"remote", "add", "origin", "git@github.com:acme/widget.git"},
+	)
+	if err := ownership.Spawn(wt, "sess-1", "host-a (pid 1)", time.Now()); err != nil {
+		t.Fatalf("ownership.Spawn: %v", err)
+	}
+	cmd, _ := newTendTestCmd(t)
+	opts := tendTargetOpts(wt)
+	opts.owner.owner = "sess-2"
+	if _, _, _, _, err := resolveTendTarget(cmd, opts); err == nil {
+		t.Error("want an error when a different, still-fresh owner lease already holds this worktree")
+	}
+}
+
 // newTendTestCmd builds a bare cobra.Command wired the way cmd.Execute()
 // would for tendChange's tests: a context (tendChange reads cmd.Context())
 // and an output buffer to assert against.
