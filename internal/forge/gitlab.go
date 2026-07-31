@@ -75,6 +75,14 @@ func (g *gitlab) FindPR(ctx context.Context, owner, repo, branch string) (PR, bo
 	return PR{HTMLURL: mr.WebURL, State: mr.State, Number: mr.IID, MergedAt: mr.MergedAt}, true, nil
 }
 
+// PRChecks is not implemented for GitLab yet (see the Forge interface doc);
+// GitLab's own pipeline-status API has a different shape than GitHub's
+// check-runs and needs its own mapping, deliberately out of scope for this
+// first, GitHub-only slice.
+func (g *gitlab) PRChecks(_ context.Context, _, _ string, _ int) ([]Check, error) {
+	return nil, fmt.Errorf("PRChecks is not implemented for GitLab yet")
+}
+
 func (g *gitlab) FetchIssue(ctx context.Context, owner, repo string, number int) (Issue, error) {
 	url := fmt.Sprintf("%s/projects/%s/issues/%d", g.base, projectID(owner, repo), number)
 	body, err := g.do(ctx, http.MethodGet, url, nil)

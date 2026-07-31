@@ -118,3 +118,17 @@ func TestGitLabOpenPRSurfacesAPIMessage(t *testing.T) {
 		t.Errorf("want surfaced API message, got %v", err)
 	}
 }
+
+// TestGitLabPRChecksRefusesUnimplemented guards the deliberate MVP scope cut:
+// PRChecks is GitHub-only for now, and GitLab must refuse clearly rather than
+// silently return no checks (which a poller would misread as "not started
+// yet" forever).
+func TestGitLabPRChecksRefusesUnimplemented(t *testing.T) {
+	f, err := New("gitlab.com", "t", nil, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := f.PRChecks(context.Background(), "o", "r", 1); err == nil {
+		t.Fatal("want an error for GitLab, got nil")
+	}
+}

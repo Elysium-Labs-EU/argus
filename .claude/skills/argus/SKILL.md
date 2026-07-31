@@ -37,6 +37,7 @@ covers it is how a stale verdict or an unenforced instruction reaches a PR.
 | Check whether `ship` will succeed right now | `argus ship --worktree <path> --issue <N> --dry-run` |
 | Ship for real | `argus ship --worktree <path> --issue <N>` |
 | Hand off a worktree after a sibling PR merged first | `argus rebase --worktree <path> --base main` |
+| Poll a shipped PR's CI checks to a terminal state (GitHub only) | `argus tend --worktree <path> --dry-run` |
 | See escalation rate / token cost | `argus stats` |
 | Check/fix the Bash allowlist argus itself needs | `argus config check --write` |
 | Set up a repo's own base branch/allow list/brief note (see `docs/repo-config.md`) | `argus init` |
@@ -559,6 +560,27 @@ Prune also closes the herdr pane it spawned for that worktree — and the worksp
 too, if that pane was the only one left in it — so a cleaned worktree doesn't leave
 an orphaned empty pane/workspace behind. Best-effort: a herdr-side failure here is
 printed as a warning, not a reason to leave the worktree itself uncleaned.
+
+## 7. Post-ship CI polling
+
+Once `ship` opens a PR, `tend` polls its head commit's checks to a terminal state
+instead of you watching the forge UI — re-stamping the worktree's ownership lease
+heartbeat on every tick the same way `supervise`'s own watch loop does:
+
+```bash
+argus tend --worktree <path> --dry-run   # confirm the resolved PR and poll plan first
+argus tend --worktree <path>
+```
+
+It reports merge-ready (every check passed), failed (naming the first check that
+didn't), or an error if `--timeout` elapses or it's interrupted first. **GitHub
+only for now** — GitLab and Gitea/Forgejo refuse with a clear error rather than a
+silent no-op. It does no dispatch of any kind: fixing a failing check is still on you.
+
+It reads GitHub's Checks API (check-runs) only — a PR whose only CI posts through
+the legacy Commit Status API instead never shows up here, so it can look
+falsely idle. Confirm the repo's CI actually reports via check-runs (GitHub
+Actions and most modern integrations do) before trusting a `tend` result.
 
 ## Inspect / update the binary
 

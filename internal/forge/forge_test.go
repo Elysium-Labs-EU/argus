@@ -2,6 +2,8 @@ package forge
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -137,6 +139,181 @@ func TestOpenPRSurfacesAPIMessage(t *testing.T) {
 	_, err = f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r"})
 	if err == nil || !strings.Contains(err.Error(), "branch already exists") {
 		t.Errorf("want surfaced API message, got %v", err)
+	}
+}
+
+// sequencedHTTP replies with one canned response per call, in order, letting
+// a test drive a client that issues more than one request per method call
+// (PRChecks fetches the PR for its head sha, then the check-runs for that
+// sha). A call past the end of replies repeats the last one.
+func sequencedHTTP(t *testing.T, replies []string, code int) *http.Client {
+	t.Helper()
+	call := 0
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		i := call
+		if i >= len(replies) {
+			i = len(replies) - 1
+		}
+		call++
+		return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(replies[i])), Header: make(http.Header)}, nil
+	})}
+}
+
+func TestGitHubPRChecksMergeReadyWhenAllSucceed(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head":{"sha":"deadbeef"}}`,
+		`{"check_runs":[
+			{"name":"build","status":"completed","conclusion":"success","html_url":"https://github.com/o/r/runs/1"},
+			{"name":"lint","status":"completed","conclusion":"neutral"}
+		]}`,
+	}, 200)
+	f, err := New("github.com", "ght", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 7)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("checks = %+v, want 2", checks)
+	}
+	for _, c := range checks {
+		if !c.Terminal() || c.Failed() {
+			t.Errorf("check %+v: want Terminal()=true Failed()=false", c)
+		}
+	}
+	if checks[0].LogURL != "https://github.com/o/r/runs/1" {
+		t.Errorf("LogURL = %q, want the html_url", checks[0].LogURL)
+	}
+}
+
+func TestGitHubPRChecksNamesFailingCheck(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head":{"sha":"deadbeef"}}`,
+		`{"check_runs":[
+			{"name":"build","status":"completed","conclusion":"success"},
+			{"name":"test","status":"completed","conclusion":"failure","details_url":"https://github.com/o/r/runs/2"}
+		]}`,
+	}, 200)
+	f, err := New("github.com", "ght", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 7)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	var failing []Check
+	for _, c := range checks {
+		if c.Failed() {
+			failing = append(failing, c)
+		}
+	}
+	if len(failing) != 1 || failing[0].Name != "test" {
+		t.Fatalf("failing checks = %+v, want just %q", failing, "test")
+	}
+	if failing[0].LogURL != "https://github.com/o/r/runs/2" {
+		t.Errorf("LogURL = %q, want the details_url fallback", failing[0].LogURL)
+	}
+}
+
+func TestGitHubPRChecksInFlightIsNotTerminal(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head":{"sha":"deadbeef"}}`,
+		`{"check_runs":[{"name":"build","status":"in_progress"}]}`,
+	}, 200)
+	f, err := New("github.com", "ght", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 7)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != 1 || checks[0].Terminal() {
+		t.Errorf("checks = %+v, want one non-terminal check", checks)
+	}
+}
+
+// TestGitHubPRChecksPaginatesBeyondFirstPage pins a rework-round fix: a page
+// exactly as long as checksPerPage must not be mistaken for the last page —
+// evaluateChecks (cmd/tend.go) would otherwise call a PR merge-ready while a
+// failing check sitting on page 2 (e.g. a matrix build with >100 jobs) was
+// never fetched at all.
+func TestGitHubPRChecksPaginatesBeyondFirstPage(t *testing.T) {
+	page1Runs := make([]map[string]string, checksPerPage)
+	for i := range page1Runs {
+		page1Runs[i] = map[string]string{"name": fmt.Sprintf("job-%d", i), "status": "completed", "conclusion": "success"}
+	}
+	page1Body, err := json.Marshal(map[string]any{"check_runs": page1Runs})
+	if err != nil {
+		t.Fatalf("marshaling page 1 fixture: %v", err)
+	}
+	page2Body, err := json.Marshal(map[string]any{"check_runs": []map[string]string{
+		{"name": "job-page-2-failing", "status": "completed", "conclusion": "failure"},
+	}})
+	if err != nil {
+		t.Fatalf("marshaling page 2 fixture: %v", err)
+	}
+
+	replies := []string{`{"head":{"sha":"deadbeef"}}`, string(page1Body), string(page2Body)}
+	var gotURLs []string
+	call := 0
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotURLs = append(gotURLs, r.URL.String())
+		i := call
+		if i >= len(replies) {
+			i = len(replies) - 1
+		}
+		call++
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(replies[i])), Header: make(http.Header)}, nil
+	})}
+
+	f, err := New("github.com", "ght", hc, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 7)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != checksPerPage+1 {
+		t.Fatalf("checks = %d, want %d (a full first page plus one on page 2)", len(checks), checksPerPage+1)
+	}
+	var failing *Check
+	for i := range checks {
+		if checks[i].Name == "job-page-2-failing" {
+			failing = &checks[i]
+		}
+	}
+	if failing == nil {
+		t.Fatal("want the page-2-only check present in the result")
+	}
+	if !failing.Failed() {
+		t.Errorf("job-page-2-failing: Failed() = false, want true")
+	}
+
+	if len(gotURLs) != 3 {
+		t.Fatalf("requests made = %d, want 3 (PR lookup + 2 check-run pages), got %v", len(gotURLs), gotURLs)
+	}
+	if !strings.Contains(gotURLs[1], "page=1") || !strings.Contains(gotURLs[2], "page=2") {
+		t.Errorf("want the page param to increment across requests, got %v", gotURLs)
+	}
+}
+
+// TestGiteaPRChecksRefusesUnimplementedHost guards the deliberate MVP scope
+// cut: PRChecks is GitHub-only for now, and a Gitea/Forgejo-shaped host
+// (sharing the rest type) must refuse clearly rather than send a request
+// shaped for an endpoint it doesn't have.
+func TestGiteaPRChecksRefusesUnimplementedHost(t *testing.T) {
+	f, err := New("codeberg.org", "secret", nil, KindAuto)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.PRChecks(context.Background(), "o", "r", 7)
+	if err == nil {
+		t.Fatal("want an error for a Gitea/Forgejo-shaped host, got nil")
 	}
 }
 

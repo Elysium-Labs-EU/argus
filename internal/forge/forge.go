@@ -58,6 +58,42 @@ type Issue struct {
 	Number int    `json:"number"`
 }
 
+// Check is one CI check on a PR's head commit. State/Conclusion follow
+// GitHub's own check-run vocabulary verbatim (its "completed"/"in_progress"
+// states, its "success"/"failure"/"neutral"/... conclusions, spelling and
+// all) since GitHub is PRChecks's only implemented shape so far; a later
+// Gitea/GitLab implementation must map its own states onto this same
+// vocabulary rather than growing check-specific fields here.
+type Check struct {
+	Name       string
+	State      string
+	Conclusion string
+	// LogURL points at the check's own results page (a GitHub Actions run,
+	// say) for a human or worker to open directly rather than re-deriving it
+	// from the check's name.
+	LogURL string
+}
+
+// Terminal reports whether the check has reached a final state and won't
+// change again without a fresh run.
+func (c Check) Terminal() bool { return c.State == "completed" }
+
+// Failed reports whether a terminal check did not pass. "neutral" and
+// "skipped" are non-blocking conclusions in GitHub's own model (a check that
+// opted out of pass/fail), so they count as passing rather than failing.
+// false for a check that hasn't reached Terminal yet.
+func (c Check) Failed() bool {
+	if !c.Terminal() {
+		return false
+	}
+	switch c.Conclusion {
+	case "success", "neutral", "skipped":
+		return false
+	default:
+		return true
+	}
+}
+
 // Forge is a git host argus can ship to and read issues from.
 type Forge interface {
 	OpenPR(ctx context.Context, req *PRRequest) (PR, error)
@@ -68,6 +104,12 @@ type Forge interface {
 	// from before this lookup existed. found is false (with no error) when no
 	// PR was ever opened for branch.
 	FindPR(ctx context.Context, owner, repo, branch string) (pr PR, found bool, err error)
+	// PRChecks returns every check-run reported against the PR's head commit
+	// via GitHub's Checks API — not the legacy Commit Status API some older
+	// CI integrations post to instead, which this does not read. Implemented
+	// for GitHub only so far; other hosts return a clear "not implemented"
+	// error rather than a wrong-shaped guess.
+	PRChecks(ctx context.Context, owner, repo string, number int) ([]Check, error)
 	Host() string
 }
 
@@ -115,7 +157,7 @@ func New(host, token string, hc *http.Client, kind Kind) (Forge, error) {
 		return &rest{
 			host: host, base: "https://api.github.com",
 			authScheme: "Bearer", accept: "application/vnd.github+json",
-			http: hc, token: token,
+			http: hc, token: token, checksAPI: true,
 		}, nil
 	case "gitlab.com":
 		return &gitlab{host: host, base: "https://gitlab.com/api/v4", http: hc, token: token}, nil
@@ -148,6 +190,11 @@ type rest struct {
 	authScheme string
 	accept     string
 	token      string
+	// checksAPI is true only for the github.com construction: GitHub's
+	// check-runs endpoint has no equivalent implemented here yet for the
+	// Gitea/Forgejo shape this same type also serves, so PRChecks must
+	// distinguish the two rather than send a request Gitea would 404 on.
+	checksAPI bool
 }
 
 func (r *rest) Host() string { return r.host }
@@ -199,6 +246,80 @@ func (r *rest) FindPR(ctx context.Context, owner, repo, branch string) (PR, bool
 		}
 	}
 	return PR{}, false, nil
+}
+
+// checksPerPage is the page size PRChecks requests from GitHub's check-runs
+// endpoint — the API's own maximum, so a full listing takes as few round
+// trips as possible.
+const checksPerPage = 100
+
+// PRChecks fetches the PR's head SHA, then every check run reported against
+// it via GitHub's Checks API (check-runs) — paginated, since a matrix build
+// can report more check runs than fit on one page and a caller polling for
+// merge-ready must see all of them, not just whatever page 1 happened to
+// hold. It does not query the legacy Commit Status API
+// (GET .../commits/{sha}/status) some older CI integrations still post to
+// instead of check-runs; a PR whose only checks come through that path
+// reports zero checks here rather than being covered — deliberately out of
+// scope for this first slice. Gitea/Forgejo has no check-runs equivalent
+// implemented here yet (see checksAPI), so a caller against that shape gets a
+// clear refusal instead of a request the host would just 404.
+func (r *rest) PRChecks(ctx context.Context, owner, repo string, number int) ([]Check, error) {
+	if !r.checksAPI {
+		return nil, fmt.Errorf("PRChecks is only implemented for GitHub; %s does not support it yet", r.host)
+	}
+	prURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", r.base, owner, repo, number)
+	body, err := r.do(ctx, http.MethodGet, prURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	var pr struct {
+		Head struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if uerr := json.Unmarshal(body, &pr); uerr != nil {
+		return nil, fmt.Errorf("decoding pull request response: %w", uerr)
+	}
+	if pr.Head.SHA == "" {
+		return nil, fmt.Errorf("pull request %d has no head sha", number)
+	}
+
+	var checks []Check
+	for page := 1; ; page++ {
+		checksURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=%d&page=%d",
+			r.base, owner, repo, pr.Head.SHA, checksPerPage, page)
+		body, err := r.do(ctx, http.MethodGet, checksURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		var resp struct {
+			CheckRuns []struct {
+				Name       string `json:"name"`
+				Status     string `json:"status"`
+				Conclusion string `json:"conclusion"`
+				HTMLURL    string `json:"html_url"`
+				DetailsURL string `json:"details_url"`
+			} `json:"check_runs"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("decoding check runs response: %w", err)
+		}
+		for _, cr := range resp.CheckRuns {
+			logURL := cr.HTMLURL
+			if logURL == "" {
+				logURL = cr.DetailsURL
+			}
+			checks = append(checks, Check{Name: cr.Name, State: cr.Status, Conclusion: cr.Conclusion, LogURL: logURL})
+		}
+		// A page shorter than requested is necessarily the last one — GitHub
+		// never pads a page out, so this is enough to know when to stop
+		// without relying on the response's own total_count.
+		if len(resp.CheckRuns) < checksPerPage {
+			break
+		}
+	}
+	return checks, nil
 }
 
 func (r *rest) FetchIssue(ctx context.Context, owner, repo string, number int) (Issue, error) {
