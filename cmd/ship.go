@@ -67,11 +67,11 @@ owner/name and branch are derived from the worktree unless overridden.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&worktree, "worktree", "", "worktree to ship")
-	cmd.Flags().StringVar(&base, "base", "main", "PR base branch")
+	bindWorktreeFlag(cmd, &worktree, "worktree to ship")
+	bindBaseFlag(cmd, &base, "main", "PR base branch")
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number this change closes")
 	cmd.Flags().StringVar(&title, "title", "", "PR title (default derived from the branch/issue)")
-	cmd.Flags().StringVar(&repo, "repo", "", "owner/name override (default: parsed from the worktree's origin remote)")
+	bindRepoFlag(cmd, &repo, "owner/name override (default: parsed from the worktree's origin remote)")
 	cmd.Flags().BoolVar(&force, "force", false, "ship even without an approving argus verdict (skips the gate/review check)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be committed and opened, without doing it")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)

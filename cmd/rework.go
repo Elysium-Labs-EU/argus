@@ -88,8 +88,8 @@ outcome instead of retrying forever.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&worktree, "worktree", "", "worktree whose worker to re-dispatch")
-	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref to diff against for the gate/review")
+	bindWorktreeFlag(cmd, &worktree, "worktree whose worker to re-dispatch")
+	bindBaseFlag(cmd, &base, "origin/main", "base ref to diff against for the gate/review")
 	cmd.Flags().StringVar(&task, "task", "", "task/issue the change addresses (default: the worker's last reported task, else the branch name)")
 	cmd.Flags().StringArrayVar(&findings, "findings", nil, "a finding to hand the worker for round 1 (default: the worktree's last recorded request-changes verdict); repeat the flag for multiple findings. Unlike a CSV flag, each value is taken verbatim, so a finding's own commas and quotes are never split or rejected")
 	cmd.Flags().StringVar(&findingsFile, "findings-file", "", "path to a file with one finding per line, appended after --findings; unlike --findings this is not even split into separate values per flag, so a multi-sentence brief with punctuation survives untouched on its line")
@@ -102,7 +102,7 @@ outcome instead of retrying forever.`,
 	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
-	cmd.Flags().StringVar(&verifyCmd, "verify-cmd", "", "review gate: shell command re-run in the worktree once the reworked worker reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
+	bindVerifyCmdFlag(cmd, &verifyCmd, "review gate: shell command re-run in the worktree once the reworked worker reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml verify_command wins, then this default")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan without dispatching a worker")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front the rework worker's API traffic with the credential proxy; it inherits the host's real ANTHROPIC_API_KEY")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
