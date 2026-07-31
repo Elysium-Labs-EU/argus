@@ -67,8 +67,8 @@ conflict resolution itself needs the worker.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&worktree, "worktree", "", "worktree whose branch to rebase")
-	cmd.Flags().StringVar(&base, "base", "main", "base branch to rebase onto")
+	bindWorktreeFlag(cmd, &worktree, "worktree whose branch to rebase")
+	bindBaseFlag(cmd, &base, "main", "base branch to rebase onto")
 	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in the worker pane")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "status poll cadence")
 	cmd.Flags().BoolVar(&force, "force", false, "dispatch a rebase even if no conflict is detected")

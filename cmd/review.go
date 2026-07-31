@@ -40,8 +40,8 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&worktree, "worktree", "", "worktree whose diff to review")
-	cmd.Flags().StringVar(&base, "base", "origin/main", "base ref to diff against")
+	bindWorktreeFlag(cmd, &worktree, "worktree whose diff to review")
+	bindBaseFlag(cmd, &base, "origin/main", "base ref to diff against")
 	cmd.Flags().StringVar(&task, "task", "", "task/issue the change addresses (context for the reviewer)")
 	cmd.Flags().StringSliceVar(&reasons, "reasons", nil, "why this needs review (context for the reviewer)")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
