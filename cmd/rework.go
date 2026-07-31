@@ -190,50 +190,72 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 	opts.worktree = abs
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
-	if oerr := enforceOwnership(ctx, out, opts.worktree, opts.owner, time.Now()); oerr != nil {
-		return oerr
-	}
-	if opts.maxRounds <= 0 {
-		opts.maxRounds = supervisor.DefaultMaxReworkRounds
-	}
 
-	findings, err := startingFindings(opts.worktree, opts.findings)
-	if err != nil {
+	branch, task, findings, done, err := prepareReworkRun(ctx, out, opts)
+	if err != nil || done {
 		return err
-	}
-	if findings == nil {
-		_, _ = fmt.Fprintf(out, "%s %s already has an approving argus verdict — nothing to rework\n", ui.LabelSuccess.Render("✓"), opts.worktree)
-		return nil
-	}
-
-	branch, err := supervisor.CurrentBranch(ctx, opts.worktree)
-	if err != nil {
-		return err
-	}
-	task := opts.task
-	if task == "" {
-		task = taskFor(opts.worktree, branch)
-	}
-
-	if opts.dryRun {
-		renderReworkPlan(out, opts, branch, findings)
-		return nil
 	}
 
 	cfg, repoRoot, budget, err := buildReworkConfig(ctx, out, opts, reviewer, logger)
 	if err != nil {
 		return err
 	}
+	return runReworkLoop(ctx, out, logger, client, cfg, repoRoot, branch, task, findings, budget, opts)
+}
 
+// prepareReworkRun resolves everything runRework needs before it can start
+// dispatching rounds — ownership, --max-rounds' own default, round 1's
+// findings, and the branch/task the brief will name — split out of runRework
+// so these sequential guard clauses don't inflate its own complexity. done
+// means runRework should return (err, which may be nil) without ever
+// entering the round loop: either the worktree already has an approving
+// verdict (findings == nil, nothing to rework) or --dry-run already printed
+// the plan.
+func prepareReworkRun(ctx context.Context, out io.Writer, opts *reworkOpts) (branch, task string, findings []string, done bool, err error) {
+	if oerr := enforceOwnership(ctx, out, opts.worktree, opts.owner, time.Now()); oerr != nil {
+		return "", "", nil, true, oerr
+	}
+	if opts.maxRounds <= 0 {
+		opts.maxRounds = supervisor.DefaultMaxReworkRounds
+	}
+
+	findings, err = startingFindings(opts.worktree, opts.findings)
+	if err != nil {
+		return "", "", nil, true, err
+	}
+	if findings == nil {
+		_, _ = fmt.Fprintf(out, "%s %s already has an approving argus verdict — nothing to rework\n", ui.LabelSuccess.Render("✓"), opts.worktree)
+		return "", "", nil, true, nil
+	}
+
+	branch, err = supervisor.CurrentBranch(ctx, opts.worktree)
+	if err != nil {
+		return "", "", nil, true, err
+	}
+	task = opts.task
+	if task == "" {
+		task = taskFor(opts.worktree, branch)
+	}
+
+	if opts.dryRun {
+		renderReworkPlan(out, opts, branch, findings)
+		return "", "", nil, true, nil
+	}
+	return branch, task, findings, false, nil
+}
+
+// runReworkLoop is runRework's dispatch-and-judge loop, split out so its own
+// per-round branching doesn't inflate runRework's complexity. budget is the
+// resolved cumulative restart budget (see resolveMaxReworkBudget); <=0 means
+// no budget is configured.
+func runReworkLoop(ctx context.Context, out io.Writer, logger *eventlog.Logger, client herdr.Client, cfg *supervisor.Config, repoRoot, branch, task string, findings []string, budget int, opts *reworkOpts) error {
 	for round := 1; round <= opts.maxRounds; round++ {
-		if budget > 0 {
-			state, serr := protocol.LoadReworkState(opts.worktree)
-			if serr != nil {
-				return serr
-			}
-			if state.RoundsAttempted >= budget {
-				return escalateReworkBudgetExceeded(out, opts.worktree, findings, state.RoundsAttempted, budget)
-			}
+		exceeded, berr := checkReworkBudget(out, opts.worktree, findings, budget)
+		if berr != nil {
+			return berr
+		}
+		if exceeded {
+			return nil
 		}
 		outcome, rerr := runReworkRound(ctx, out, logger, client, cfg, repoRoot, branch, task, findings, round, opts)
 		if rerr != nil {
@@ -248,6 +270,25 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 		findings = outcome.findings
 	}
 	return nil
+}
+
+// checkReworkBudget reports whether worktree has already reached its
+// cumulative restart budget, escalating (persisting the distinct
+// rework-budget-exceeded verdict) and returning exceeded=true if so — split
+// out of runRework's own loop so this branch doesn't inflate runRework's
+// cyclomatic complexity. budget<=0 means no budget is configured.
+func checkReworkBudget(out io.Writer, worktree string, findings []string, budget int) (exceeded bool, err error) {
+	if budget <= 0 {
+		return false, nil
+	}
+	state, err := protocol.LoadReworkState(worktree)
+	if err != nil {
+		return false, err
+	}
+	if state.RoundsAttempted < budget {
+		return false, nil
+	}
+	return true, escalateReworkBudgetExceeded(out, worktree, findings, state.RoundsAttempted, budget)
 }
 
 // recordReworkAttempt increments and persists the worktree's cumulative
