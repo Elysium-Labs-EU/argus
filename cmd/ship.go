@@ -39,6 +39,7 @@ func newShipCmd() *cobra.Command {
 		jiraTransition      string
 		jiraAssignee        string
 		forgeKind           string
+		statusPageURL       string
 		titlePrefixTemplate string
 		owner               string
 		forceForeignOwner   bool
@@ -68,6 +69,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 				issue: issue, force: force, dryRun: dryRun, credentialEnv: overrides,
 				jiraIssue: jiraIssue, jiraTransition: jiraTransition, jiraAssignee: jiraAssignee,
 				forgeKind: forgeKind, forgeKindExplicit: cmd.Flags().Changed("forge"),
+				statusPageURL: statusPageURL, statusPageURLExplicit: cmd.Flags().Changed("status-page-url"),
 				titlePrefixTemplate: titlePrefixTemplate, titlePrefixTemplateExplicit: cmd.Flags().Changed("title-prefix-template"),
 				owner: ownerFlags{
 					owner: owner, forceForeignOwner: forceForeignOwner,
@@ -90,6 +92,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 	cmd.Flags().StringVar(&jiraTransition, "jira-transition", "", "with --jira-issue: transition name or ID to move the issue to (e.g. \"In Review\"); no transition is made if unset")
 	cmd.Flags().StringVar(&jiraAssignee, "jira-assignee", "", "with --jira-issue: Jira accountID to assign the issue to; not reassigned if unset")
 	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
+	cmd.Flags().StringVar(&statusPageURL, "status-page-url", "", "status page to point at when a forge request or push fails in a host-shaped way (see internal/svcstatus); needed for a self-hosted host, which has no built-in entry. Without this flag, this repo's .argus/config.yml status_page key wins, then svcstatus's built-in map (github.com/gitlab.com/codeberg.org only)")
 	cmd.Flags().StringVar(&titlePrefixTemplate, "title-prefix-template", "", "required PR/commit title prefix template, e.g. \"TICKET-{issue}: \" ({issue} becomes --jira-issue's key, else \"#<--issue>\", else empty); mechanically prepended to whatever title ship ends up using if missing. Without this flag, this repo's .argus/config.yml title_prefix_template key wins, then no enforcement")
 	cmd.Flags().StringVar(&owner, "owner", "", ownerFlagHelp)
 	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
@@ -105,6 +108,7 @@ var shipCmd = newShipCmd()
 type shipArgs struct {
 	credentialEnv               map[string]string
 	forgeKind                   string
+	statusPageURL               string
 	shipVerifyCmd               string
 	title                       string
 	repo                        string
@@ -121,6 +125,7 @@ type shipArgs struct {
 	titlePrefixTemplateExplicit bool
 	shipVerifyCmdExplicit       bool
 	forgeKindExplicit           bool
+	statusPageURLExplicit       bool
 	baseIsDefault               bool
 }
 
@@ -186,10 +191,11 @@ func resolveShipContext(ctx context.Context, out io.Writer, a *shipArgs) (*shipC
 	if err != nil {
 		return nil, err
 	}
+	a.statusPageURL = resolveStatusPageURLValue(a.statusPageURLExplicit, a.statusPageURL, statusPageConfigDefault(ctx, out, a.worktree))
 	// Validated with no token so this also runs (and can fail) under --dry-run:
 	// a clean dry-run plan previously proved nothing about whether the real API
 	// call would even hit the right forge shape for the host.
-	if _, verr := forge.New(host, "", nil, kind); verr != nil {
+	if _, verr := forge.New(host, "", nil, kind, a.statusPageURL); verr != nil {
 		return nil, verr
 	}
 	return &shipContext{branch: branch, host: host, owner: owner, name: name, kind: kind}, nil
@@ -231,7 +237,7 @@ func runShip(cmd *cobra.Command, a *shipArgs) error {
 			Hint: "set the token env var for this host (e.g. CODEBERG_TOKEN, GITHUB_TOKEN, or GITLAB_TOKEN), or run `gh auth login` / `glab auth login`",
 		}
 	}
-	f, ferr := forge.New(sc.host, token, nil, sc.kind)
+	f, ferr := forge.New(sc.host, token, nil, sc.kind, a.statusPageURL)
 	if ferr != nil {
 		return ferr
 	}
@@ -274,7 +280,7 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 		// A push can just as easily fail for local reasons (a rejected pre-push
 		// hook, a non-fast-forward) as for the host being down, so this is only a
 		// hint, not a claim.
-		return fmt.Errorf("%w%s", perr, svcstatus.Note(target.host))
+		return fmt.Errorf("%w%s", perr, svcstatus.Note(target.host, a.statusPageURL))
 	}
 
 	// CommitAll/Push above are safe no-ops on a retry (nothing to commit, branch
@@ -503,6 +509,37 @@ func forgeConfigDefault(ctx context.Context, out io.Writer, worktree string) str
 	}
 	warnDeprecatedConfigKeys(out, &rc)
 	return rc.Forge
+}
+
+// statusPageConfigDefault reads worktree's repo .argus/config.yml status_page
+// key, best-effort like forgeConfigDefault: a worktree outside any repo, or
+// with no config file, simply has no default to offer.
+func statusPageConfigDefault(ctx context.Context, out io.Writer, worktree string) string {
+	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
+	if err != nil {
+		return ""
+	}
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		return ""
+	}
+	warnDeprecatedConfigKeys(out, &rc)
+	return rc.StatusPage
+}
+
+// resolveStatusPageURLValue applies --status-page-url > this repo's
+// .argus/config.yml status_page key > the flag's own default (""), the same
+// explicit-flag-wins precedence resolveForgeKindValue uses for --forge.
+// explicit is true only when --status-page-url was actually passed on the
+// command line.
+func resolveStatusPageURLValue(explicit bool, flagValue, configValue string) string {
+	if explicit {
+		return flagValue
+	}
+	if configValue != "" {
+		return configValue
+	}
+	return flagValue
 }
 
 // titlePrefixTemplateConfigDefault reads worktree's repo .argus/config.yml

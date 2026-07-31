@@ -11,7 +11,7 @@ import (
 func TestGitLabOpenPR(t *testing.T) {
 	hc := fakeHTTP(t, "https://gitlab.com/api/v4/projects/o%2Fr/merge_requests", "",
 		`{"iid":9,"web_url":"https://gitlab.com/o/r/-/merge_requests/9","state":"opened"}`, 201)
-	f, err := New("gitlab.com", "secret", hc, KindAuto)
+	f, err := New("gitlab.com", "secret", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestGitLabOpenPRUsesPrivateTokenHeader(t *testing.T) {
 		reply := `{"iid":1,"web_url":"https://gitlab.com/o/r/-/merge_requests/1","state":"opened"}`
 		return &http.Response{StatusCode: 201, Body: io.NopCloser(strings.NewReader(reply)), Header: make(http.Header)}, nil
 	})}
-	f, err := New("gitlab.com", "glpat-secret", hc, KindAuto)
+	f, err := New("gitlab.com", "glpat-secret", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestGitLabOpenPRUsesPrivateTokenHeader(t *testing.T) {
 
 func TestGitLabFetchIssue(t *testing.T) {
 	hc := fakeHTTP(t, "/projects/o%2Fr/issues/42", "", `{"iid":42,"title":"Bug","description":"it breaks"}`, 200)
-	f, err := New("gitlab.com", "", hc, KindAuto)
+	f, err := New("gitlab.com", "", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestGitLabFetchIssue(t *testing.T) {
 func TestGitLabFindPRUsesSourceBranchFilter(t *testing.T) {
 	hc := fakeHTTP(t, "source_branch=feat-x", "",
 		`[{"iid":9,"web_url":"https://gitlab.com/o/r/-/merge_requests/9","state":"merged","merged_at":"2026-01-01T00:00:00Z"}]`, 200)
-	f, err := New("gitlab.com", "secret", hc, KindAuto)
+	f, err := New("gitlab.com", "secret", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestGitLabFindPRUsesSourceBranchFilter(t *testing.T) {
 
 func TestGitLabFindPRNotFound(t *testing.T) {
 	hc := fakeHTTP(t, "", "", `[]`, 200)
-	f, err := New("gitlab.com", "secret", hc, KindAuto)
+	f, err := New("gitlab.com", "secret", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestGitLabFindPRNotFound(t *testing.T) {
 func TestNewKindGitLabBuildsSelfHostedBase(t *testing.T) {
 	hc := fakeHTTP(t, "https://gitlab.corp.example.com/api/v4/projects/o%2Fr/merge_requests", "",
 		`{"iid":1,"web_url":"https://gitlab.corp.example.com/o/r/-/merge_requests/1","state":"opened"}`, 201)
-	f, err := New("gitlab.corp.example.com", "secret", hc, KindGitLab)
+	f, err := New("gitlab.corp.example.com", "secret", hc, KindGitLab, "")
 	if err != nil {
 		t.Fatalf("New with KindGitLab: %v", err)
 	}
@@ -107,9 +107,28 @@ func TestNewKindGitLabBuildsSelfHostedBase(t *testing.T) {
 	}
 }
 
+// TestGitLabDoAppendsConfiguredStatusPageForSelfHostedHost pins issue #300
+// for the GitLab-shaped client: a self-hosted GitLab host has no entry in
+// svcstatus's built-in map, so a 5xx needs New's statusPageURL override to
+// get any hint at all.
+func TestGitLabDoAppendsConfiguredStatusPageForSelfHostedHost(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"internal error"}`, 502)
+	f, err := New("gitlab.corp.example.com", "secret", hc, KindGitLab, "https://status.corp.example.com")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r", Title: "t", Head: "b", Base: "main"})
+	if err == nil {
+		t.Fatal("want an error for a 502 response")
+	}
+	if !strings.Contains(err.Error(), "https://status.corp.example.com") {
+		t.Errorf("OpenPR error = %q, want it to mention the configured status page", err.Error())
+	}
+}
+
 func TestGitLabOpenPRSurfacesAPIMessage(t *testing.T) {
 	hc := fakeHTTP(t, "", "", `{"message":"409 Branch already exists"}`, 409)
-	f, err := New("gitlab.com", "t", hc, KindAuto)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -124,7 +143,7 @@ func TestGitLabOpenPRSurfacesAPIMessage(t *testing.T) {
 // silently return no checks (which a poller would misread as "not started
 // yet" forever).
 func TestGitLabPRChecksRefusesUnimplemented(t *testing.T) {
-	f, err := New("gitlab.com", "t", nil, KindAuto)
+	f, err := New("gitlab.com", "t", nil, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

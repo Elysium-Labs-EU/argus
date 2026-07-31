@@ -570,6 +570,47 @@ func TestRunShipExplicitForgeFlagOverridesRepoConfig(t *testing.T) {
 	}
 }
 
+// TestResolveShipContextUsesRepoConfigStatusPageDefault pins issue #300: a
+// self-hosted host with no built-in svcstatus entry still gets a status-page
+// override from the repo's .argus/config.yml status_page key.
+func TestResolveShipContextUsesRepoConfigStatusPageDefault(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{Forge: "gitea", StatusPage: "https://status.example.com"}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+
+	var buf bytes.Buffer
+	a := &shipArgs{worktree: wt, base: "main", force: true}
+	if _, err := resolveShipContext(context.Background(), &buf, a); err != nil {
+		t.Fatalf("resolveShipContext: %v", err)
+	}
+	if a.statusPageURL != "https://status.example.com" {
+		t.Errorf("statusPageURL = %q, want the repo config's status_page default", a.statusPageURL)
+	}
+}
+
+// TestResolveShipContextExplicitStatusPageURLOverridesRepoConfig pins the
+// explicit-flag-wins half: --status-page-url always wins over the repo's
+// configured default, the same precedence --forge already has.
+func TestResolveShipContextExplicitStatusPageURLOverridesRepoConfig(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{Forge: "gitea", StatusPage: "https://status.example.com"}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+
+	var buf bytes.Buffer
+	a := &shipArgs{
+		worktree: wt, base: "main", force: true,
+		statusPageURL: "https://status.override.com", statusPageURLExplicit: true,
+	}
+	if _, err := resolveShipContext(context.Background(), &buf, a); err != nil {
+		t.Fatalf("resolveShipContext: %v", err)
+	}
+	if a.statusPageURL != "https://status.override.com" {
+		t.Errorf("statusPageURL = %q, want the explicit --status-page-url flag to win", a.statusPageURL)
+	}
+}
+
 // TestRunShipDryRunCorrectsWorkerTitleAgainstRepoConfigTemplate is the
 // end-to-end regression pin for issue #303: a repo's .argus/config.yml
 // title_prefix_template is applied mechanically to a worker-reported title

@@ -51,6 +51,17 @@ All keys are optional; a missing file is equivalent to an empty one.
   an explicit `--forge` flag, then this key, then auto-detect (which still
   refuses any host outside the three-host allowlist). `argus init` prompts
   for it, or pass `--forge` to `argus init` directly.
+- **`status_page`** — the status page `internal/svcstatus` appends to a
+  forge-request or push failure that looks host-shaped (5xx, or no response
+  at all — see `svcstatus.WorthMentioning`), so an operator hitting one knows
+  where to check instead of guessing it's an argus bug. svcstatus's built-in
+  map only knows the three hosted forges' own status pages
+  (`githubstatus.com`, `status.gitlab.com`, `status.codeberg.org`); a
+  self-hosted host has no built-in entry and needs this key (or Atlassian
+  Statuspage/Cachet/a static page an operator runs alongside it) to get any
+  hint at all. Precedence: an explicit `--status-page-url` flag on `ship`,
+  then this key, then svcstatus's built-in map (empty for an unrecognized
+  host either way). `argus init` prompts for it.
 - **`allow`** — the base Claude Code permission-allow list `supervise` writes
   into each worker's generated `settings.local.json`, replacing (not just
   appending to) argus's old hardcoded Go/make list. A CLI `--allow` still

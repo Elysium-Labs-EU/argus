@@ -111,6 +111,7 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.TitlePrefixTemplate = promptLine(reader, out, "title_prefix_template (required PR/commit title prefix, e.g. \"TICKET-{issue}: \")", suggested.TitlePrefixTemplate)
 		cfg.ReviewNote = promptLine(reader, out, "review_note (free-text note appended to the reviewer's prompt)", suggested.ReviewNote)
 		cfg.Forge = promptLine(reader, out, "forge (self-hosted only: gitlab|gitea, blank for hosted/auto-detected)", suggested.Forge)
+		cfg.StatusPage = promptLine(reader, out, "status_page (status page URL to point at on a host-shaped forge/push failure; blank to use svcstatus's built-in map, which only covers github.com/gitlab.com/codeberg.org)", suggested.StatusPage)
 	}
 
 	if err := repoconfig.Save(path, &cfg); err != nil {

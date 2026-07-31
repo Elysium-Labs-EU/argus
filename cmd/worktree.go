@@ -151,7 +151,7 @@ func resolvePruneForgeClient(ctx context.Context, out io.Writer, repoRoot string
 	if err != nil {
 		return "", "", nil, err
 	}
-	client, err = forge.New(host, forge.TokenForHost(host, a.credentialEnv), nil, kind)
+	client, err = forge.New(host, forge.TokenForHost(host, a.credentialEnv), nil, kind, rc.StatusPage)
 	if err != nil {
 		return "", "", nil, err
 	}

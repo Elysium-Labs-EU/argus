@@ -127,7 +127,10 @@ const (
 )
 
 // New returns a Forge for host, authenticated with token. hc may be nil for a
-// default client with a timeout.
+// default client with a timeout. statusPageURL, when non-empty, is passed to
+// every svcstatus.Note call this Forge makes, overriding svcstatus's built-in
+// status-page map — see repoconfig.Config.StatusPage, the usual source of
+// this value for a self-hosted host with no built-in entry.
 //
 // With kind == KindAuto, only the three hosted forges argus knows the exact
 // API shape of without being told — github.com, gitlab.com, codeberg.org —
@@ -138,15 +141,15 @@ const (
 // "gitlab" in the name is — and guessing wrong sends the wrong shaped API
 // request instead of a clean error. Pass kind == KindGitLab or KindGitea to
 // say which shape a non-hosted host actually is and bypass that refusal.
-func New(host, token string, hc *http.Client, kind Kind) (Forge, error) {
+func New(host, token string, hc *http.Client, kind Kind, statusPageURL string) (Forge, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 20 * time.Second}
 	}
 	switch kind {
 	case KindGitLab:
-		return &gitlab{host: host, base: "https://" + host + "/api/v4", http: hc, token: token}, nil
+		return &gitlab{host: host, base: "https://" + host + "/api/v4", http: hc, token: token, statusPageURL: statusPageURL}, nil
 	case KindGitea:
-		return newGiteaShaped(host, hc, token), nil
+		return newGiteaShaped(host, hc, token, statusPageURL), nil
 	case KindAuto:
 		// fall through to the allowlist below
 	default:
@@ -157,12 +160,12 @@ func New(host, token string, hc *http.Client, kind Kind) (Forge, error) {
 		return &rest{
 			host: host, base: "https://api.github.com",
 			authScheme: "Bearer", accept: "application/vnd.github+json",
-			http: hc, token: token, checksAPI: true,
+			http: hc, token: token, checksAPI: true, statusPageURL: statusPageURL,
 		}, nil
 	case "gitlab.com":
-		return &gitlab{host: host, base: "https://gitlab.com/api/v4", http: hc, token: token}, nil
+		return &gitlab{host: host, base: "https://gitlab.com/api/v4", http: hc, token: token, statusPageURL: statusPageURL}, nil
 	case "codeberg.org":
-		return newGiteaShaped(host, hc, token), nil
+		return newGiteaShaped(host, hc, token, statusPageURL), nil
 	default:
 		return nil, fmt.Errorf(
 			"host %q is not one of the auto-detected forges (github.com, gitlab.com, codeberg.org); "+
@@ -174,11 +177,11 @@ func New(host, token string, hc *http.Client, kind Kind) (Forge, error) {
 
 // newGiteaShaped builds the shared REST client for Gitea/Forgejo, whose API
 // lives at https://<host>/api/v1.
-func newGiteaShaped(host string, hc *http.Client, token string) Forge {
+func newGiteaShaped(host string, hc *http.Client, token, statusPageURL string) Forge {
 	return &rest{
 		host: host, base: "https://" + host + "/api/v1",
 		authScheme: "token", accept: "application/json",
-		http: hc, token: token,
+		http: hc, token: token, statusPageURL: statusPageURL,
 	}
 }
 
@@ -195,6 +198,9 @@ type rest struct {
 	// Gitea/Forgejo shape this same type also serves, so PRChecks must
 	// distinguish the two rather than send a request Gitea would 404 on.
 	checksAPI bool
+	// statusPageURL overrides svcstatus's built-in status-page map for host;
+	// see New's own doc comment.
+	statusPageURL string
 }
 
 func (r *rest) Host() string { return r.host }
@@ -358,10 +364,10 @@ func (r *rest) do(ctx context.Context, method, url string, payload []byte) ([]by
 	if err != nil {
 		// A network-level failure is exactly when the host may be down; point at
 		// its status page so the operator isn't left guessing it's an argus bug.
-		return nil, fmt.Errorf("%s %s: %w%s", method, url, err, svcstatus.Note(r.host))
+		return nil, fmt.Errorf("%s %s: %w%s", method, url, err, svcstatus.Note(r.host, r.statusPageURL))
 	}
 	if resp == nil {
-		return nil, fmt.Errorf("%s %s: nil response%s", method, url, svcstatus.Note(r.host))
+		return nil, fmt.Errorf("%s %s: nil response%s", method, url, svcstatus.Note(r.host, r.statusPageURL))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -369,7 +375,7 @@ func (r *rest) do(ctx context.Context, method, url string, payload []byte) ([]by
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := apiMessage(body)
 		if svcstatus.WorthMentioning(resp.StatusCode) {
-			msg += svcstatus.Note(r.host)
+			msg += svcstatus.Note(r.host, r.statusPageURL)
 		}
 		return nil, fmt.Errorf("%s returned %s: %s", r.host, resp.Status, msg)
 	}

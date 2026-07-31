@@ -373,11 +373,13 @@ func TestRunInitPromptsSetEveryConfigField(t *testing.T) {
 	// allow, brief_note, max_diff_lines, rework_budget, proof_required_paths,
 	// always_review_paths, worker_placement, ship_verify_command,
 	// gate_verify_command, worktree_bootstrap_command, review_effort, launcher,
-	// worktree_dir, owner_stale_after, title_prefix_template, review_note, forge.
+	// worktree_dir, owner_stale_after, title_prefix_template, review_note, forge,
+	// status_page.
 	answers := []string{
 		"develop", "Bash(task *)", "custom brief", "250", "6", "terraform", "auth",
 		"tab", "make lint", "make ci", "cp ../.env .env", "high",
 		"codex --full-auto", "..", "45m", "TICKET-{issue}: ", "pay attention", "gitlab",
+		"https://status.example.com",
 	}
 	cmd.SetIn(strings.NewReader(strings.Join(answers, "\n") + "\n"))
 	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {

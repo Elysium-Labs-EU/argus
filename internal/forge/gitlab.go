@@ -23,6 +23,9 @@ type gitlab struct {
 	host  string
 	base  string
 	token string
+	// statusPageURL overrides svcstatus's built-in status-page map for host;
+	// see New's own doc comment.
+	statusPageURL string
 }
 
 func (g *gitlab) Host() string { return g.host }
@@ -128,10 +131,10 @@ func (g *gitlab) do(ctx context.Context, method, reqURL string, payload []byte) 
 	if err != nil {
 		// A network-level failure is exactly when the host may be down; point at
 		// its status page so the operator isn't left guessing it's an argus bug.
-		return nil, fmt.Errorf("%s %s: %w%s", method, reqURL, err, svcstatus.Note(g.host))
+		return nil, fmt.Errorf("%s %s: %w%s", method, reqURL, err, svcstatus.Note(g.host, g.statusPageURL))
 	}
 	if resp == nil {
-		return nil, fmt.Errorf("%s %s: nil response%s", method, reqURL, svcstatus.Note(g.host))
+		return nil, fmt.Errorf("%s %s: nil response%s", method, reqURL, svcstatus.Note(g.host, g.statusPageURL))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -139,7 +142,7 @@ func (g *gitlab) do(ctx context.Context, method, reqURL string, payload []byte) 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := apiMessage(body)
 		if svcstatus.WorthMentioning(resp.StatusCode) {
-			msg += svcstatus.Note(g.host)
+			msg += svcstatus.Note(g.host, g.statusPageURL)
 		}
 		return nil, fmt.Errorf("%s returned %s: %s", g.host, resp.Status, msg)
 	}
