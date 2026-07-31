@@ -103,51 +103,25 @@ var shipCmd = newShipCmd()
 // shipArgs holds newShipCmd's flag values so runShip can be tested directly,
 // without going through cobra flag parsing.
 type shipArgs struct {
-	credentialEnv  map[string]string
-	worktree       string
-	base           string
-	title          string
-	repo           string
-	jiraIssue      string
-	jiraTransition string
-	jiraAssignee   string
-	forgeKind      string
-	// titlePrefixTemplate starts as the raw --title-prefix-template flag
-	// value and is overwritten in resolveShipContext with the fully
-	// resolved value (flag > repo config > "" no-enforcement), the same
-	// mutate-in-place pattern shipArgs.base uses for baseIsDefault. Callers
-	// building shipArgs directly for a test that wants to skip config
-	// resolution can just set this to the final value they want enforced.
-	titlePrefixTemplate string
-	owner               ownerFlags
-	shipVerifyCmd       string
-	issue               int
-	force               bool
-	dryRun              bool
-	// titlePrefixTemplateExplicit is true only when --title-prefix-template
-	// was actually passed, the same explicit-flag-wins signal
-	// forgeKindExplicit gives --forge.
+	credentialEnv               map[string]string
+	forgeKind                   string
+	shipVerifyCmd               string
+	title                       string
+	repo                        string
+	jiraIssue                   string
+	jiraTransition              string
+	jiraAssignee                string
+	worktree                    string
+	base                        string
+	titlePrefixTemplate         string
+	owner                       ownerFlags
+	issue                       int
+	force                       bool
+	dryRun                      bool
 	titlePrefixTemplateExplicit bool
-	// shipVerifyCmdExplicit is true only when --ship-verify-command was
-	// actually passed, the same explicit-flag-wins signal
-	// forgeKindExplicit gives --forge.
-	shipVerifyCmdExplicit bool
-	// forgeKindExplicit is true only when --forge was actually passed
-	// (cmd.Flags().Changed("forge")): an operator-given flag always wins over
-	// this repo's .argus/config.yml forge key, the same explicit-flag-wins
-	// precedence baseIsDefault gives --base. Any caller building shipArgs
-	// directly (tests) leaves this false, which means "fall back to the
-	// repo's config, then auto-detect" — the pre-this-change behavior when no
-	// config key is set.
-	forgeKindExplicit bool
-	// baseIsDefault is true only when --base was left at its unset CLI
-	// default (cmd.Flags().Changed("base") == false): runShip then resolves
-	// the real base via supervisor.ResolveBase instead of trusting the
-	// flag's literal "main" default (see internal/repoconfig, issue
-	// #160/#161). Any caller building shipArgs directly (tests,
-	// shipChange's other callers) leaves this false, which means "trust
-	// base as given" — the pre-#161 behavior.
-	baseIsDefault bool
+	shipVerifyCmdExplicit       bool
+	forgeKindExplicit           bool
+	baseIsDefault               bool
 }
 
 // shipTarget is the forge/branch/PR identity runShip resolves before deciding

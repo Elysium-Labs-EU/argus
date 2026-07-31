@@ -106,6 +106,7 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		cfg.ReviewEffort = promptLine(reader, out, "review_effort (low|medium|high|xhigh|max)", suggested.ReviewEffort)
 		cfg.Launcher = promptLine(reader, out, "launcher (command started in each worker pane)", suggested.Launcher)
 		cfg.WorktreeDir = promptLine(reader, out, "worktree_dir (blank for <repo>/.claude/worktrees/<branch>; \"..\" for a sibling-of-repo layout)", suggested.WorktreeDir)
+		cfg.OwnerStaleAfter = promptLine(reader, out, "owner_stale_after (how long a worktree's owner-lease heartbeat may go quiet before a mismatched caller proceeds anyway, e.g. \"30m\"; blank for the built-in default)", suggested.OwnerStaleAfter)
 		cfg.TitlePrefixTemplate = promptLine(reader, out, "title_prefix_template (required PR/commit title prefix, e.g. \"TICKET-{issue}: \")", suggested.TitlePrefixTemplate)
 		cfg.ReviewNote = promptLine(reader, out, "review_note (free-text note appended to the reviewer's prompt)", suggested.ReviewNote)
 		cfg.Forge = promptLine(reader, out, "forge (self-hosted only: gitlab|gitea, blank for hosted/auto-detected)", suggested.Forge)

@@ -20,7 +20,7 @@ import (
 // place to record why, instead of that decision happening by omission.
 var initPromptExemptFields = map[string]string{}
 
-const wantConfigFieldCount = 17 // repoconfig.Config's current field count
+const wantConfigFieldCount = 18 // repoconfig.Config's current field count
 
 func writeMarker(t *testing.T, dir, name string) {
 	t.Helper()
@@ -279,9 +279,9 @@ func TestRunInitInteractivePromptWritesForge(t *testing.T) {
 	// base_branch, allow, brief_note, max_diff_lines, proof_required_paths,
 	// always_review_paths, worker_placement, ship_verify_command,
 	// gate_verify_command, worktree_bootstrap_command, review_effort, launcher,
-	// worktree_dir, title_prefix_template, review_note (all bare Enter, 15
-	// prompts), then forge.
-	cmd.SetIn(strings.NewReader("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ngitlab\n"))
+	// worktree_dir, owner_stale_after, title_prefix_template, review_note (all
+	// bare Enter, 16 prompts), then forge.
+	cmd.SetIn(strings.NewReader("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ngitlab\n"))
 
 	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
 		t.Fatalf("runInit: %v", err)
@@ -372,11 +372,11 @@ func TestRunInitPromptsSetEveryConfigField(t *testing.T) {
 	// allow, brief_note, max_diff_lines, proof_required_paths,
 	// always_review_paths, worker_placement, ship_verify_command,
 	// gate_verify_command, worktree_bootstrap_command, review_effort, launcher,
-	// worktree_dir, title_prefix_template, review_note, forge.
+	// worktree_dir, owner_stale_after, title_prefix_template, review_note, forge.
 	answers := []string{
 		"develop", "Bash(task *)", "custom brief", "250", "terraform", "auth",
 		"tab", "make lint", "make ci", "cp ../.env .env", "high",
-		"codex --full-auto", "..", "TICKET-{issue}: ", "pay attention", "gitlab",
+		"codex --full-auto", "..", "45m", "TICKET-{issue}: ", "pay attention", "gitlab",
 	}
 	cmd.SetIn(strings.NewReader(strings.Join(answers, "\n") + "\n"))
 	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
