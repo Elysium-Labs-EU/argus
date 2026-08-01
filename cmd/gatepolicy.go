@@ -29,8 +29,11 @@ type gateFlags struct {
 // for --base. rc is a pointer solely to avoid copying the struct at the call
 // site; rc.MaxDiffLines is itself a pointer because 0 is a legal, meaningful
 // value (disables the diff ceiling) that must stay distinguishable from "key
-// not present in config.yml".
-func resolveGatePolicy(f gateFlags, rc *repoconfig.Config) *supervisor.ReviewPolicy {
+// not present in config.yml". A negative MaxDiffLines from either source is
+// rejected here rather than left to compare falsely-true against every real
+// diff (diff line counts are never negative, so a negative ceiling would
+// silently escalate every diff instead of doing what its author intended).
+func resolveGatePolicy(f gateFlags, rc *repoconfig.Config) (*supervisor.ReviewPolicy, error) {
 	p := &supervisor.ReviewPolicy{
 		MaxDiffLines:       f.maxDiffLines,
 		ProofRequiredPaths: f.proofRequiredPaths,
@@ -45,7 +48,10 @@ func resolveGatePolicy(f gateFlags, rc *repoconfig.Config) *supervisor.ReviewPol
 	if !f.alwaysReviewExplicit && len(rc.AlwaysReviewPaths) > 0 {
 		p.AlwaysReviewPaths = rc.AlwaysReviewPaths
 	}
-	return p
+	if p.MaxDiffLines < 0 {
+		return nil, &ui.UserError{Err: fmt.Errorf("max-diff-lines: %d is negative; use 0 to disable the diff ceiling, not a negative number", p.MaxDiffLines)}
+	}
+	return p, nil
 }
 
 // resolveMaxReworkBudget applies an explicit --max-rework-budget flag over

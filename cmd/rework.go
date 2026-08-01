@@ -116,7 +116,7 @@ outcome instead of retrying forever.`,
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for the review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
 	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
-	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
+	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables, negative is rejected. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
 	cmd.Flags().StringVar(&gateVerifyCmd, "gate-verify-command", "", "review gate: shell command re-run in the worktree once the reworked worker reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing. Without this flag, this repo's .argus/config.yml gate_verify_command wins, then this default")
@@ -367,10 +367,14 @@ func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, rev
 	if reviewer == nil {
 		reviewer = newReviewer(opts.reviewModel, resolveReviewEffort(opts.reviewEffortExplicit, opts.reviewEffort, &rc), logger)
 	}
+	policy, err := resolveGatePolicy(opts.gate, &rc)
+	if err != nil {
+		return nil, "", 0, err
+	}
 	cfg := &supervisor.Config{
 		Now:               time.Now,
 		Log:               logger,
-		Policy:            resolveGatePolicy(opts.gate, &rc),
+		Policy:            policy,
 		Home:              home,
 		Base:              opts.base,
 		Reviewer:          reviewer,
