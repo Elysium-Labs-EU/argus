@@ -1,6 +1,10 @@
 package protocol
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestLifecycleRoundTrips(t *testing.T) {
 	wt := t.TempDir()
@@ -30,5 +34,31 @@ func TestLoadLifecycleMissingIsNotFound(t *testing.T) {
 	}
 	if found {
 		t.Error("found should be false when no lifecycle was written")
+	}
+}
+
+func TestWriteLifecycleUnwritableDir(t *testing.T) {
+	wt := t.TempDir()
+	if err := os.Chmod(wt, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(wt, 0o700) }) // let t.TempDir's own cleanup remove it
+
+	if err := WriteLifecycle(wt, &Lifecycle{State: LifecycleShipped}); err == nil {
+		t.Fatal("want error writing lifecycle under a read-only worktree, got nil")
+	}
+}
+
+func TestLoadLifecycleMalformedJSON(t *testing.T) {
+	wt := t.TempDir()
+	path := LifecyclePath(wt)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, _, err := LoadLifecycle(wt); err == nil {
+		t.Fatal("want error decoding malformed lifecycle, got nil")
 	}
 }
