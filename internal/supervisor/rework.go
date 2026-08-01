@@ -98,8 +98,15 @@ type JudgeResult struct {
 // round's content hash identical while a genuinely new commit ships the fix —
 // gateVerdict only escalates when both the content hash AND HEAD are
 // unchanged, so a real commit is never mistaken for a no-op round.
-func JudgeOne(ctx context.Context, cfg *Config, plan *WorkerPlan, status *protocol.Status, paneID string, dispatchedAt time.Time, prior *protocol.Approval, priorContentHash, priorHeadSHA string) JudgeResult {
-	st := &workerState{plan: plan, paneID: paneID, started: dispatchedAt, status: *status, hasFile: true, priorContentHash: priorContentHash, priorHeadSHA: priorHeadSHA}
+//
+// priorStatus is the worker's own status.json as it stood at that same
+// pre-dispatch moment, or nil if it could not be read. Even when both hashes
+// above show no source-tree change, a round can still have addressed its
+// finding by correcting the report itself (e.g. narrowing an over-claimed
+// test run) — gateVerdict only hard-escalates a zero-delta round when the
+// self-report is also unchanged from priorStatus.
+func JudgeOne(ctx context.Context, cfg *Config, plan *WorkerPlan, status *protocol.Status, paneID string, dispatchedAt time.Time, prior *protocol.Approval, priorContentHash, priorHeadSHA string, priorStatus *protocol.Status) JudgeResult {
+	st := &workerState{plan: plan, paneID: paneID, started: dispatchedAt, status: *status, hasFile: true, priorContentHash: priorContentHash, priorHeadSHA: priorHeadSHA, priorStatus: priorStatus}
 	if prior != nil {
 		st.priorMeasured = prior.MeasuredDiff
 		st.priorMeasuredOK = true

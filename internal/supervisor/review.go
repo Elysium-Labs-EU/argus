@@ -265,9 +265,14 @@ func applyMeasuredChecks(v *Verdict, st *workerState, eff *protocol.Status) {
 	// before the round even started (e.g. a fix applied but never landed), which
 	// leaves ContentHash unchanged while a genuinely new HEAD commit ships it —
 	// git rev-parse HEAD moving to a distinct SHA is real, verifiable progress
-	// no content hash can see. So both signals must agree nothing happened
-	// before this hard-escalates.
-	if terminal && st.priorContentHash != "" && st.contentHash == st.priorContentHash && st.headSHA == st.priorHeadSHA {
+	// no content hash can see. Nor is it proof when the prior finding was about
+	// the worker's own report rather than the source tree (e.g. an over-claimed
+	// test run): st.priorStatus lets SelfReportEqual catch that the report
+	// itself changed even though nothing else did. All three signals — content,
+	// HEAD, and self-report — must agree nothing happened before this
+	// hard-escalates.
+	if terminal && st.priorContentHash != "" && st.contentHash == st.priorContentHash && st.headSHA == st.priorHeadSHA &&
+		(st.priorStatus == nil || protocol.SelfReportEqual(st.priorStatus, eff)) {
 		v.AutoApprove = false
 		reason := fmt.Sprintf("rework round reports phase %q but changed nothing since the state already found wanting — findings not addressed", eff.Phase)
 		v.Reasons = append(v.Reasons, reason)

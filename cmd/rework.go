@@ -392,10 +392,14 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	}
 	// Same snapshot-before-dispatch reasoning as prior above: status.json is
 	// also removed by InvalidateStatus before this round's dispatch, so the
-	// title on file before this round only exists to read right here.
+	// title — and the rest of the worker's prior self-report, snapshotted into
+	// priorStatus for JudgeOne's zero-delta check — only exist to read right
+	// here.
 	priorTitle := ""
+	var priorStatus *protocol.Status
 	if s, err := protocol.Load(protocol.StatusPath(opts.worktree)); err == nil {
 		priorTitle = s.Title
+		priorStatus = &s
 	}
 	// Captured now, before dispatchReworkRound touches the worktree: a digest of
 	// the state the prior verdict already rejected. JudgeOne compares this round's
@@ -426,7 +430,7 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	}
 
 	plan := &supervisor.WorkerPlan{Worker: supervisor.Worker{Task: task, Branch: branch, Worktree: opts.worktree}}
-	result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt, prior, priorContentHash, priorHeadSHA)
+	result := supervisor.JudgeOne(ctx, cfg, plan, &status, paneID, dispatchedAt, prior, priorContentHash, priorHeadSHA, priorStatus)
 	approved := result.Gate.AutoApprove || (result.Review != nil && result.Review.Decision == "approve")
 	renderReworkRound(out, round, opts.maxRounds, &result, approved)
 

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -151,6 +152,24 @@ type Status struct {
 	Plan     []string  `json:"plan"`
 	Tests    []TestRun `json:"tests"`
 	DiffStat DiffStat  `json:"diff_stat"`
+}
+
+// SelfReportEqual reports whether two statuses' worker-authored report content
+// is identical: Title, RealWorldProof, DiffStat, FilesTouched, Plan, and
+// Tests — every field an `argus worker report` body actually sets. It
+// excludes UpdatedAt (changes on every write) and the fields argus itself
+// owns or carries forward rather than the worker (Phase, BlockedReason,
+// Question, Answer, Steers, Base, Task, Branch, PRURL), so a round whose only
+// real fix is to this content — e.g. narrowing an over-claimed Tests entry —
+// is still detected as having changed something, even when the source tree
+// and HEAD are byte-for-byte identical to before.
+func SelfReportEqual(a, b *Status) bool {
+	return a.Title == b.Title &&
+		a.RealWorldProof == b.RealWorldProof &&
+		a.DiffStat == b.DiffStat &&
+		slices.Equal(a.FilesTouched, b.FilesTouched) &&
+		slices.Equal(a.Plan, b.Plan) &&
+		slices.Equal(a.Tests, b.Tests)
 }
 
 // IsTerminal reports whether a phase is one argus stops waiting on. A worker is
