@@ -54,10 +54,7 @@ ship/rebase for the equivalent one-off override.`,
 				return err
 			}
 			if serr := cfg.Set(args[0], args[1]); serr != nil {
-				return &ui.UserError{
-					Err:  serr,
-					Hint: "supported keys: credential.<name>, e.g. credential.github.com",
-				}
+				return &ui.UserError{Err: serr}
 			}
 			if serr := config.Save(path, cfg); serr != nil {
 				return serr
