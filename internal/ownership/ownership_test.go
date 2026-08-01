@@ -2,6 +2,9 @@ package ownership
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -208,5 +211,116 @@ func TestEnforceMissingOwnerFileTreatedAsUnowned(t *testing.T) {
 	}
 	if notice != "" {
 		t.Errorf("notice = %q, want empty for a worktree with no recorded lease", notice)
+	}
+}
+
+func TestEnforcePropagatesLoadError(t *testing.T) {
+	wt := t.TempDir()
+	writeMalformedOwnerFile(t, wt)
+	notice, err := Enforce(wt, "sess-1", time.Now(), DefaultStaleAfter, false)
+	if err == nil {
+		t.Fatal("want Enforce to propagate a Load decode error")
+	}
+	if notice != "" {
+		t.Errorf("notice = %q, want empty when Load fails", notice)
+	}
+}
+
+func TestHeartbeatPropagatesLoadError(t *testing.T) {
+	wt := t.TempDir()
+	writeMalformedOwnerFile(t, wt)
+	if err := Heartbeat(wt, time.Now()); err == nil {
+		t.Fatal("want Heartbeat to propagate a Load decode error")
+	}
+}
+
+func TestDefaultOwnerLabelFormat(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown-host"
+	}
+	want := fmt.Sprintf("%s (pid %d)", host, os.Getpid())
+	if got := DefaultOwnerLabel(); got != want {
+		t.Errorf("DefaultOwnerLabel() = %q, want %q", got, want)
+	}
+}
+
+func TestWriteMkdirAllError(t *testing.T) {
+	wt := t.TempDir()
+	// A regular file at .claude blocks MkdirAll from creating .claude/argus beneath it.
+	if err := os.WriteFile(filepath.Join(wt, ".claude"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := Write(wt, &Owner{OwnerID: "sess-1"}); err == nil {
+		t.Fatal("want an error when .claude exists as a file blocking the owner dir")
+	}
+}
+
+func TestWriteUnwritableDirError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks")
+	}
+	wt := t.TempDir()
+	dir := filepath.Dir(Path(wt))
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o750) })
+	if err := Write(wt, &Owner{OwnerID: "sess-1"}); err == nil {
+		t.Fatal("want an error writing into a read-only owner lease dir")
+	}
+}
+
+func TestWriteRenameOntoDirectoryError(t *testing.T) {
+	wt := t.TempDir()
+	// Rename onto an existing directory fails, unlike renaming onto an existing file.
+	if err := os.MkdirAll(Path(wt), 0o750); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := Write(wt, &Owner{OwnerID: "sess-1"}); err == nil {
+		t.Fatal("want an error renaming the tmp file onto an existing directory")
+	}
+}
+
+func TestLoadUnreadableFileError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permission checks")
+	}
+	wt := t.TempDir()
+	if err := Spawn(wt, "sess-1", "host-a (pid 1)", time.Now()); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.Chmod(Path(wt), 0o000); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(Path(wt), 0o600) })
+	if _, _, err := Load(wt); err == nil {
+		t.Fatal("want an error reading a permission-denied owner.json")
+	}
+}
+
+func TestLoadMalformedJSONError(t *testing.T) {
+	wt := t.TempDir()
+	writeMalformedOwnerFile(t, wt)
+	_, found, err := Load(wt)
+	if err == nil {
+		t.Fatal("want a decode error for malformed owner.json")
+	}
+	if found {
+		t.Error("found should be false when decode fails")
+	}
+}
+
+func writeMalformedOwnerFile(t *testing.T, worktree string) {
+	t.Helper()
+	path := Path(worktree)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
 	}
 }
