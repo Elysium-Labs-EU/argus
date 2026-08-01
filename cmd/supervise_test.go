@@ -206,6 +206,28 @@ func TestFoldIssueSourcesSelfHostedForgeConfigUnblocks(t *testing.T) {
 	}
 }
 
+// TestFoldIssueSourcesSelfHostedNoTokenShowsForgeAmbiguityFirst pins the fix
+// for the error-ordering bug: an unrecognized self-hosted host with no token
+// configured must surface the ambiguous-host refusal (the actually-blocking
+// problem, fixable only with --forge), not the missing-token error — the
+// latter's implied remediation (set a token) would not have fixed anything.
+func TestFoldIssueSourcesSelfHostedNoTokenShowsForgeAmbiguityFirst(t *testing.T) {
+	t.Setenv("GIT_EXAMPLE_COM_TOKEN", "")
+	t.Setenv("FORGE_TOKEN", "")
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
+	in := &workerInput{repo: wt}
+	err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	if err == nil {
+		t.Fatal("want error: a self-hosted host with no --forge/config default should refuse")
+	}
+	if strings.Contains(err.Error(), "no API token") {
+		t.Errorf("missing-token error should not mask the forge-ambiguity error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not one of the auto-detected forges") {
+		t.Errorf("want forge-ambiguity error, got: %v", err)
+	}
+}
+
 func TestBuildWorkersDerivesRepoAndDefaults(t *testing.T) {
 	client := fakeClient()
 	workers, err := buildWorkers(context.Background(), client, &workerInput{

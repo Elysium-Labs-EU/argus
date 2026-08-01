@@ -1066,6 +1066,13 @@ func resolveForge(ctx context.Context, repoPath string, credentialOverrides map[
 	if err != nil {
 		return nil, "", "", err
 	}
+	// Validated with no token first, same as resolveShipContext: an
+	// unrecognized self-hosted host masked behind a missing-token error sends
+	// the wrong fix (get a token) when the actually-blocking problem is forge
+	// shape ambiguity (see forge.New).
+	if _, verr := forge.New(host, "", nil, kind, ""); verr != nil {
+		return nil, "", "", verr
+	}
 	token := forge.TokenForHost(host, credentialOverrides)
 	if token == "" {
 		return nil, "", "", &ui.UserError{
