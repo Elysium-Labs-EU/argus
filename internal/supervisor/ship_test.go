@@ -185,6 +185,48 @@ func TestRepoRootLinkedWorktreeReturnsMainRepo(t *testing.T) {
 	}
 }
 
+func TestVerifyLinkedWorktreeAcceptsLinkedWorktree(t *testing.T) {
+	main := t.TempDir()
+	run := func(dir string, args ...string) {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run(main, "init", "-q", "-b", "main")
+	run(main, "config", "user.email", "t@t")
+	run(main, "config", "user.name", "t")
+	run(main, "commit", "-q", "--allow-empty", "-m", "seed")
+	run(main, "branch", "feat-x")
+
+	linked := filepath.Join(t.TempDir(), "feat-x")
+	run(main, "worktree", "add", "-q", linked, "feat-x")
+
+	if err := VerifyLinkedWorktree(context.Background(), linked); err != nil {
+		t.Errorf("VerifyLinkedWorktree(%s) = %v, want nil for a real linked worktree", linked, err)
+	}
+}
+
+func TestVerifyLinkedWorktreeRejectsMainCheckout(t *testing.T) {
+	main := t.TempDir()
+	if out, err := exec.Command("git", "-C", main, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	err := VerifyLinkedWorktree(context.Background(), main)
+	if !errors.Is(err, ErrNotLinkedWorktree) {
+		t.Errorf("VerifyLinkedWorktree(%s) = %v, want ErrNotLinkedWorktree for the main checkout", main, err)
+	}
+}
+
+func TestVerifyLinkedWorktreeRejectsNonGitDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	err := VerifyLinkedWorktree(context.Background(), dir)
+	if !errors.Is(err, ErrNotLinkedWorktree) {
+		t.Errorf("VerifyLinkedWorktree(%s) = %v, want ErrNotLinkedWorktree for a non-git directory", dir, err)
+	}
+}
+
 func TestCommitAllControlPlaneOnlyIsNothingToCommit(t *testing.T) {
 	wt := t.TempDir()
 	run := func(args ...string) {

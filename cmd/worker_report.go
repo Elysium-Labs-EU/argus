@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
@@ -49,7 +50,9 @@ func newWorkerReportCmd() *cobra.Command {
 		Use:   "report <phase>",
 		Short: "Report a worker's status, gated by the legal phase-transition table",
 		Long: `Report replaces a worker writing status.json directly: it
-loads the worktree's current status, checks that <phase> is a legal move from
+first confirms the target is a real, linked git worktree — not a plain
+directory or the main repository checkout — then loads the worktree's
+current status, checks that <phase> is a legal move from
 that phase against the same table pollStatus enforces, and only if legal
 stamps the timestamp itself and persists the rest of the status body read from
 stdin (or --file). Neither a worker's own clock nor a worker's own
@@ -78,6 +81,12 @@ planning report already on file carried a non-empty plan array.`,
 			phase, err := parseReportablePhase(args[0])
 			if err != nil {
 				return err
+			}
+			if verifyErr := supervisor.VerifyLinkedWorktree(cmd.Context(), wt); verifyErr != nil {
+				return &ui.UserError{
+					Err:  verifyErr,
+					Hint: "`argus worker report` only runs against a worktree argus itself created with `git worktree add` — check you cd'd into the right pane",
+				}
 			}
 			body, err := readReportBody(cmd, file)
 			if err != nil {
