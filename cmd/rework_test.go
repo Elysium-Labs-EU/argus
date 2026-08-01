@@ -651,6 +651,66 @@ func TestRunReworkStopsImmediatelyWhenWorkerReportsBlocked(t *testing.T) {
 	}
 }
 
+// fakeReworkClientStuckPane is fakeReworkClient's spawn-a-fresh-worker path
+// (the worktree starts with no live pane) plus a "pane list" that always
+// reports agentStatus for reworkTestPaneID — used to drive WaitForStatus's
+// paneStuckTracker into escalating instead of the dispatched worker ever
+// writing status.json, mirroring TestDispatchRebaseWorkerHerdrStuckFailsFast.
+func fakeReworkClientStuckPane(agentStatus string) herdr.Client {
+	var mu sync.Mutex
+	var spawned bool
+	return herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "worktree":
+			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, reworkTestPaneID), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			mu.Lock()
+			live := spawned
+			mu.Unlock()
+			if !live {
+				return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+			}
+			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":%q}}}`, reworkTestPaneID, agentStatus), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			mu.Lock()
+			spawned = true
+			mu.Unlock()
+			return []byte(`{"result":{}}`), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "list":
+			return fmt.Appendf(nil, `{"result":{"panes":[{"pane_id":%q,"agent_status":%q}]}}`, reworkTestPaneID, agentStatus), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+}
+
+// TestRunReworkHerdrStuckFailsFast is the regression test for argus issue
+// #383: a worktree with no live pane falls back to spawning a fresh worker
+// (see dispatchIntoPane), and a launcher that wedges on an interactive
+// prompt herdr reports as "blocked" must fail fast with a clear error
+// instead of runRework hanging on WaitForStatus forever. A 3-minute interval
+// — comfortably over internal/supervisor's own herdrStuckThreshold (2
+// minutes) — makes WaitForStatus's very first tick (fired immediately, see
+// time.NewTimer(0)) already cross the threshold, so this resolves in
+// milliseconds of real time rather than actually waiting out the threshold.
+func TestRunReworkHerdrStuckFailsFast(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	cmd, _ := testCmd()
+	client := fakeReworkClientStuckPane("blocked")
+
+	err := runRework(cmd, client, &fakeReviewer{}, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "feat-x", maxRounds: 3, interval: 3 * time.Minute,
+		gate: gateFlags{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "agent_status") {
+		t.Fatalf("want a herdr-stuck escalation error, got %v", err)
+	}
+}
+
 // TestRestoreTitleAcrossRound covers restoreTitleAcrossRound directly: it
 // must persist the restored title to status.json on disk, not just correct
 // the in-memory struct, since ship reads the title back off disk in a wholly

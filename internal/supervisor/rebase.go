@@ -339,15 +339,16 @@ func isStale(path string, since time.Time) bool {
 }
 
 // WaitForStatus polls a worktree's status file until it reports a phase
-// written at or after since, reaches a terminal phase, or ctx is canceled,
-// returning the last such status read and whether one was seen. A status.json
-// whose file mtime is more than staleTolerance before since is a stale
-// leftover — from before this dispatch, or from a race with
-// InvalidateStatus — and is treated the same as no file at all, so a caller
-// can never mistake it for this dispatch's outcome. since should be no later
-// than the moment the worker was dispatched. It is the single-worker analog
-// of the supervise watch loop, for commands like rebase that dispatch one
-// worker.
+// written at or after since, reaches a terminal phase, ctx is canceled, or
+// herdr's own agent_status for paneID proves the worker will never write one
+// (see paneStuckTracker), returning the last such status read and whether one
+// was seen. A status.json whose file mtime is more than staleTolerance
+// before since is a stale leftover — from before this dispatch, or from a
+// race with InvalidateStatus — and is treated the same as no file at all, so
+// a caller can never mistake it for this dispatch's outcome. since should be
+// no later than the moment the worker was dispatched. It is the
+// single-worker analog of the supervise watch loop, for commands like rebase
+// and rework that dispatch one worker.
 //
 // A status.json with an empty Phase is also treated as not yet seen: a real
 // worker report always sets Phase, so an empty one can only be the
@@ -356,79 +357,129 @@ func isStale(path string, since time.Time) bool {
 // landing inside staleTolerance of since and so not caught by the mtime
 // check above.
 //
-// paneID, when non-empty, is cross-checked against herdr's own agent_status on
-// every tick the same way the full supervise loop's checkHerdrStuck does: a
-// pane herdr reports "blocked" or "done" can never itself write a fresh
-// status.json, so polling status.json alone leaves a caller silent for
-// however long it takes a human to notice and clear an unanswered prompt — a
-// repo `Ask` permission rule overriding a worker's auto mode for one command
-// (e.g. `Bash(git push:*)`) parks it there with no other signal short of
-// reading the pane by hand. out, if non-nil, gets one line the moment that
-// condition is first observed and again once it clears, rather than once per
-// tick, so a stuck worker is reported once, not spammed every interval.
-// client/paneID left zero disables the check — there's no pane to ask about
-// (unit tests, or an --attach --worktrees caller with no resolvable pane).
-func WaitForStatus(ctx context.Context, client herdr.Client, paneID, worktree string, interval time.Duration, since time.Time, out io.Writer) (protocol.Status, bool) {
+// The returned error is non-nil only once paneStuckTracker has escalated —
+// callers should treat that as a definitive failure distinct from a plain
+// "still waiting" ctx cancellation (err == nil, seen == false). client/paneID
+// left zero disables herdr cross-checking entirely and this can only return
+// via terminal status or ctx.Done() — there's no pane to ask about (unit
+// tests, or an --attach --worktrees caller with no resolvable pane).
+func WaitForStatus(ctx context.Context, client herdr.Client, paneID, worktree string, interval time.Duration, since time.Time, out io.Writer) (protocol.Status, bool, error) {
 	path := protocol.StatusPath(worktree)
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	var last protocol.Status
 	var hasFile bool
-	var stuck bool
+	var tracker paneStuckTracker
 	for {
 		select {
 		case <-ctx.Done():
-			return last, hasFile
+			return last, hasFile, nil
 		case <-timer.C:
 			if s, err := protocol.Load(path); err == nil && s.Phase != "" && !isStale(path, since) {
 				last = s
 				hasFile = true
 				if protocol.IsTerminal(s.Phase) {
-					return last, hasFile
+					return last, hasFile, nil
 				}
 			}
-			stuck = reportPaneStuck(ctx, client, paneID, out, stuck)
+			if err := tracker.check(ctx, client, paneID, out, hasFile, interval); err != nil {
+				return last, hasFile, err
+			}
 			timer.Reset(interval)
 		}
 	}
 }
 
-// reportPaneStuck cross-checks herdr's live agent_status for paneID and, on
-// the edge where herdrStuck's verdict changes from wasStuck, writes a one-line
-// notice to out naming why status.json isn't moving. It returns the new
-// stuck verdict for the caller to carry into its next tick. paneID == "" (no
-// pane to ask about) and a herdr transport error (which says nothing about
-// the worker's real state — surfacing it here would bury the one signal this
-// exists to raise) both leave wasStuck unchanged.
-func reportPaneStuck(ctx context.Context, client herdr.Client, paneID string, out io.Writer, wasStuck bool) bool {
+// paneStuckTracker is WaitForStatus's herdr-stuck detector: the single-worker
+// analog of the main supervise loop's checkHerdrStuck/workerState fields
+// (loop.go), minus the surrounding gate/review bookkeeping WaitForStatus has
+// no use for. It accumulates stuck time using the nominal tick duration
+// passed to check, exactly like checkHerdrStuck's own st.herdrStuckElapsed +=
+// tick, so tests can drive it to herdrStuckThreshold with synthetic tick
+// values instead of a real multi-minute wait.
+type paneStuckTracker struct {
+	elapsed  time.Duration
+	wasStuck bool
+	nudged   bool
+}
+
+// check cross-references herdr's live agent_status for paneID against hasFile
+// (whether status.json has been written at all this dispatch) using the same
+// herdrStuck/idleWithoutReport signals, herdrStuckThreshold, and one-shot
+// "done" nudge as checkHerdrStuck, printing the same one-line notice to out
+// on the stuck/recovered edge. It returns a non-nil error once the pane has
+// sat stuck for herdrStuckThreshold with no working recovery — a worker that
+// is never going to write status.json on its own — instead of leaving
+// WaitForStatus's caller polling forever with no signal at all. This is the
+// fix for the actual reported bug: a rework/rebase dispatch into a worktree
+// with no live agent falls back to spawning a fresh one (see
+// dispatchIntoPane), and a freshly spawned agent landing on an interactive
+// prompt herdr's blocked-detector doesn't recognize (e.g. a first-run MCP
+// server consent gate) read as merely "idle" — indistinguishable from
+// "hasn't started yet" — forever, with no herdrStuck("blocked"/"done") ever
+// firing to end the wait. paneID == "" and a herdr transport error (which
+// says nothing about the worker's real state) both leave the tracker
+// unchanged.
+func (t *paneStuckTracker) check(ctx context.Context, client herdr.Client, paneID string, out io.Writer, hasFile bool, tick time.Duration) error {
 	if paneID == "" {
-		return false
+		return nil
 	}
 	panes, err := client.PaneList(ctx)
 	if err != nil {
-		return wasStuck
+		return nil //nolint:nilerr // a herdr transport error says nothing about the worker's own state; must not itself count as evidence of being stuck
 	}
 	pane, found := findPane(panes, paneID)
-	stuck := found && herdrStuck(pane.AgentStatus)
-	if out != nil && stuck != wasStuck {
+	stuck := found && (herdrStuck(pane.AgentStatus) || idleWithoutReport(pane.AgentStatus, hasFile))
+	if out != nil && stuck != t.wasStuck {
 		if stuck {
 			_, _ = fmt.Fprintf(out, "%s %s\n", ui.LabelWarning.Render("○"), herdrBlockedMessage(pane.AgentStatus, paneID))
 		} else {
 			_, _ = fmt.Fprintf(out, "%s pane %s resumed\n", ui.LabelInfo.Render("i"), paneID)
 		}
 	}
-	return stuck
+	t.wasStuck = stuck
+	if !stuck {
+		t.elapsed = 0
+		t.nudged = false
+		return nil
+	}
+
+	t.elapsed += tick
+	if t.elapsed < herdrStuckThreshold {
+		return nil
+	}
+
+	if pane.AgentStatus == "done" && !t.nudged {
+		t.nudged = true
+		if perr := client.AgentPrompt(ctx, paneID, herdrNudgeMessage, herdrNudgeTimeout); perr == nil {
+			t.elapsed = 0
+			return nil
+		}
+	}
+
+	reason := "the worker may be stuck on an unanswered prompt or ended without ever writing a terminal status"
+	if !hasFile {
+		reason = "status.json has never been written at all — the worker is likely stuck on an interactive " +
+			"prompt herdr doesn't recognize as blocked (e.g. a first-run MCP server consent gate), or it " +
+			"crashed before its first turn completed"
+	}
+	return fmt.Errorf("herdr reports pane %s agent_status=%q for over %s with status.json still not at a terminal phase — %s",
+		paneID, pane.AgentStatus, herdrStuckThreshold, reason)
 }
 
 // herdrBlockedMessage renders herdr's externally-observed pane state into a
 // message distinguishing why the worker can't write status.json itself: still
 // running but parked on an unanswered prompt (most commonly a permission-rule
-// override interrupting auto mode) versus its process having already ended.
+// override interrupting auto mode), idling without ever having reported once
+// (most commonly an interactive prompt herdr's blocked-detector doesn't
+// recognize), or its process having already ended.
 func herdrBlockedMessage(agentStatus, paneID string) string {
 	switch agentStatus {
 	case "blocked":
 		return fmt.Sprintf("blocked: awaiting permission approval in pane %s", paneID)
-	default: // "done"
+	case "done":
 		return fmt.Sprintf("blocked: pane %s ended without writing a terminal status", paneID)
+	default: // "idle" via idleWithoutReport
+		return fmt.Sprintf("blocked: pane %s is idle but has never written a status — likely stuck on an interactive prompt herdr doesn't recognize (e.g. a first-run MCP server consent gate)", paneID)
 	}
 }

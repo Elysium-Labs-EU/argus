@@ -1721,14 +1721,15 @@ func TestCheckHerdrStuckSkipsWorkerWithNoPane(t *testing.T) {
 	}
 }
 
-// fakePaneListAndPromptRunner answers `pane list` like fakePaneListRunner,
+// fakePaneListAndPromptRunner answers `pane list` like fakePaneListRunner for
+// pane "w1:p1" — every caller's paneID/st.paneID agree on the same literal —
 // and additionally intercepts `agent prompt` calls: each one increments
 // *promptCalls and returns promptErr (nil for success). Any other command
 // gets an empty result.
-func fakePaneListAndPromptRunner(paneID string, agentStatus func() string, promptErr error, promptCalls *int) herdr.Runner {
+func fakePaneListAndPromptRunner(agentStatus func() string, promptErr error, promptCalls *int) herdr.Runner {
 	return func(_ context.Context, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "pane" && args[1] == "list" {
-			return []byte(`{"result":{"panes":[{"pane_id":"` + paneID + `","agent_status":"` + agentStatus() + `"}]}}`), nil
+			return []byte(`{"result":{"panes":[{"pane_id":"w1:p1","agent_status":"` + agentStatus() + `"}]}}`), nil
 		}
 		if len(args) >= 2 && args[0] == "agent" && args[1] == "prompt" {
 			*promptCalls++
@@ -1750,7 +1751,7 @@ func fakePaneListAndPromptRunner(paneID string, agentStatus func() string, promp
 // nudge.
 func TestCheckHerdrStuckNudgesDoneBeforeEscalating(t *testing.T) {
 	var promptCalls int
-	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "done" }, nil, &promptCalls))
+	client := herdr.NewWithRunner(fakePaneListAndPromptRunner(func() string { return "done" }, nil, &promptCalls))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
 	log := eventlog.New(io.Discard, "supervise", "run1", nil)
 
@@ -1794,7 +1795,7 @@ func TestCheckHerdrStuckNudgesDoneBeforeEscalating(t *testing.T) {
 // out another threshold window.
 func TestCheckHerdrStuckNudgeFailureEscalatesImmediately(t *testing.T) {
 	var promptCalls int
-	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "done" }, errors.New("boom"), &promptCalls))
+	client := herdr.NewWithRunner(fakePaneListAndPromptRunner(func() string { return "done" }, errors.New("boom"), &promptCalls))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
 	log := eventlog.New(io.Discard, "supervise", "run1", nil)
 
@@ -1815,7 +1816,7 @@ func TestCheckHerdrStuckNudgeFailureEscalatesImmediately(t *testing.T) {
 // escalate immediately without ever calling AgentPrompt.
 func TestCheckHerdrStuckBlockedNeverNudges(t *testing.T) {
 	var promptCalls int
-	client := herdr.NewWithRunner(fakePaneListAndPromptRunner("w1:p1", func() string { return "blocked" }, nil, &promptCalls))
+	client := herdr.NewWithRunner(fakePaneListAndPromptRunner(func() string { return "blocked" }, nil, &promptCalls))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
 	log := eventlog.New(io.Discard, "supervise", "run1", nil)
 
