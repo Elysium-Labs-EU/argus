@@ -40,9 +40,11 @@ func newRebaseCmd() *cobra.Command {
 		Short: "Dispatch a worker to rebase a conflicting branch onto its base",
 		Long: `Rebase handles the post-merge conflict handoff: when a sibling PR merges first
 and leaves a worktree's branch conflicting, argus fetches the base, confirms the
-conflict, and dispatches the worktree's own worker to rebase, resolve, re-verify,
-and force-push. argus does the deterministic parts (detect, dispatch, wait); the
-conflict resolution itself needs the worker.`,
+conflict, and dispatches the worktree's own worker to resolve and re-verify it.
+The worker leaves its resolution staged but uncommitted; argus commits it (using
+the worker's reported title) and force-pushes. argus does every deterministic
+part (detect, dispatch, wait, commit, push) — the worker never runs git commit
+or git push itself, only the conflict resolution needs its judgment.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			overrides, err := resolveCredentialOverrides(credentialEnv)
 			if err != nil {
@@ -216,15 +218,12 @@ func originUpToDate(ctx context.Context, worktree, branch string) (bool, error) 
 }
 
 // pushRebasedBranch force-pushes worktree's local HEAD to origin/branch and
-// confirms it actually landed before reporting success, rather than trusting
-// git's own exit code alone — a pre-push hook rejection surfaces as a
+// confirms it actually landed before reporting success (see
+// supervisor.PushAndVerify) — a pre-push hook rejection surfaces as a
 // non-zero exit here already, but this also catches any push that "succeeds"
 // without the ref actually moving.
 func pushRebasedBranch(ctx context.Context, out io.Writer, worktree, branch string) error {
-	if err := supervisor.ForcePushBranch(ctx, worktree, branch); err != nil {
-		return fmt.Errorf("pushing already-rebased %s to origin: %w", branch, err)
-	}
-	if err := supervisor.VerifyPushLanded(ctx, worktree, branch); err != nil {
+	if err := supervisor.PushAndVerify(ctx, worktree, branch); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "%s %s pushed to origin (was already rebased locally, no conflict)\n", ui.LabelSuccess.Render("✓"), branch)
@@ -285,13 +284,6 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	if werr := supervisor.WriteBrief(opts.worktree, supervisor.RebaseBrief(branch, opts.base)); werr != nil {
 		return werr
 	}
-	// Pre-authorizes the exact force-push RebaseBrief just instructed, so the
-	// worker's own Bash tool call for it never raises an interactive
-	// permission dialog — see EnsureRebasePushAllowed's doc for why this has
-	// to run before dispatch, not after.
-	if perr := supervisor.EnsureRebasePushAllowed(opts.worktree, branch); perr != nil {
-		return perr
-	}
 
 	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget()); err != nil {
 		return err
@@ -305,30 +297,51 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	}
 	logger.Action("rebase", branch, string(status.Phase), status.BlockedReason)
 
-	// A worker reporting awaiting_review/done only means it believes it
-	// resolved and pushed the rebase — its brief tells it to `git push
-	// --force-with-lease`, but nothing about a terminal status.json proves
-	// that push actually reached origin (a pre-push hook rejection the worker
-	// didn't check, or a run killed mid-push). Verify against the remote
-	// directly before ever printing "rebased and ready" — but only when the
-	// branch actually has commits beyond base to publish: a worktree whose
-	// worker never committed (uncommitted-diff-only, per its brief) or whose
-	// rebase fast-forwarded onto a sibling PR's identical change legitimately
-	// has nothing to push, and no origin ref is expected to exist yet.
+	// A worker reporting awaiting_review/done means it left its conflict
+	// resolution staged but uncommitted (see RebaseBrief) — the worker never
+	// runs git commit or git push itself, so commitRebaseResolution makes
+	// the one commit here (using the worker's own reported title) and
+	// PushAndVerify force-pushes it, confirming against the remote directly
+	// rather than trusting the push's exit code alone. committed is false
+	// only when there was nothing to commit: a forced dispatch against a
+	// branch already identical to base legitimately resolves to no change at
+	// all, and no push is needed.
 	if status.Phase == protocol.PhaseAwaitingReview || status.Phase == protocol.PhaseDone {
-		ahead, cerr := supervisor.CommitsAheadOfBase(ctx, opts.worktree, opts.base)
+		committed, cerr := commitRebaseResolution(ctx, opts.worktree, branch, opts.base, &status)
 		if cerr != nil {
 			return cerr
 		}
-		if ahead == 0 {
-			logger.Action("rebase", branch, "no-push-needed", "zero commits beyond origin/"+opts.base+" after rebase")
-		} else if verr := supervisor.VerifyPushLanded(ctx, opts.worktree, branch); verr != nil {
-			logger.Action("rebase", branch, "push-not-landed", verr.Error())
-			return fmt.Errorf("%s worker reported %s but the force-push did not reach origin: %w", branch, status.Phase, verr)
+		if !committed {
+			logger.Action("rebase", branch, "no-push-needed", "nothing to commit after conflict resolution")
+		} else if perr := supervisor.PushAndVerify(ctx, opts.worktree, branch); perr != nil {
+			logger.Action("rebase", branch, "push-not-landed", perr.Error())
+			return fmt.Errorf("committed %s's rebase resolution but the push failed: %w", branch, perr)
 		}
 	}
 	renderRebaseOutcome(out, branch, &status)
 	return nil
+}
+
+// commitRebaseResolution commits a rebase worker's resolved-but-uncommitted
+// diff using its self-reported title as the message (falling back to a
+// generic one if the worker left it empty), mirroring ship's own use of the
+// worker's title to build its commit (see resolvePRTitle) — the worker
+// itself never runs git commit for a rebase dispatch (see RebaseBrief), so
+// this is the only place that commit is made. committed is false when
+// CommitAll finds nothing staged: a forced dispatch against a branch already
+// identical to base legitimately resolves to no change at all.
+func commitRebaseResolution(ctx context.Context, worktree, branch, base string, status *protocol.Status) (committed bool, err error) {
+	msg := status.Title
+	if msg == "" {
+		msg = fmt.Sprintf("rebase: resolve %s conflict with origin/%s", branch, base)
+	}
+	if cerr := supervisor.CommitAll(ctx, worktree, msg); cerr != nil {
+		if errors.Is(cerr, supervisor.ErrNothingToCommit) {
+			return false, nil
+		}
+		return false, cerr
+	}
+	return true, nil
 }
 
 // dispatchTarget carries the knobs dispatchIntoPane needs to get a worker

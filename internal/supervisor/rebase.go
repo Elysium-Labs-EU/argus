@@ -7,14 +7,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
-	"github.com/Elysium-Labs-EU/argus/internal/permission"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -209,6 +207,19 @@ func ForcePushBranch(ctx context.Context, worktree, branch string) error {
 	return err
 }
 
+// PushAndVerify force-pushes worktree's HEAD to origin/branch and confirms it
+// actually landed, wrapping ForcePushBranch's own error with branch context.
+// It is the shared tail of every rebase-shaped push — the no-conflict direct
+// push and the worker-dispatch path (once argus has committed the resolved
+// diff) both need this same push-then-verify pair, so it lives once here
+// instead of being duplicated at each call site.
+func PushAndVerify(ctx context.Context, worktree, branch string) error {
+	if err := ForcePushBranch(ctx, worktree, branch); err != nil {
+		return fmt.Errorf("pushing %s to origin: %w", branch, err)
+	}
+	return VerifyPushLanded(ctx, worktree, branch)
+}
+
 // VerifyPushLanded confirms origin/<branch> equals worktree's local HEAD,
 // querying the remote directly rather than trusting a caller's belief that a
 // preceding push succeeded: a rebase worker can report awaiting_review after
@@ -232,73 +243,42 @@ func VerifyPushLanded(ctx context.Context, worktree, branch string) error {
 }
 
 // RebaseBrief is the task brief argus injects when dispatching a worker to
-// resolve a post-merge conflict. The deterministic work (detecting the conflict,
-// spawning the worker, verifying the result) is argus's; the conflict resolution
-// itself needs the worker's judgment.
+// resolve a post-merge conflict. The deterministic work (detecting the
+// conflict, spawning the worker, committing and pushing the result) is
+// argus's; only the conflict resolution itself needs the worker's judgment.
+// The worker is deliberately told to merge with --no-commit rather than
+// `git rebase`: a real `git rebase --continue` commits each replayed commit
+// as it resolves, and there is no way to reach a finished rebase without
+// that — so the worker would end up committing regardless of what its own
+// prose said. Leaving the resolution staged but uncommitted is what lets
+// dispatchRebaseWorker's own CommitAll + PushAndVerify do the commit and
+// push afterward, exactly like a normal ship dispatch, so the worker never
+// invokes `git commit` or `git push` at all — not merely auto-approved, but
+// genuinely never attempted, which is what a rebase's own worktree
+// permission file (settingsFor) gates behind an unattended approval prompt.
 func RebaseBrief(branch, base string) string {
 	return fmt.Sprintf(`Task: resolve a post-merge conflict on branch %s
 
 A sibling change merged into %s first, so your branch now conflicts with it.
-This is expected. Update your branch in place (do NOT open a new PR):
+This is expected. Resolve it in place (do NOT open a new PR):
 
   git fetch origin %s
-  git rebase origin/%s
+  git merge origin/%s --no-commit
   # resolve conflicts so BOTH your change and the merged change coexist
+  # git add the resolved files, but do not commit them
   # re-run the repo's checks (make ci, or make test + make lint)
-  git push --force-with-lease origin %s
 
-Confirm the checks pass and the branch is mergeable, then set your status phase to
-"awaiting_review". Use "blocked" if the resolution needs a decision only the
-supervisor can make.
+%s — this worktree's own permission file asks before either runs, and no one
+is watching this dispatch to answer that prompt. Leave the merge resolved but
+uncommitted; argus commits it (using your reported title as the commit
+message) and force-pushes it once your report lands. Set title to a
+conventional-commit summary of the resolution.
 
-%s`, branch, base, base, base, branch, protocol.WriterBrief("origin/"+base))
-}
+Confirm the checks pass against the merged, uncommitted result, then set your
+status phase to "awaiting_review". Use "blocked" if the resolution needs a
+decision only the supervisor can make.
 
-// rebasePushAskEntry is the blanket ask rule settingsFor writes into every
-// worker's settings.local.json at spawn time (see agentadapter.go's Ask
-// list): it exists so a normal worker can never commit or push on its own
-// initiative, forcing a supervisor's eyes on it instead. Claude Code's ask
-// category always wins over allow regardless of pattern specificity — rules
-// are checked deny, then ask, then allow, first match wins, and a matching
-// ask rule still fires even when a narrower allow rule also matches the same
-// call — so as long as this entry is on disk, no allow rule, however
-// narrowly scoped, can stop it from raising an interactive dialog. A rebase
-// dispatch inverts that premise: argus itself is authorizing exactly one
-// push before it ever types the brief, so the blanket rule has to be lifted
-// or EnsureRebasePushAllowed's own allow entry below can never take effect.
-const rebasePushAskEntry = "Bash(git push:*)"
-
-// RebasePushAllowEntry is the Bash allow-glob for the one force-push a
-// rebase dispatch pre-authorizes: HEAD (already resolved onto base by the
-// worker's own `git rebase`) force-pushed to origin/branch. Deliberately no
-// trailing wildcard — an exact match on the literal command RebaseBrief
-// instructs, so it can never be read as covering any other push.
-func RebasePushAllowEntry(branch string) string {
-	return "Bash(git push --force-with-lease origin " + branch + ")"
-}
-
-// EnsureRebasePushAllowed grants a rebase-dispatched worker exactly the one
-// force-push its brief instructs (see RebaseBrief) without Claude Code
-// raising an interactive permission dialog for it. It writes an additive,
-// idempotent allow entry scoped to branch into worktree's
-// .claude/settings.json — the same only-touches-this-key pattern
-// cmd/config_check.go's permission.Ensure already uses for argus's own
-// allowlisting — and retracts the pre-existing blanket push ask rule from
-// .claude/settings.local.json that would otherwise still win over it (see
-// rebasePushAskEntry). A worktree rebase dispatches into but that a worker
-// never spawned in (so settings.local.json doesn't exist yet) is not an
-// error: RemoveAsk is a no-op against a missing file. Both writes are
-// idempotent, so calling this again on a redispatch is a no-op once done.
-func EnsureRebasePushAllowed(worktree, branch string) error {
-	settingsPath := permission.SettingsPath(worktree)
-	if _, err := permission.EnsureExactAllow(settingsPath, RebasePushAllowEntry(branch)); err != nil {
-		return fmt.Errorf("allowing rebase push for %s: %w", branch, err)
-	}
-	localPath := filepath.Join(worktree, ".claude", "settings.local.json")
-	if _, err := permission.RemoveAsk(localPath, rebasePushAskEntry); err != nil {
-		return fmt.Errorf("clearing blanket push ask rule before rebase push for %s: %w", branch, err)
-	}
-	return nil
+%s`, branch, base, base, base, protocol.NeverRunBrief(protocol.AskGatedCommands), protocol.WriterBrief("origin/"+base))
 }
 
 // InvalidateStatus removes a worktree's status and verdict files, if present,

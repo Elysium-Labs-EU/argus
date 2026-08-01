@@ -29,3 +29,24 @@ func TestWriterBriefVariesWithBase(t *testing.T) {
 		t.Errorf("WriterBrief(origin/develop) missing its own base in the diff_stat instruction, got:\n%s", b)
 	}
 }
+
+// TestNeverRunBriefNamesEveryCommand confirms the shared clause names every
+// command it's given, so a brief using it and settingsFor's Ask list (built
+// from the same AskGatedCommands slice — see internal/supervisor/agentadapter.go)
+// can never list different commands from each other.
+func TestNeverRunBriefNamesEveryCommand(t *testing.T) {
+	got := NeverRunBrief(AskGatedCommands)
+	for _, cmd := range AskGatedCommands {
+		if !strings.Contains(got, cmd) {
+			t.Errorf("NeverRunBrief(%v) = %q, missing command %q", AskGatedCommands, got, cmd)
+		}
+	}
+}
+
+// TestNeverRunBriefEmptyCommandsRendersNothing confirms a brief that mandates
+// no ask-gated command at all gets no clause to compose around.
+func TestNeverRunBriefEmptyCommandsRendersNothing(t *testing.T) {
+	if got := NeverRunBrief(nil); got != "" {
+		t.Errorf("NeverRunBrief(nil) = %q, want empty", got)
+	}
+}

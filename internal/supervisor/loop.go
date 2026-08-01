@@ -240,12 +240,12 @@ Branch: %s
 Work only inside %s. Never delete, reset, or touch files outside it; another
 agent may share the parent repo. Write a todo list before anything else.
 
-Do the work and verify it (build + tests). Do NOT git commit or git push — argus
-handles shipping. When the change is complete and tests pass, set your status
-phase to "awaiting_review" (not "done"); use "blocked" if you need a decision only
-the supervisor can make.
+Do the work and verify it (build + tests). %s — argus handles shipping. When
+the change is complete and tests pass, set your status phase to
+"awaiting_review" (not "done"); use "blocked" if you need a decision only the
+supervisor can make.
 
-%s`, w.Task, w.Branch, w.Worktree, protocol.WriterBrief(base))
+%s`, w.Task, w.Branch, w.Worktree, protocol.NeverRunBrief(protocol.AskGatedCommands), protocol.WriterBrief(base))
 }
 
 // taskLabel is a short, log-friendly identifier for a worker task: the first

@@ -1,6 +1,32 @@
 package protocol
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+// AskGatedCommands are the Bash command prefixes settingsFor's Ask list gates
+// for every worker's worktree (internal/supervisor/agentadapter.go): argus
+// runs these itself once a report lands, rather than let a worker publish
+// argus's own commit before a verdict exists. Every brief-rendering function
+// pulls its "do not run these yourself" sentence from this one slice via
+// NeverRunBrief instead of hand-authoring its own version of the warning —
+// otherwise a brief's wording and the worktree's actual permission grant are
+// two independently maintained lists that can silently drift apart, which is
+// exactly how a rebase dispatch once ended up mandating a `git push` its own
+// worktree still asked a human to approve, with nobody watching to answer.
+var AskGatedCommands = []string{"git commit", "git push"}
+
+// NeverRunBrief renders the shared "do not run these yourself" clause every
+// worker brief includes for commands (see AskGatedCommands). Callers append
+// their own reason (why argus runs it instead) after the returned sentence.
+// Empty commands renders "" — not every brief needs this clause.
+func NeverRunBrief(commands []string) string {
+	if len(commands) == 0 {
+		return ""
+	}
+	return "Do NOT run " + strings.Join(commands, " or ") + " yourself"
+}
 
 // WriterBrief renders the instruction block argus injects into every worker
 // pane's task brief, against base — the same ref MeasureDiff gates the
