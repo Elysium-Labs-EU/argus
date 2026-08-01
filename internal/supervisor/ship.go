@@ -105,6 +105,51 @@ func RepoRoot(ctx context.Context, worktree string) (string, error) {
 	return filepath.Dir(commonDir), nil
 }
 
+// ErrNotLinkedWorktree means the given path is not a linked git worktree —
+// either not a git repository at all, or the main repository checkout itself
+// rather than one `git worktree add` created.
+var ErrNotLinkedWorktree = errors.New("not inside a linked git worktree")
+
+// VerifyLinkedWorktree confirms path is a real, linked git worktree rather
+// than an arbitrary directory or the main repository checkout. `argus worker
+// report` (see cmd/worker_report.go) calls this before writing anything: a
+// worker whose pane cd'd to the wrong place — a mistaken cd, a stale pane —
+// would otherwise happily create status.json wherever it landed instead of
+// failing with a clear error.
+//
+// A linked worktree's --git-dir (e.g. <repo>/.git/worktrees/<name>) differs
+// from its --git-common-dir (<repo>/.git); the main checkout's are the same
+// path. --is-inside-work-tree is checked first so a plain non-git directory
+// fails on that git error rather than an ambiguous path comparison.
+func VerifyLinkedWorktree(ctx context.Context, path string) error {
+	inside, err := git(ctx, path, "rev-parse", "--is-inside-work-tree")
+	if err != nil || inside != "true" {
+		return fmt.Errorf("%s: %w", path, ErrNotLinkedWorktree)
+	}
+	gitDir, err := git(ctx, path, "rev-parse", "--git-dir")
+	if err != nil {
+		return fmt.Errorf("resolving git dir for %s: %w", path, err)
+	}
+	commonDir, err := git(ctx, path, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("resolving git common dir for %s: %w", path, err)
+	}
+	if resolveGitPath(path, gitDir) == resolveGitPath(path, commonDir) {
+		return fmt.Errorf("%s: %w", path, ErrNotLinkedWorktree)
+	}
+	return nil
+}
+
+// resolveGitPath makes a possibly-relative `git rev-parse` output absolute
+// against worktree, the same relative-to-worktree convention RepoRoot relies
+// on for --git-common-dir.
+func resolveGitPath(worktree, p string) string {
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
+	}
+	return filepath.Clean(filepath.Join(worktree, p))
+}
+
 // RemoteURL returns the raw origin remote URL of a worktree, for callers that
 // need the host (not just owner/repo) such as forge detection.
 func RemoteURL(ctx context.Context, worktree string) (string, error) {

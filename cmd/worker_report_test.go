@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,46 @@ import (
 
 func fixedNow(t time.Time) func() time.Time {
 	return func() time.Time { return t }
+}
+
+// gitLinkedWorktree makes a temp main repo with one commit and a branch, then
+// `git worktree add`s a second directory linked to it — the shape supervise
+// itself creates for a worker (see internal/repoconfig), and the only shape
+// VerifyLinkedWorktree accepts.
+func gitLinkedWorktree(t *testing.T) string {
+	t.Helper()
+	main := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run(main, "init", "-q", "-b", "main")
+	run(main, "config", "user.email", "t@t")
+	run(main, "config", "user.name", "t")
+	run(main, "commit", "-q", "--allow-empty", "-m", "seed")
+	run(main, "branch", "feat-x")
+
+	linked := filepath.Join(t.TempDir(), "feat-x")
+	run(main, "worktree", "add", "-q", linked, "feat-x")
+	return linked
+}
+
+// gitPlainRepo makes a temp directory that is a git repository but not a
+// linked worktree — the main checkout itself, which VerifyLinkedWorktree
+// must also reject.
+func gitPlainRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	return dir
 }
 
 func TestRunWorkerReportRejectsIllegalTransition(t *testing.T) {
@@ -368,7 +410,7 @@ func TestParseReportablePhaseRejectsUnknown(t *testing.T) {
 // protocol.WriterBrief would) with a JSON body piped on stdin, and checks the
 // worker's own claimed updated_at never makes it into the persisted file.
 func TestWorkerReportCmdStdinBriefCompliance(t *testing.T) {
-	wt := t.TempDir()
+	wt := gitLinkedWorktree(t)
 
 	body, err := json.Marshal(protocol.Status{
 		UpdatedAt:      time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC), // a lying worker clock
@@ -417,6 +459,40 @@ func TestWorkerReportCmdRejectsUnknownPhase(t *testing.T) {
 	cmd.SetIn(bytes.NewReader([]byte(`{}`)))
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("want an error reporting done via the CLI, got nil")
+	}
+}
+
+// TestWorkerReportCmdRejectsNonGitDirectory pins the regression this fixes: a
+// plain, non-git directory (e.g. a worker pane that cd'd to the wrong place)
+// must be refused before anything is written, not silently accepted as if it
+// were the worker's own worktree.
+func TestWorkerReportCmdRejectsNonGitDirectory(t *testing.T) {
+	wt := t.TempDir()
+	cmd := newWorkerReportCmd()
+	cmd.SetArgs([]string{"planning", "--worktree", wt})
+	cmd.SetIn(bytes.NewReader([]byte(`{"task":"t","branch":"b","plan":["x"]}`)))
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("want an error reporting from a non-git directory, got nil")
+	}
+	if _, err := protocol.Load(protocol.StatusPath(wt)); err == nil {
+		t.Error("status.json should not have been created in a non-git directory")
+	}
+}
+
+// TestWorkerReportCmdRejectsMainRepoCheckout pins the other half: a git repo
+// that is a real repository but not a linked worktree (e.g. the main
+// checkout itself) must also be refused — supervise only ever gives a worker
+// a `git worktree add`-created directory, never the main checkout.
+func TestWorkerReportCmdRejectsMainRepoCheckout(t *testing.T) {
+	dir := gitPlainRepo(t)
+	cmd := newWorkerReportCmd()
+	cmd.SetArgs([]string{"planning", "--worktree", dir})
+	cmd.SetIn(bytes.NewReader([]byte(`{"task":"t","branch":"b","plan":["x"]}`)))
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("want an error reporting from the main repo checkout, got nil")
+	}
+	if _, err := protocol.Load(protocol.StatusPath(dir)); err == nil {
+		t.Error("status.json should not have been created in the main repo checkout")
 	}
 }
 
