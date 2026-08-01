@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 // AgentAdapter isolates the pieces of argus that are hard-coupled to one
@@ -149,12 +151,21 @@ func settingsFor(worktree string, repoAllow, extraAllow []string) permissionSett
 	return permissionSettings{
 		Permissions: permissionBlock{
 			Allow: allow,
-			Ask: []string{
-				"Bash(git commit:*)",
-				"Bash(git push:*)",
-			},
-			Deny: deny,
+			Ask:   askGlobEntries(protocol.AskGatedCommands),
+			Deny:  deny,
 		},
 		EnableAllProjectMcpServers: true,
 	}
+}
+
+// askGlobEntries converts commands (see protocol.AskGatedCommands) into the
+// Bash glob form Claude Code's permissions.ask expects. Deriving these from
+// the same slice every brief's NeverRunBrief clause names means the ask list
+// and a brief's own wording can never list different commands.
+func askGlobEntries(commands []string) []string {
+	entries := make([]string, len(commands))
+	for i, c := range commands {
+		entries[i] = "Bash(" + c + ":*)"
+	}
+	return entries
 }

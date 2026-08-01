@@ -1011,7 +1011,7 @@ func repoBriefNote(out io.Writer, repoPath string, bn briefNoteOverride) string 
 // opinion on what "the repo's own lint/build" means for a given repo, only
 // that a worker should run whatever that is before calling itself done.
 func fixedBriefTail(briefNote string) string {
-	const fixed = "Do NOT git commit or push; argus ships. " +
+	fixed := protocol.NeverRunBrief(protocol.AskGatedCommands) + "; argus ships. " +
 		"When reporting your diff size, count untracked new files too " +
 		"(e.g. `git diff --stat <base>` plus every new file's own line count) " +
 		"— a plain `git diff` alone misses files you just created, and argus's " +

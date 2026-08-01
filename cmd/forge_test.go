@@ -75,7 +75,7 @@ func TestIssuesToTasks(t *testing.T) {
 	if !strings.Contains(tasks[0], "#142") || !strings.Contains(tasks[0], "daemon down warning") || !strings.Contains(tasks[0], "warn when down") {
 		t.Errorf("task 0 missing issue content: %q", tasks[0])
 	}
-	if !strings.Contains(tasks[0], "Do NOT git commit or push; argus ships.") {
+	if !strings.Contains(tasks[0], "Do NOT run git commit or git push yourself; argus ships.") {
 		t.Errorf("task 0 missing the fixed ship-pipeline line: %q", tasks[0])
 	}
 	if branches[0] != "r-fix-issue-142" || branches[1] != "r-fix-issue-145" {
@@ -117,7 +117,7 @@ func TestIssuesToTasksAppendsRepoBriefNote(t *testing.T) {
 	if len(tasks) != 1 {
 		t.Fatalf("want 1 task, got %d", len(tasks))
 	}
-	if !strings.Contains(tasks[0], "Keep task frontend:ci green. Do NOT git commit or push; argus ships.") {
+	if !strings.Contains(tasks[0], "Keep task frontend:ci green. Do NOT run git commit or git push yourself; argus ships.") {
 		t.Errorf("task missing brief_note ahead of the fixed line: %q", tasks[0])
 	}
 }
@@ -138,7 +138,7 @@ func TestIssuesToTasksNoRepoConfigOmitsToolchainText(t *testing.T) {
 	if strings.Contains(tasks[0], "make ci") || strings.Contains(tasks[0], "STYLE.md") {
 		t.Errorf("task should not assume a toolchain with no repo config: %q", tasks[0])
 	}
-	if !strings.Contains(tasks[0], "Do NOT git commit or push; argus ships.") {
+	if !strings.Contains(tasks[0], "Do NOT run git commit or git push yourself; argus ships.") {
 		t.Errorf("task missing the fixed ship-pipeline line: %q", tasks[0])
 	}
 }

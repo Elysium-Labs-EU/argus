@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 func TestClaudeCodeAdapterDefaultLauncher(t *testing.T) {
@@ -74,6 +76,24 @@ func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
 	for _, entry := range want {
 		if !slices.Contains(settings.Permissions.Deny, entry) {
 			t.Errorf("deny list missing %q; got %v", entry, settings.Permissions.Deny)
+		}
+	}
+}
+
+// TestSettingsForAskListMatchesAskGatedCommands confirms settingsFor's Ask
+// list is derived from protocol.AskGatedCommands — the same slice every
+// brief's NeverRunBrief clause names — rather than its own independently
+// hardcoded glob strings that could silently list a different command than
+// what a brief actually warns about.
+func TestSettingsForAskListMatchesAskGatedCommands(t *testing.T) {
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil)
+	if len(settings.Permissions.Ask) != len(protocol.AskGatedCommands) {
+		t.Fatalf("ask list length = %d, want %d matching AskGatedCommands", len(settings.Permissions.Ask), len(protocol.AskGatedCommands))
+	}
+	for _, cmd := range protocol.AskGatedCommands {
+		want := "Bash(" + cmd + ":*)"
+		if !slices.Contains(settings.Permissions.Ask, want) {
+			t.Errorf("ask list missing %q for AskGatedCommands entry %q; got %v", want, cmd, settings.Permissions.Ask)
 		}
 	}
 }

@@ -567,19 +567,120 @@ func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
 	}
 }
 
-// TestDispatchRebaseWorkerReportsSuccessButPushNeverLandedFails confirms
-// that a worker reporting awaiting_review (having only rebased locally —
-// its own force-push never reached origin, e.g. a pre-push hook rejection
-// or a run killed mid-push) makes dispatchRebaseWorker fail loudly instead
-// of printing "rebased and ready", because nothing about the worker's
-// self-reported terminal status distinguishes that from a real success.
-func TestDispatchRebaseWorkerReportsSuccessButPushNeverLandedFails(t *testing.T) {
+// setupRebaseUncommittedResolution builds a bare origin, publishes feat-x to
+// it, then leaves an uncommitted file change in the worktree — the shape
+// RebaseBrief now asks a worker to leave behind (conflict resolved, merge
+// left staged but uncommitted) instead of committing and pushing itself.
+func setupRebaseUncommittedResolution(t *testing.T) (worktree string) {
+	t.Helper()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare init: %v\n%s", err, out)
+	}
+	seed := t.TempDir()
+	git(seed, "init", "-q")
+	git(seed, "config", "user.email", "t@t")
+	git(seed, "config", "user.name", "t")
+	git(seed, "checkout", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(seed, "f.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(seed, "add", "-A")
+	git(seed, "commit", "-q", "-m", "base")
+	git(seed, "remote", "add", "origin", remote)
+	git(seed, "push", "-q", "-u", "origin", "main")
+
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", remote, wt).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+	git(wt, "config", "user.email", "t@t")
+	git(wt, "config", "user.name", "t")
+	git(wt, "checkout", "-q", "-b", "feat-x", "origin/main")
+	git(wt, "commit", "-q", "--allow-empty", "-m", "original work")
+	git(wt, "push", "-q", "-u", "origin", "feat-x")
+
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("resolved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return wt
+}
+
+// TestDispatchRebaseWorkerCommitsResolutionAndPushes confirms the new
+// contract end to end: a worker that reports awaiting_review having left its
+// conflict resolution staged but uncommitted (per RebaseBrief) never runs
+// git commit or git push itself — dispatchRebaseWorker commits the resolved
+// diff using the worker's reported title and force-pushes it.
+func TestDispatchRebaseWorkerCommitsResolutionAndPushes(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	// A real, separate origin (not self-referencing — ls-remote against a
-	// worktree's own repo would trivially "match" itself) whose feat-x ref is
-	// one commit behind the worktree's local HEAD, simulating a rebase that
-	// was committed locally but whose force-push never landed.
-	worktree := setupNoConflictOriginBehind(t)
+	worktree := setupRebaseUncommittedResolution(t)
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+	var buf bytes.Buffer
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		fresh := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now(), Title: "fix: resolve conflict with origin/main"}
+		_ = protocol.Write(protocol.StatusPath(worktree), fresh)
+	}()
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("dispatchRebaseWorker: %v", err)
+	}
+	if !strings.Contains(buf.String(), "rebased and ready") {
+		t.Errorf("expected the success message, got:\n%s", buf.String())
+	}
+
+	logOut, lerr := exec.Command("git", "-C", worktree, "log", "-1", "--format=%s").Output()
+	if lerr != nil {
+		t.Fatalf("git log: %v", lerr)
+	}
+	if got := strings.TrimSpace(string(logOut)); got != "fix: resolve conflict with origin/main" {
+		t.Errorf("commit message = %q, want the worker's reported title", got)
+	}
+
+	remoteHead, rerr := exec.Command("git", "-C", worktree, "ls-remote", "origin", "refs/heads/feat-x").Output()
+	if rerr != nil {
+		t.Fatalf("ls-remote: %v", rerr)
+	}
+	localHead, herr := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
+	if herr != nil {
+		t.Fatalf("rev-parse HEAD: %v", herr)
+	}
+	if !strings.HasPrefix(string(remoteHead), strings.TrimSpace(string(localHead))) {
+		t.Errorf("origin/feat-x = %q, want it to equal the freshly committed local HEAD %q", remoteHead, localHead)
+	}
+}
+
+// TestDispatchRebaseWorkerCommitSucceedsButPushRejectedFails confirms that
+// once dispatchRebaseWorker has committed a worker's resolved diff, a
+// rejected push (a pre-push hook here, standing in for any non-zero `git
+// push` exit) fails the rebase run loudly instead of printing "rebased and
+// ready" — the worker never pushes itself under the new contract, so this
+// failure can only be argus's own to catch.
+func TestDispatchRebaseWorkerCommitSucceedsButPushRejectedFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := setupRebaseUncommittedResolution(t)
+
+	hooksDir, err := exec.Command("git", "-C", worktree, "rev-parse", "--git-path", "hooks").Output()
+	if err != nil {
+		t.Fatalf("rev-parse --git-path hooks: %v", err)
+	}
+	hookPath := filepath.Join(worktree, strings.TrimSpace(string(hooksDir)), "pre-push")
+	if werr := os.WriteFile(hookPath, []byte("#!/bin/sh\necho 'rejected by crap-gate' >&2\nexit 1\n"), 0o755); werr != nil {
+		t.Fatalf("writing pre-push hook: %v", werr)
+	}
 
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("w1:p1", nil, nil)
@@ -591,17 +692,25 @@ func TestDispatchRebaseWorkerReportsSuccessButPushNeverLandedFails(t *testing.T)
 		_ = protocol.Write(protocol.StatusPath(worktree), fresh)
 	}()
 
-	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
+	err = dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
 		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
 	})
 	if err == nil {
-		t.Fatal("want an error when origin never received the worker's push, got nil")
+		t.Fatal("want an error when the push is rejected, got nil")
 	}
-	if !strings.Contains(err.Error(), "did not reach origin") {
-		t.Errorf("error should explain the push never landed, got %v", err)
+	if !strings.Contains(err.Error(), "rejected by crap-gate") {
+		t.Errorf("error should surface the hook's own rejection message, got %v", err)
 	}
 	if strings.Contains(buf.String(), "rebased and ready") {
-		t.Errorf("must not print the success message when the push never landed:\n%s", buf.String())
+		t.Errorf("must not print the success message when the push was rejected:\n%s", buf.String())
+	}
+
+	logOut, lerr := exec.Command("git", "-C", worktree, "log", "-1", "--format=%s").Output()
+	if lerr != nil {
+		t.Fatalf("git log: %v", lerr)
+	}
+	if got := strings.TrimSpace(string(logOut)); !strings.HasPrefix(got, "rebase: resolve") {
+		t.Errorf("commit message = %q, want the fallback rebase message (worker reported no title)", got)
 	}
 }
 
