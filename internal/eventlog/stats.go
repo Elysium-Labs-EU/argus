@@ -187,21 +187,27 @@ type TaskRow struct {
 // each task's first appearance in events, which ReadDir already returns
 // sorted by run-log filename (so oldest run first) — deterministic output
 // without a separate sort pass.
+//
+// Rows live in a plain slice, indexed by a map[string]int rather than
+// map[string]*TaskRow: a pointer pulled out of a map read requires a nil
+// check nilaway's static analysis can't otherwise discharge, where a slice
+// index is provably in range the moment it's looked up.
 func JoinTasks(events []Event) []TaskRow {
-	rows := map[string]*TaskRow{}
-	order := make([]string, 0)
+	index := map[string]int{}
+	out := make([]TaskRow, 0, len(events))
 	for i := range events {
 		e := &events[i]
 		if e.Target == "" {
 			continue
 		}
 		key := e.Run + "\x00" + e.Target
-		row, ok := rows[key]
+		idx, ok := index[key]
 		if !ok {
-			row = &TaskRow{Run: e.Run, Task: e.Target}
-			rows[key] = row
-			order = append(order, key)
+			idx = len(out)
+			index[key] = idx
+			out = append(out, TaskRow{Run: e.Run, Task: e.Target})
 		}
+		row := &out[idx]
 		switch e.Action {
 		case "tokens":
 			row.TokensTotal += int64Field(e.Fields, "total")
@@ -232,13 +238,11 @@ func JoinTasks(events []Event) []TaskRow {
 			row.Phase = e.Outcome
 		}
 	}
-	out := make([]TaskRow, 0, len(order))
-	for _, key := range order {
-		row := rows[key]
+	for i := range out {
+		row := &out[i]
 		if row.TokensInput > 0 {
 			row.CacheReadRatio = float64(row.CacheRead) / float64(row.TokensInput)
 		}
-		out = append(out, *row)
 	}
 	return out
 }
