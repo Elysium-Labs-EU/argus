@@ -100,3 +100,36 @@ func TestStatsWithoutExportStillPrintsSummary(t *testing.T) {
 		t.Errorf("expected the summary render, got %q", out.String())
 	}
 }
+
+// TestStatsDebugReportsMalformedLine pins issue #391: with the global --debug
+// flag set, a malformed run-log line is reported on stderr instead of
+// disappearing silently, while the valid line on either side is still
+// counted.
+func TestStatsDebugReportsMalformedLine(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeRunLog(t, home, strings.Join([]string{
+		`{"run":"r1","action":"gate","target":"task-a","outcome":"auto-approve"}`,
+		"not valid json",
+		`{"run":"r1","action":"gate","target":"task-b","outcome":"escalate"}`,
+		"",
+	}, "\n"))
+
+	debugLog = true
+	t.Cleanup(func() { debugLog = false })
+
+	cmd := newStatsCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if !strings.Contains(errOut.String(), "skipped 1 malformed line(s) in ") {
+		t.Errorf("expected a skip report on stderr, got %q", errOut.String())
+	}
+	if !strings.Contains(out.String(), "1 auto-approve, 1 escalate") {
+		t.Errorf("expected both valid lines counted, got %q", out.String())
+	}
+}
