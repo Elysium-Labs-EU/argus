@@ -395,6 +395,112 @@ func TestEnsureDenyPreservesUnrelatedKeys(t *testing.T) {
 	}
 }
 
+func TestSettingsPath(t *testing.T) {
+	cases := []struct{ repo, want string }{
+		{"/home/user/repo", "/home/user/repo/.claude/settings.json"},
+		{"relative/repo", "relative/repo/.claude/settings.json"},
+		{".", ".claude/settings.json"},
+		{"", ".claude/settings.json"},
+	}
+	for _, c := range cases {
+		if got := SettingsPath(c.repo); got != c.want {
+			t.Errorf("SettingsPath(%q) = %q, want %q", c.repo, got, c.want)
+		}
+	}
+}
+
+// skipIfRoot skips permission-based negative tests when running as root, since
+// root bypasses the filesystem permission bits the test relies on to force a
+// write failure.
+func skipIfRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-denial tests can't force a failure")
+	}
+}
+
+func TestWriteSettingsFileMkdirFailsWhenParentIsAFile(t *testing.T) {
+	notADir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(notADir, ".claude", "settings.json")
+	if err := writeSettingsFile(path, rawSettings{}); err == nil {
+		t.Fatal("expected an error when the settings dir's parent is a regular file")
+	}
+}
+
+func TestWriteSettingsFileFailsInReadOnlyDir(t *testing.T) {
+	skipIfRoot(t)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	path := filepath.Join(dir, "settings.json")
+	if err := writeSettingsFile(path, rawSettings{}); err == nil {
+		t.Fatal("expected an error writing into a read-only directory")
+	}
+}
+
+func TestWriteSettingsFileRenameFailsOntoExistingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSettingsFile(path, rawSettings{}); err == nil {
+		t.Fatal("expected an error renaming a file into place over an existing directory")
+	}
+}
+
+func TestEnsureLoadError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `not json`)
+	added, err := Ensure(path, DefaultAllowEntry)
+	if err == nil {
+		t.Fatal("expected an error loading malformed settings.json")
+	}
+	if added {
+		t.Error("expected added=false on error")
+	}
+}
+
+func TestEnsureWriteError(t *testing.T) {
+	skipIfRoot(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	added, err := Ensure(path, DefaultAllowEntry)
+	if err == nil {
+		t.Fatal("expected an error writing into a read-only directory")
+	}
+	if added {
+		t.Error("expected added=false on error")
+	}
+}
+
+func TestCheckMalformedPermissionsBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":"not an object"}`)
+	if _, _, err := Check(path); err == nil {
+		t.Fatal("expected an error when permissions is not an object")
+	}
+}
+
+func TestCheckMalformedAllowList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"allow":[1,2,3]}}`)
+	if _, _, err := Check(path); err == nil {
+		t.Fatal("expected an error when permissions.allow isn't a string list")
+	}
+}
+
 func TestEnsureCustomEntry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	added, err := Ensure(path, "Bash(argus ship *)")
