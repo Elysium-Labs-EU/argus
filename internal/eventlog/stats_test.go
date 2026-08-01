@@ -1,8 +1,10 @@
 package eventlog
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,7 +77,7 @@ func TestReadDirReadsJSONL(t *testing.T) {
 	l.Action("gate", "a", "escalate", "")
 	l.Action("review", "a", "approve", "")
 
-	events, err := ReadDir(dir)
+	events, err := ReadDir(dir, nil)
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
@@ -85,6 +87,52 @@ func TestReadDirReadsJSONL(t *testing.T) {
 	s := Summarize(events)
 	if s.GateEscalate != 1 || s.Reviews != 1 {
 		t.Errorf("unexpected summary: %+v", s)
+	}
+}
+
+// TestReadDirReportsMalformedLinesUnderDebug pins the issue #391 fix: a
+// malformed line is skipped (not a hard failure), but with a non-nil debug
+// writer the skip is surfaced instead of silently disappearing.
+func TestReadDirReportsMalformedLinesUnderDebug(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.jsonl")
+	content := `{"run":"r1","action":"gate","target":"a","outcome":"escalate"}
+not valid json
+{"run":"r1","action":"review","target":"a","outcome":"approve"}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var debug bytes.Buffer
+	events, err := ReadDir(dir, &debug)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("want 2 events (bad line skipped, good ones kept), got %d", len(events))
+	}
+	if got := debug.String(); !strings.Contains(got, "skipped 1 malformed line(s) in "+path) {
+		t.Errorf("debug output missing skip report: %q", got)
+	}
+}
+
+// TestReadDirSilentWithoutDebug pins that a nil debug writer produces no
+// report — the pre-fix default behavior for a normal (non-debug) stats run.
+func TestReadDirSilentWithoutDebug(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.jsonl")
+	content := "not valid json\n{\"run\":\"r1\",\"action\":\"gate\",\"target\":\"a\",\"outcome\":\"escalate\"}\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := ReadDir(dir, nil)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
 	}
 }
 
@@ -111,7 +159,7 @@ func TestInt64FieldMissingAndNonNumeric(t *testing.T) {
 }
 
 func TestReadDirMissingIsEmpty(t *testing.T) {
-	events, err := ReadDir(filepath.Join(t.TempDir(), "nope"))
+	events, err := ReadDir(filepath.Join(t.TempDir(), "nope"), nil)
 	if err != nil {
 		t.Fatalf("missing dir should not error: %v", err)
 	}
