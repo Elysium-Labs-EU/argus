@@ -67,8 +67,16 @@ func (claudeCodeAdapter) PlanEvidence(home, worktree string) (bool, int, error) 
 // a technical fact, not an instruction a worker has to remember — the allow list
 // pre-clears routine read/build/test/edit-in-own-worktree calls, and the deny
 // list makes "never leave or destroy your worktree" enforced.
+//
+// EnableAllProjectMcpServers pre-approves Claude Code's one-time interactive
+// consent gate for any project-scoped MCP server (.mcp.json) it discovers —
+// a separate screen from --permission-mode auto's tool-permission checks,
+// which does not cover it. A headless worker pane has no human to answer that
+// prompt, so left unset it hangs at agent_status idle forever with
+// status.json never written, indistinguishable from "hasn't started yet".
 type permissionSettings struct {
-	Permissions permissionBlock `json:"permissions"`
+	Permissions                permissionBlock `json:"permissions"`
+	EnableAllProjectMcpServers bool            `json:"enableAllProjectMcpServers"`
 }
 
 type permissionBlock struct {
@@ -147,5 +155,6 @@ func settingsFor(worktree string, repoAllow, extraAllow []string) permissionSett
 			},
 			Deny: deny,
 		},
+		EnableAllProjectMcpServers: true,
 	}
 }

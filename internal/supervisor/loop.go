@@ -1300,6 +1300,13 @@ func resolveSpawnLine(ctx context.Context, cfg *Config, p *WorkerPlan, workerEnv
 // resolve into a status.json write: a pane sitting on an unanswered
 // interactive prompt ("blocked") or whose agent turn already ended ("done")
 // has no path left to reach argus's own self-reported phases at all.
+//
+// The same threshold also bounds "idle with status.json never written at
+// all" (see idleWithoutReport): herdr's blocked-detector recognizes known
+// tool-permission prompt text but not every interactive screen a launcher
+// can show (e.g. Claude Code's one-time MCP-server consent gate), so a
+// worker stuck on one of those reads as idle, not blocked, and looks
+// identical to "pane hasn't started working yet" until this fires.
 const herdrStuckThreshold = 2 * time.Minute
 
 // herdrNudgeMessage is the one reminder checkHerdrStuck sends into a "done"
@@ -1327,6 +1334,17 @@ func herdrStuck(agentStatus string) bool {
 	return agentStatus == "blocked" || agentStatus == "done"
 }
 
+// idleWithoutReport reports whether a pane herdr calls idle has never once
+// written status.json, not even "planning" — the fingerprint of a worker
+// that never got its first turn off the ground, most plausibly because it's
+// sitting on an interactive prompt herdr's blocked-detector doesn't
+// recognize (see herdrStuckThreshold). A worker that already reported at
+// least once and later idles between turns is a normal resting state, not
+// this: hasFile stays false forever only when nothing was ever written.
+func idleWithoutReport(agentStatus string, hasFile bool) bool {
+	return agentStatus == "idle" && !hasFile
+}
+
 // findPane returns the pane in panes matching paneID, if any.
 func findPane(panes []herdr.Pane, paneID string) (herdr.Pane, bool) {
 	for i := range panes {
@@ -1350,8 +1368,9 @@ func findPane(panes []herdr.Pane, paneID string) (herdr.Pane, bool) {
 // herdrNudgeMessage) before this escalates — its agent turn already ended
 // cleanly, so the likeliest cause is a worker that claimed completion in
 // chat and forgot the mandatory report call, which a text nudge can fix. A
-// pane stuck at "blocked" is waiting on an unanswered permission prompt that
-// no text nudge resolves, so it escalates immediately, as before.
+// pane stuck at "blocked", or idle with status.json never written at all
+// (idleWithoutReport), is waiting on an unanswered prompt that no text nudge
+// resolves, so it escalates immediately, as before.
 func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Logger, st *workerState, tick time.Duration) bool {
 	if st.paneID == "" {
 		return false
@@ -1369,7 +1388,7 @@ func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Log
 	st.herdrErr = ""
 
 	pane, found := findPane(panes, st.paneID)
-	if !found || !herdrStuck(pane.AgentStatus) {
+	if !found || (!herdrStuck(pane.AgentStatus) && !idleWithoutReport(pane.AgentStatus, st.hasFile)) {
 		st.herdrStuckElapsed = 0
 		st.herdrNudged = false
 		return false
@@ -1395,10 +1414,15 @@ func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Log
 		// there's no working channel left to recover through.
 	}
 
+	reason := "the worker may be stuck on an unanswered prompt or ended without ever writing a terminal status"
+	if !st.hasFile {
+		reason = "status.json has never been written at all — the worker is likely stuck on an interactive " +
+			"prompt herdr doesn't recognize as blocked (e.g. a first-run MCP server consent gate), or it " +
+			"crashed before its first turn completed"
+	}
 	st.herdrEscalation = fmt.Sprintf(
-		"herdr reports pane %s agent_status=%q for over %s, but status.json is still at phase %q — "+
-			"the worker may be stuck on an unanswered prompt or ended without ever writing a terminal status",
-		st.paneID, pane.AgentStatus, herdrStuckThreshold, st.status.Phase)
+		"herdr reports pane %s agent_status=%q for over %s, but status.json is still at phase %q — %s",
+		st.paneID, pane.AgentStatus, herdrStuckThreshold, st.status.Phase, reason)
 	if log != nil {
 		log.Action("herdr_stuck", st.plan.Task, pane.AgentStatus, st.herdrEscalation)
 	}
