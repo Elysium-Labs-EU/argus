@@ -1051,7 +1051,11 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 			cfg.Log.Fail("spawn", taskLabel(p.Task), err)
 			return fail(i, fmt.Errorf("spawning worker for %s: %w", p.Task, err))
 		}
-		cfg.Log.Action("spawn", taskLabel(p.Task), "ok", paneID)
+		model, effort := launcherModelEffort(cfg.Launcher)
+		cfg.Log.Emit(&eventlog.Event{
+			Action: "spawn", Target: taskLabel(p.Task), Outcome: "ok", Detail: paneID,
+			Fields: map[string]any{"model": model, "effort": effort},
+		})
 
 		states[i] = &workerState{plan: p, paneID: paneID, started: cfg.Now(), dispatchedAt: dispatchedAt}
 	}

@@ -163,13 +163,15 @@ func blockedCounts(states []*workerState) (blocked, blockedOnQuestion int) {
 }
 
 // reportTokens formats a worker's token spend for the terminal and, when the
-// spend is known, logs a tokens event carrying the components and session id so
-// `argus stats` can total tokens per task from the run log alone.
+// spend is known, logs a tokens event carrying the components, model/effort,
+// and session id so `argus stats` can join cost with outcome per task from
+// the run log alone.
 func reportTokens(cfg *Config, st *workerState, sessionID string) string {
 	usage, known, err := TokensForSession(cfg.Home, sessionID)
 	if err != nil || !known {
 		return ui.TextMuted.Render("unknown")
 	}
+	model, effort := launcherModelEffort(cfg.Launcher)
 	cfg.Log.Emit(&eventlog.Event{
 		Action: "tokens",
 		Target: taskLabel(st.plan.Task),
@@ -180,10 +182,36 @@ func reportTokens(cfg *Config, st *workerState, sessionID string) string {
 			"cache_creation": usage.CacheCreation,
 			"cache_read":     usage.CacheRead,
 			"session":        sessionID,
+			"model":          model,
+			"effort":         effort,
 		},
 	})
 	return fmt.Sprintf("%d total (in %d, out %d, cache-create %d, cache-read %d)",
 		usage.Total(), usage.Input, usage.Output, usage.CacheCreation, usage.CacheRead)
+}
+
+// launcherModelEffort pulls --model and --effort out of the worker's launch
+// command. The launcher is one fixed shell command per supervise invocation
+// (see DefaultLauncher), not a per-worker setting argus tracks separately, so
+// the launch line itself is the only place a run's actual model/effort choice
+// is recorded — parsing it here is what makes tokens events sliceable by
+// model/effort after the fact instead of only recoverable by re-reading the
+// invocation that produced the run log.
+func launcherModelEffort(launcher string) (model, effort string) {
+	fields := strings.Fields(launcher)
+	for i, f := range fields {
+		switch {
+		case f == "--model" && i+1 < len(fields):
+			model = fields[i+1]
+		case strings.HasPrefix(f, "--model="):
+			model = strings.TrimPrefix(f, "--model=")
+		case f == "--effort" && i+1 < len(fields):
+			effort = fields[i+1]
+		case strings.HasPrefix(f, "--effort="):
+			effort = strings.TrimPrefix(f, "--effort=")
+		}
+	}
+	return model, effort
 }
 
 // logRunSummary records one run-level event: how many workers, how many the gate

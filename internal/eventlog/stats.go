@@ -155,3 +155,90 @@ func int64Field(f map[string]any, key string) int64 {
 	}
 	return 0
 }
+
+func stringField(f map[string]any, key string) string {
+	v, _ := f[key].(string)
+	return v
+}
+
+// TaskRow is one task's cost-and-outcome record, joined by Run+Target across
+// the tokens, spawn, gate, review, verdict, and phase events that same task
+// produced. This is the row a manual dispatch-tuning pass reads to correlate
+// spend against quality — the join `argus stats`'s flat TokensByTask tally
+// discards by collapsing across runs and never touching outcome at all.
+type TaskRow struct {
+	Effort         string
+	GateOutcome    string
+	Phase          string
+	Task           string
+	ReviewOutcome  string
+	Run            string
+	Model          string
+	Verdict        string
+	TokensInput    int64
+	TokensTotal    int64
+	CacheReadRatio float64
+	CacheRead      int64
+	CacheCreation  int64
+	TokensOutput   int64
+}
+
+// JoinTasks folds events into one TaskRow per Run+Target. Row order follows
+// each task's first appearance in events, which ReadDir already returns
+// sorted by run-log filename (so oldest run first) — deterministic output
+// without a separate sort pass.
+func JoinTasks(events []Event) []TaskRow {
+	rows := map[string]*TaskRow{}
+	order := make([]string, 0)
+	for i := range events {
+		e := &events[i]
+		if e.Target == "" {
+			continue
+		}
+		key := e.Run + "\x00" + e.Target
+		row, ok := rows[key]
+		if !ok {
+			row = &TaskRow{Run: e.Run, Task: e.Target}
+			rows[key] = row
+			order = append(order, key)
+		}
+		switch e.Action {
+		case "tokens":
+			row.TokensTotal += int64Field(e.Fields, "total")
+			row.TokensInput += int64Field(e.Fields, "input")
+			row.TokensOutput += int64Field(e.Fields, "output")
+			row.CacheCreation += int64Field(e.Fields, "cache_creation")
+			row.CacheRead += int64Field(e.Fields, "cache_read")
+			if m := stringField(e.Fields, "model"); m != "" {
+				row.Model = m
+			}
+			if ef := stringField(e.Fields, "effort"); ef != "" {
+				row.Effort = ef
+			}
+		case "spawn":
+			if m := stringField(e.Fields, "model"); m != "" {
+				row.Model = m
+			}
+			if ef := stringField(e.Fields, "effort"); ef != "" {
+				row.Effort = ef
+			}
+		case "gate":
+			row.GateOutcome = e.Outcome
+		case "review":
+			row.ReviewOutcome = e.Outcome
+		case "verdict":
+			row.Verdict = e.Outcome
+		case "phase":
+			row.Phase = e.Outcome
+		}
+	}
+	out := make([]TaskRow, 0, len(order))
+	for _, key := range order {
+		row := rows[key]
+		if row.TokensInput > 0 {
+			row.CacheReadRatio = float64(row.CacheRead) / float64(row.TokensInput)
+		}
+		out = append(out, *row)
+	}
+	return out
+}

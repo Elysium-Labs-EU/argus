@@ -259,6 +259,24 @@ func TestLogRunSummaryEmitsBlockedFields(t *testing.T) {
 	}
 }
 
+func TestLauncherModelEffort(t *testing.T) {
+	cases := []struct {
+		launcher, model, effort string
+	}{
+		{"claude --permission-mode auto", "", ""},
+		{"claude --model opus --permission-mode auto", "opus", ""},
+		{"claude --effort high --permission-mode auto", "", "high"},
+		{"claude --model=opus --effort=high", "opus", "high"},
+		{"claude --model opus --effort high", "opus", "high"},
+	}
+	for _, c := range cases {
+		model, effort := launcherModelEffort(c.launcher)
+		if model != c.model || effort != c.effort {
+			t.Errorf("launcherModelEffort(%q) = (%q, %q), want (%q, %q)", c.launcher, model, effort, c.model, c.effort)
+		}
+	}
+}
+
 func TestRenderReviewDecisionMarks(t *testing.T) {
 	cases := map[string]string{
 		"approve":         "approve",

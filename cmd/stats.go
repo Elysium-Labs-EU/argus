@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"encoding/csv"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -13,6 +16,7 @@ import (
 )
 
 func newStatsCmd() *cobra.Command {
+	var export bool
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "Aggregate the run logs under ~/.argus/runs into supervision metrics",
@@ -20,7 +24,12 @@ func newStatsCmd() *cobra.Command {
 deterministic aggregates: how often the gate escalated instead of auto-approving,
 how often a review reply had to be re-asked, the terminal-phase breakdown, and
 tokens spent per task. It is the analysis half of the log->analyze->improve loop:
-plain code over typed events, no LLM.`,
+plain code over typed events, no LLM.
+
+--export switches to a CSV of one row per task, joining token spend (with the
+cache-read/input ratio) to the model/effort it ran with and the gate/review/
+verdict/phase outcome for that same task — the input a manual dispatch-tuning
+pass reads instead of hand-correlating separate event types.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			home, err := os.UserHomeDir()
 			if err != nil {
@@ -36,12 +45,45 @@ plain code over typed events, no LLM.`,
 				_, _ = fmt.Fprintf(out, "%s no run logs yet under %s\n", ui.TextMuted.Render("i"), dir)
 				return nil
 			}
+			if export {
+				return writeTaskCSV(out, eventlog.JoinTasks(events))
+			}
 			stats := eventlog.Summarize(events)
 			renderStats(cmd, &stats)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&export, "export", false, "print one CSV row per task (tokens, model, effort, gate/review/verdict/phase) instead of the aggregate summary")
 	return cmd
+}
+
+// writeTaskCSV renders JoinTasks' per-task rows as CSV so they can be piped
+// into a spreadsheet or a notebook for the manual dispatch-tuning analysis
+// this export exists for.
+func writeTaskCSV(out io.Writer, rows []eventlog.TaskRow) error {
+	w := csv.NewWriter(out)
+	header := []string{
+		"run", "task", "model", "effort",
+		"tokens_total", "tokens_input", "tokens_output", "cache_creation", "cache_read", "cache_read_ratio",
+		"gate", "review", "verdict", "phase",
+	}
+	if err := w.Write(header); err != nil {
+		return fmt.Errorf("writing csv header: %w", err)
+	}
+	for i := range rows {
+		r := &rows[i]
+		record := []string{
+			r.Run, r.Task, r.Model, r.Effort,
+			strconv.FormatInt(r.TokensTotal, 10), strconv.FormatInt(r.TokensInput, 10), strconv.FormatInt(r.TokensOutput, 10),
+			strconv.FormatInt(r.CacheCreation, 10), strconv.FormatInt(r.CacheRead, 10), strconv.FormatFloat(r.CacheReadRatio, 'f', 4, 64),
+			r.GateOutcome, r.ReviewOutcome, r.Verdict, r.Phase,
+		}
+		if err := w.Write(record); err != nil {
+			return fmt.Errorf("writing csv row for %s/%s: %w", r.Run, r.Task, err)
+		}
+	}
+	w.Flush()
+	return w.Error()
 }
 
 var statsCmd = newStatsCmd()
