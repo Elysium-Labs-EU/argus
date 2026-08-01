@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -92,5 +93,63 @@ func TestPreflightValidShellSyntaxPasses(t *testing.T) {
 	plans := plansWithWorktrees("/repo/.claude/worktrees/a")
 	if err := Preflight(context.Background(), cfg, plans); err != nil {
 		t.Fatalf("valid shell syntax should pass preflight, got %v", err)
+	}
+}
+
+func plansWithRepoRoot(repoRoot string) []WorkerPlan {
+	return []WorkerPlan{{Worker: Worker{RepoRoot: repoRoot, Worktree: filepath.Join(repoRoot, ".claude/worktrees/a")}}}
+}
+
+// TestPreflightRejectsNonexistentRepo pins the --dry-run pre-flight check:
+// dry-run must fail the same way a real run eventually would (at `git
+// worktree add`), not print a confident-looking plan for a --repo that was
+// never there.
+func TestPreflightRejectsNonexistentRepo(t *testing.T) {
+	cfg := &Config{}
+	plans := plansWithRepoRoot(filepath.Join(t.TempDir(), "does-not-exist"))
+	err := Preflight(context.Background(), cfg, plans)
+	if err == nil {
+		t.Fatal("nonexistent --repo should fail preflight, got nil")
+	}
+	if !strings.Contains(err.Error(), "--repo") {
+		t.Errorf("error should name --repo, got: %v", err)
+	}
+}
+
+func TestPreflightRejectsNonGitRepo(t *testing.T) {
+	cfg := &Config{}
+	plans := plansWithRepoRoot(t.TempDir())
+	err := Preflight(context.Background(), cfg, plans)
+	if err == nil {
+		t.Fatal("--repo pointing at a non-git directory should fail preflight, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("error should say the directory is not a git repository, got: %v", err)
+	}
+}
+
+func TestPreflightAcceptsValidGitRepo(t *testing.T) {
+	cfg := &Config{}
+	plans := plansWithRepoRoot(gitInitDir(t))
+	if err := Preflight(context.Background(), cfg, plans); err != nil {
+		t.Fatalf("a real git repo should pass preflight, got %v", err)
+	}
+}
+
+// TestPreflightChecksRepoRootOnceAcrossWorkers pins distinctRepoRoots'
+// dedup: several workers sharing one bad --repo should surface as one
+// consolidated problem, not one per worker.
+func TestPreflightChecksRepoRootOnceAcrossWorkers(t *testing.T) {
+	cfg := &Config{}
+	bad := filepath.Join(t.TempDir(), "does-not-exist")
+	plans := append(plansWithRepoRoot(bad), plansWithRepoRoot(bad)...)
+	plans[1].Worktree = filepath.Join(bad, ".claude/worktrees/b")
+	err := Preflight(context.Background(), cfg, plans)
+	var errs PreflightErrors
+	if !errors.As(err, &errs) {
+		t.Fatalf("want PreflightErrors, got %T (%v)", err, err)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("want 1 consolidated repo problem for 2 workers sharing one bad --repo, got %d: %v", len(errs), errs)
 	}
 }

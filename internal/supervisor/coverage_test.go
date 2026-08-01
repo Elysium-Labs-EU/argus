@@ -599,7 +599,7 @@ func TestRunFullPathToReport(t *testing.T) {
 		Timeout:  time.Second,
 		Policy:   &policy,
 	}
-	workers := []Worker{{Task: "t", Branch: "feat", RepoRoot: t.TempDir(), Worktree: wt}}
+	workers := []Worker{{Task: "t", Branch: "feat", RepoRoot: wt, Worktree: wt}}
 	if err := Run(context.Background(), cfg, workers, false); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
