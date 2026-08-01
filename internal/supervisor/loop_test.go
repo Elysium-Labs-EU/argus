@@ -262,6 +262,17 @@ func TestBuildPlanLabelFallsBackToBranchWithNoTask(t *testing.T) {
 	}
 }
 
+// gitInitDir makes t.TempDir() a real (if empty) git repo, so it passes
+// Preflight's --repo validation the same way a real checkout would.
+func gitInitDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init %s: %v\n%s", dir, err, out)
+	}
+	return dir
+}
+
 func TestRunDryRunHasNoSideEffects(t *testing.T) {
 	rr := &recordingRunner{paneList: twoPaneList}
 	var buf bytes.Buffer
@@ -272,9 +283,10 @@ func TestRunDryRunHasNoSideEffects(t *testing.T) {
 		Base:     "origin/main",
 		Interval: time.Second,
 	}
+	repoA, repoB := gitInitDir(t), gitInitDir(t)
 	workers := []Worker{
-		{Task: "a", Branch: "feat-a", RepoRoot: "/repo-a", PaneID: "1-2"},
-		{Task: "b", Branch: "feat-b", RepoRoot: "/repo-b", PaneID: "1-3"},
+		{Task: "a", Branch: "feat-a", RepoRoot: repoA, PaneID: "1-2"},
+		{Task: "b", Branch: "feat-b", RepoRoot: repoB, PaneID: "1-3"},
 	}
 	if err := Run(context.Background(), cfg, workers, true); err != nil {
 		t.Fatalf("dry run: %v", err)
@@ -284,7 +296,7 @@ func TestRunDryRunHasNoSideEffects(t *testing.T) {
 	if !strings.Contains(out, "dry run") {
 		t.Errorf("dry run output should say so; got:\n%s", out)
 	}
-	if !strings.Contains(out, "/repo-a/.claude/worktrees/feat-a") {
+	if !strings.Contains(out, filepath.Join(repoA, ".claude/worktrees/feat-a")) {
 		t.Errorf("dry run should print the derived worktree path")
 	}
 
@@ -301,11 +313,12 @@ func TestRunRefusesCollidingWorktrees(t *testing.T) {
 		Now:    time.Now,
 		Client: herdr.NewWithRunner(rr.run),
 	}
+	repo := gitInitDir(t)
 	// Same repo + same branch → same worktree → must be refused, even though the
 	// two panes are distinct.
 	workers := []Worker{
-		{Task: "a", Branch: "feat-x", RepoRoot: "/repo", PaneID: "1-2"},
-		{Task: "b", Branch: "feat-x", RepoRoot: "/repo", PaneID: "1-3"},
+		{Task: "a", Branch: "feat-x", RepoRoot: repo, PaneID: "1-2"},
+		{Task: "b", Branch: "feat-x", RepoRoot: repo, PaneID: "1-3"},
 	}
 	if err := Run(context.Background(), cfg, workers, true); err == nil {
 		t.Fatal("want error when two workers target the same worktree, got nil")
@@ -314,8 +327,8 @@ func TestRunRefusesCollidingWorktrees(t *testing.T) {
 	// Two panes launched from the same repo root but with distinct branches is
 	// fine — the shared launch cwd is not a collision.
 	ok := []Worker{
-		{Task: "a", Branch: "feat-a", RepoRoot: "/repo", PaneID: "1-2"},
-		{Task: "b", Branch: "feat-b", RepoRoot: "/repo", PaneID: "1-3"},
+		{Task: "a", Branch: "feat-a", RepoRoot: repo, PaneID: "1-2"},
+		{Task: "b", Branch: "feat-b", RepoRoot: repo, PaneID: "1-3"},
 	}
 	if err := Run(context.Background(), cfg, ok, true); err != nil {
 		t.Fatalf("distinct branches from one repo root should pass, got %v", err)

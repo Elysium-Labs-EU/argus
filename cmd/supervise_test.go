@@ -32,6 +32,17 @@ func fakeClient() herdr.Client {
 	})
 }
 
+// gitInitDir makes t.TempDir() a real (if empty) git repo, so it passes
+// Preflight's --repo validation the same way a real checkout would.
+func gitInitDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init %s: %v\n%s", dir, err, out)
+	}
+	return dir
+}
+
 func TestSpawnWorkersIssuesOnlyPassesGuard(t *testing.T) {
 	// --issues alone (no --tasks/--branches/--panes) used to trip the "no
 	// workers given" guard, since that check ran before --issues was folded
@@ -506,7 +517,7 @@ func TestRunSupervisionSpawnDryRunSkipsCredProxy(t *testing.T) {
 	cmd.SetOut(&buf)
 	cmd.SetContext(context.Background())
 
-	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: t.TempDir()}}
+	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: gitInitDir(t)}}
 	err := runSupervision(cmd, fakeClient(), workers, &superviseOpts{
 		dryRun: true, base: "origin/main",
 	})
@@ -698,7 +709,7 @@ func TestRunSupervisionSpawnRepoExplicitOmitsWorkspace(t *testing.T) {
 		return nil, errors.New("stop after worktree create")
 	})
 
-	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: t.TempDir()}}
+	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: gitInitDir(t)}}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
@@ -1074,7 +1085,7 @@ func TestRunSupervisionSpawnDryRunPlumbsRepoAllow(t *testing.T) {
 	cmd.SetOut(&buf)
 	cmd.SetContext(context.Background())
 
-	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: t.TempDir()}}
+	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: gitInitDir(t)}}
 	err := runSupervision(cmd, fakeClient(), workers, &superviseOpts{
 		dryRun: true, base: "origin/main", repoAllow: []string{"Bash(pnpm *)"},
 	})

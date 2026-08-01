@@ -100,17 +100,49 @@ func TestSuperviseCmdRequiresWorkers(t *testing.T) {
 
 func TestSuperviseDryRunPrintsPlan(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // openRunLog writes under ~/.argus
+	repo := gitRepo(t)
 	cmd := newSuperviseCmd()
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs([]string{"--dry-run", "--repo", "/repo", "--tasks", "t", "--branches", "feat-t"})
+	cmd.SetArgs([]string{"--dry-run", "--repo", repo, "--tasks", "t", "--branches", "feat-t"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("dry-run supervise: %v", err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "dry run") || !strings.Contains(out, "feat-t") {
 		t.Errorf("dry-run should print the plan:\n%s", out)
+	}
+}
+
+// TestSuperviseDryRunRejectsMissingRepo pins the fix for the issue this test
+// name describes: --dry-run must validate --repo the same way a real run
+// eventually would, instead of printing a confident-looking plan for a repo
+// that was never there and only failing once --dry-run is dropped.
+func TestSuperviseDryRunRejectsMissingRepo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cmd := newSuperviseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--dry-run", "--repo", "/nonexistent/path", "--tasks", "t", "--branches", "feat-t"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("dry-run with a nonexistent --repo should fail, got nil")
+	}
+}
+
+// TestSuperviseDryRunRejectsNonGitRepo covers the second half of the same
+// fix: an existing directory that is not itself a git repository must also
+// fail --dry-run, not just a path that doesn't exist at all.
+func TestSuperviseDryRunRejectsNonGitRepo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cmd := newSuperviseCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--dry-run", "--repo", t.TempDir(), "--tasks", "t", "--branches", "feat-t"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("dry-run with a non-git --repo should fail, got nil")
 	}
 }
 

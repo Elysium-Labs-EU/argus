@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -46,6 +47,11 @@ func Preflight(ctx context.Context, cfg *Config, plans []WorkerPlan) error {
 	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
 		errs = append(errs, err)
 	}
+	for _, root := range distinctRepoRoots(plans) {
+		if err := checkRepoRoot(ctx, root); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if err := checkShellSyntax(ctx, "gate_verify_command", cfg.GateVerifyCommand); err != nil {
 		errs = append(errs, err)
 	}
@@ -56,6 +62,46 @@ func Preflight(ctx context.Context, cfg *Config, plans []WorkerPlan) error {
 		return nil
 	}
 	return errs
+}
+
+// distinctRepoRoots collects each plan's RepoRoot once, in first-seen order,
+// so a multi-worker run against the same --repo checks it a single time
+// instead of once per worker. A plan with no RepoRoot (every existing
+// Preflight test builds plans this way, and --attach never calls Preflight)
+// is left out rather than treated as a config problem — checkRepoRoot has
+// nothing to validate against an unset root.
+func distinctRepoRoots(plans []WorkerPlan) []string {
+	seen := make(map[string]bool, len(plans))
+	var roots []string
+	for i := range plans {
+		root := plans[i].RepoRoot
+		if root == "" || seen[root] {
+			continue
+		}
+		seen[root] = true
+		roots = append(roots, root)
+	}
+	return roots
+}
+
+// checkRepoRoot validates that root exists and is a git repository — the two
+// preconditions every worker's later `git worktree add` requires. Checked
+// here, before Run creates a single worktree, so a typo'd --repo is caught
+// even under --dry-run: without it, --dry-run would print a confident-looking
+// plan for a root that only fails once the real (non-dry-run) spawn tries to
+// create a worktree in it.
+func checkRepoRoot(ctx context.Context, root string) error {
+	info, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("--repo %q: %w", root, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("--repo %q is not a directory", root)
+	}
+	if _, err := git(ctx, root, "rev-parse", "--git-dir"); err != nil {
+		return fmt.Errorf("--repo %q is not a git repository: %w", root, err)
+	}
+	return nil
 }
 
 // checkShellSyntax reports a config problem when cmdStr, if actually run
