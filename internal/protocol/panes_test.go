@@ -1,6 +1,10 @@
 package protocol
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestPaneRegistryRoundTrips(t *testing.T) {
 	repoRoot := t.TempDir()
@@ -45,5 +49,31 @@ func TestPaneRegistrySurvivesWorktreeDirectoryBeingGone(t *testing.T) {
 	}
 	if got.Panes[worktree] != "w9:p1" {
 		t.Errorf("registry entry should resolve independent of the worktree directory's existence, got %+v", got)
+	}
+}
+
+func TestWritePaneRegistryUnwritableDir(t *testing.T) {
+	repoRoot := t.TempDir()
+	if err := os.Chmod(repoRoot, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(repoRoot, 0o700) }) // let t.TempDir's own cleanup remove it
+
+	if err := WritePaneRegistry(repoRoot, PaneRegistry{Panes: map[string]string{"k": "v"}}); err == nil {
+		t.Fatal("want error writing registry under a read-only repo root, got nil")
+	}
+}
+
+func TestLoadPaneRegistryMalformedJSON(t *testing.T) {
+	repoRoot := t.TempDir()
+	path := PaneRegistryPath(repoRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := LoadPaneRegistry(repoRoot); err == nil {
+		t.Fatal("want error decoding malformed pane registry, got nil")
 	}
 }

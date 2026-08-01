@@ -97,6 +97,32 @@ func TestLoadMissingFileIsNotExist(t *testing.T) {
 	}
 }
 
+func TestLoadMalformedJSON(t *testing.T) {
+	path := StatusPath(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("want error decoding malformed status file, got nil")
+	}
+}
+
+func TestWriteUnwritableDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // let t.TempDir's own cleanup remove it
+
+	path := filepath.Join(dir, "sub", "status.json")
+	if err := Write(path, &Status{Task: "x", Phase: PhaseWorking}); err == nil {
+		t.Fatal("want error writing status under a read-only parent, got nil")
+	}
+}
+
 func TestWriteLeavesNoTempFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := StatusPath(dir)
