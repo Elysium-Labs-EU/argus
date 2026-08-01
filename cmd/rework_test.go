@@ -255,6 +255,52 @@ func TestRunReworkDryRunPrintsPlanWithoutDispatching(t *testing.T) {
 	}
 }
 
+func TestRunReworkMaxRoundsZeroOrNegativeErrors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+
+	for _, n := range []int{0, -1} {
+		cmd, _ := testCmd()
+		client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+			t.Fatalf("unexpected herdr call for an invalid --max-rounds: %v", args)
+			return nil, nil
+		})
+		err := runRework(cmd, client, &fakeReviewer{}, reworkLogger(), &reworkOpts{
+			worktree: dir, base: "feat-x", maxRounds: n, maxRoundsExplicit: true,
+		})
+		if _, ok := errors.AsType[*ui.UserError](err); !ok {
+			t.Fatalf("--max-rounds %d: want a *ui.UserError, got %v", n, err)
+		}
+	}
+}
+
+func TestRunReworkMaxRoundsDefaultsWhenOmitted(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	cmd, buf := testCmd()
+
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected herdr call during --dry-run: %v", args)
+		return nil, nil
+	})
+
+	// maxRounds left at its zero value with maxRoundsExplicit false, mirroring
+	// what happens when the flag is never passed on the command line.
+	err := runRework(cmd, client, &fakeReviewer{}, reworkLogger(), &reworkOpts{worktree: dir, base: "feat-x", dryRun: true})
+	if err != nil {
+		t.Fatalf("runRework: %v", err)
+	}
+	if !strings.Contains(buf.String(), fmt.Sprintf("max-rounds: %d", supervisor.DefaultMaxReworkRounds)) {
+		t.Errorf("expected the default max-rounds in the plan:\n%s", buf.String())
+	}
+}
+
 func TestRunReworkApprovesFirstRound(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := initGitDirWithDiff(t)

@@ -76,7 +76,8 @@ outcome instead of retrying forever.`,
 			return runRework(cmd, herdr.New(), nil, logger, &reworkOpts{
 				worktree: worktree, base: base, task: task, findings: findings,
 				launcher: launcher, workerRuntime: workerRuntime, interval: interval,
-				maxRounds: maxRounds, dryRun: dryRun, noCredProxy: noCredProxy, credentialEnv: overrides,
+				maxRounds: maxRounds, maxRoundsExplicit: cmd.Flags().Changed("max-rounds"),
+				dryRun: dryRun, noCredProxy: noCredProxy, credentialEnv: overrides,
 				maxReworkBudget:         maxReworkBudget,
 				maxReworkBudgetExplicit: cmd.Flags().Changed("max-rework-budget"),
 				reviewModel:             reviewModel,
@@ -159,6 +160,7 @@ type reworkOpts struct {
 	reviewEffortExplicit    bool
 	reviewNoteExplicit      bool
 	maxReworkBudgetExplicit bool
+	maxRoundsExplicit       bool
 }
 
 // dispatchTarget builds dispatchIntoPane's input from a reworkOpts, mirroring
@@ -215,7 +217,20 @@ func prepareReworkRun(ctx context.Context, out io.Writer, opts *reworkOpts) (bra
 	if oerr := enforceOwnership(ctx, out, opts.worktree, opts.owner, time.Now()); oerr != nil {
 		return "", "", nil, true, oerr
 	}
-	if opts.maxRounds <= 0 {
+	if opts.maxRoundsExplicit {
+		// The caller typed 0 or a negative number on purpose — silently
+		// swapping in the default here would mask the exact thing they're
+		// trying to change, so this is a hard error rather than a fallback.
+		if opts.maxRounds <= 0 {
+			return "", "", nil, true, &ui.UserError{
+				Err:  fmt.Errorf("--max-rounds must be positive, got %d", opts.maxRounds),
+				Hint: "omit --max-rounds to use the default (3), or pass a positive integer",
+			}
+		}
+	} else if opts.maxRounds <= 0 {
+		// cobra's own flag default already is DefaultMaxReworkRounds, so this
+		// only matters for callers that build reworkOpts directly (tests, or
+		// runRework used as a library) without going through flag parsing.
 		opts.maxRounds = supervisor.DefaultMaxReworkRounds
 	}
 
