@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 // ErrNothingToCommit means the worktree had no changes to ship.
@@ -28,9 +30,58 @@ func git(ctx context.Context, worktree string, args ...string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
+		if uerr := translateGitFailure(worktree, msg); uerr != nil {
+			return "", uerr
+		}
 		return "", fmt.Errorf("git %s: %s", sub, msg)
 	}
 	return strings.TrimSpace(out.String()), nil
+}
+
+// translateGitFailure recognizes the two git-subprocess failures every
+// --worktree/--base-shaped argus command can hit — git can't cd into the
+// worktree path, or git can't resolve a ref (almost always a bad --base) —
+// and turns them into a message naming the actual bad input instead of
+// git's raw "fatal: ..." text, which otherwise reaches the terminal
+// verbatim (main.go renders a *ui.UserError specially; anything else just
+// prints raw). Every argus git call goes through git(), so translating once
+// here reaches ship, rebase, tend, and worktree prune alike; DiffFor
+// (reviewer.go) calls git() too, for the same reason. Returns nil for
+// anything unrecognized, so the caller falls back to its original, less
+// friendly but still accurate "git <sub>: <msg>" wrap.
+func translateGitFailure(worktree, msg string) error {
+	if i := strings.Index(msg, "cannot change to"); i >= 0 {
+		reason := msg[i:]
+		if j := strings.LastIndex(reason, ": "); j >= 0 {
+			reason = reason[j+2:]
+		}
+		return &ui.UserError{
+			Err:  fmt.Errorf("cannot use worktree %s: %s", worktree, reason),
+			Hint: "check --worktree (or --repo for `argus worktree prune`)",
+		}
+	}
+	if _, ref, ok := strings.Cut(msg, "couldn't find remote ref "); ok {
+		return &ui.UserError{Err: fmt.Errorf("no such ref on origin: %s", strings.TrimSpace(ref)), Hint: "check --base"}
+	}
+	if ref, ok := quotedAfter(msg, "ambiguous argument '"); ok {
+		return &ui.UserError{Err: fmt.Errorf("no such ref: %s", ref), Hint: "check --base"}
+	}
+	if ref, ok := quotedAfter(msg, "bad revision '"); ok {
+		return &ui.UserError{Err: fmt.Errorf("no such ref: %s", ref), Hint: "check --base"}
+	}
+	return nil
+}
+
+// quotedAfter extracts the text between prefix and the single quote that
+// follows it, e.g. quotedAfter("fatal: ambiguous argument 'foo': unknown
+// revision...", "ambiguous argument '") == ("foo", true).
+func quotedAfter(msg, prefix string) (string, bool) {
+	_, rest, ok := strings.Cut(msg, prefix)
+	if !ok {
+		return "", false
+	}
+	ref, _, ok := strings.Cut(rest, "'")
+	return ref, ok
 }
 
 // controlPlanePaths are the argus-written files that must never land in a PR: the

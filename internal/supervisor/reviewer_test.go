@@ -2,8 +2,12 @@ package supervisor
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 func fakeReviewRunner(reply string) reviewRunner {
@@ -215,4 +219,43 @@ func TestExtractJSONObjectBalances(t *testing.T) {
 	if got != want {
 		t.Errorf("got %q want %q", got, want)
 	}
+}
+
+// TestDiffForDistinguishesBadWorktreeFromBadBase is the regression test for
+// issue #393's `review`-specific symptom: a bad --worktree and a bad --base
+// used to both collapse into the identical, undiagnosable "exit status 128"
+// (DiffFor discarded git's stderr entirely). Routed through the shared
+// git() helper, the two now produce distinct messages naming the actual bad
+// input.
+func TestDiffForDistinguishesBadWorktreeFromBadBase(t *testing.T) {
+	worktree, base := initGitRepo(t)
+
+	t.Run("bad worktree", func(t *testing.T) {
+		bad := filepath.Join(t.TempDir(), "does-not-exist")
+		_, err := DiffFor(context.Background(), bad, base)
+		if err == nil {
+			t.Fatal("want an error for a nonexistent worktree path")
+		}
+		var uerr *ui.UserError
+		if !errors.As(err, &uerr) {
+			t.Fatalf("want *ui.UserError, got %T: %v", err, err)
+		}
+		if !strings.Contains(uerr.Error(), bad) {
+			t.Errorf("error %q does not name the bad worktree path %q", uerr.Error(), bad)
+		}
+	})
+
+	t.Run("bad base", func(t *testing.T) {
+		_, err := DiffFor(context.Background(), worktree, "nonexistent-base-ref")
+		if err == nil {
+			t.Fatal("want an error for a nonexistent base ref")
+		}
+		var uerr *ui.UserError
+		if !errors.As(err, &uerr) {
+			t.Fatalf("want *ui.UserError, got %T: %v", err, err)
+		}
+		if !strings.Contains(uerr.Error(), "nonexistent-base-ref") {
+			t.Errorf("error %q does not name the bad base ref", uerr.Error())
+		}
+	})
 }
