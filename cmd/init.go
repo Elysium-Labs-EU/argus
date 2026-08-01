@@ -28,12 +28,17 @@ func newInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Write .argus/config.yml for this repo, prefilled from a toolchain guess",
 		Long: `Init peeks for Taskfile.yml, Makefile, package.json, or go.mod (in that order,
-first match wins) in the repo root to suggest a base_branch/allow/brief_note,
+first match wins) in the repo root to suggest allow/brief_note/ship_verify_command,
 prints the suggestion, and asks you to confirm or edit each value before
 writing .argus/config.yml (see internal/repoconfig). This is pure convenience:
 argus itself has no built-in opinion on any repo's toolchain and never will —
 guessing wrong, or a toolchain this version doesn't recognize, is not a bug to
-file, just edit the YAML by hand. The forge key is the one setting init
+file, just edit the YAML by hand. base_branch is guessed separately, from the
+local refs/remotes/origin/HEAD ref rather than any toolchain marker — a ref a
+plain "git clone" sets up but a bare "git init" or a shallow/single-branch
+clone won't, so base_branch is left unset as often as not; that's a safe
+default; ResolveBase falls through to origin/HEAD and then "main" at
+ship/rebase time anyway. The forge key is the one setting init
 can't guess at all: a self-hosted host is exactly the ambiguity
 ship/supervise/worktree prune's own --forge flag exists to resolve, so
 it's only ever set via --forge here or the interactive prompt.`,
