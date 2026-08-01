@@ -168,7 +168,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to <repo>-fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
 	cmd.Flags().BoolVar(&jiraAssignOnSpawn, "jira-assign-on-spawn", false, "with --jira-issues: assign each issue to the caller (the account owning the configured Jira credentials) at spawn time, before the worker starts")
 	cmd.Flags().StringVar(&jiraTransitionOnSpawn, "jira-transition-on-spawn", "", "with --jira-issues: transition name or ID to move each issue to at spawn time (e.g. \"In Progress\"); unset skips this step")
-	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated); drives worker count in the default mode")
+	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated, CSV-quoted); drives worker count in the default mode. An unquoted comma inside one brief is read as another task, not an error — wrap the whole brief in CSV quotes (--tasks '\"brief, with a comma\"') or use --tasks-file for punctuation-heavy free text")
 	cmd.Flags().StringVar(&tasksFile, "tasks-file", "", "path to a file with one task per line, appended after --tasks; unlike --tasks this is not CSV-parsed, so commas and quotes in a free-text brief are safe")
 	cmd.Flags().StringSliceVar(&branches, "branches", nil, "branch per worker, paired positionally (default argus-<task-slug>); if given at all, must have exactly one entry per task")
 	cmd.Flags().StringSliceVar(&labels, "labels", nil, "herdr workspace label per worker, paired positionally (default: derived from --tasks, falling back to the branch)")
@@ -580,6 +580,7 @@ func spawnWorkers(ctx context.Context, out io.Writer, client herdr.Client, in *w
 	if err := resolveSpawnRepo(in); err != nil {
 		return nil, err
 	}
+	warnAmbiguousTaskSplit(out, in.tasks)
 	if in.tasksFile != "" {
 		fileTasks, err := loadTasksFile(out, in.tasksFile)
 		if err != nil {
@@ -615,10 +616,12 @@ func resolveSpawnRepo(in *workerInput) error {
 }
 
 // loadTasksFile reads --tasks-file into one task per line. --tasks goes through
-// pflag's CSV parsing, which chokes on commas and unescaped quotes in free-text
-// prose (`bare " in non-quoted-field`); a tasks file sidesteps that entirely by
-// only ever splitting on newlines, so a multi-sentence brief with punctuation
-// survives untouched as long as it stays on one line.
+// pflag's CSV parsing: a bare, unmatched `"` in a field is a hard parse error,
+// but an unquoted comma is not — it's read as a field separator (CSV's normal
+// job), silently turning one intended brief into two. A tasks file sidesteps
+// both failure modes by only ever splitting on newlines, so a multi-sentence
+// brief with commas or quotes survives untouched as long as it stays on one
+// line.
 //
 // It structurally preflight-checks the file before any worker spawns: a blank
 // line between two non-blank lines is refused outright (a paragraph-shaped
@@ -668,6 +671,23 @@ func loadTasksFile(w io.Writer, path string) ([]string, error) {
 	}
 	warnAnomalousTaskLineLengths(w, path, tasks)
 	return tasks, nil
+}
+
+// warnAmbiguousTaskSplit prints a non-blocking warning when a --tasks item
+// carries leading or trailing whitespace — the shape pflag's CSV reader
+// leaves behind when an unquoted comma inside one free-text brief is read as
+// a field separator instead of literal punctuation ("a, b" splits into "a"
+// and " b"). It can't be a hard error: a deliberately written multi-task list
+// like "task one, task two" produces the identical shape, so failing the run
+// would break that ordinary usage too — this only flags the pattern so the
+// operator can check the plan before anything spawns.
+func warnAmbiguousTaskSplit(w io.Writer, tasks []string) {
+	for i, t := range tasks {
+		if trimmed := strings.TrimSpace(t); trimmed != t && trimmed != "" {
+			_, _ = fmt.Fprintf(w, "%s --tasks item %d (%q) has leading/trailing whitespace — likely an unquoted comma inside one brief was split into separate tasks; wrap the whole brief in CSV quotes (--tasks '\"brief, with a comma\"') or use --tasks-file instead\n",
+				ui.LabelWarning.Render("○"), i+1, t)
+		}
+	}
 }
 
 // anomalousLineLengthRatio and anomalousLineLengthFloor gate
