@@ -868,6 +868,62 @@ func TestDispatchRebaseWorkerNoStatus(t *testing.T) {
 	}
 }
 
+// fakeRebaseClientStuckPane is fakeRebaseClient plus a "pane list" that always
+// reports agentStatus for paneID — used to drive WaitForStatus's
+// paneStuckTracker into escalating (see TestDispatchRebaseWorkerHerdrStuckFailsFast),
+// the regression coverage for argus issue #383.
+func fakeRebaseClientStuckPane(paneID, agentStatus string) herdr.Client {
+	var mu sync.Mutex
+	var spawned bool
+	return herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "worktree":
+			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, paneID), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			mu.Lock()
+			live := spawned
+			mu.Unlock()
+			if !live {
+				return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+			}
+			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":%q}}}`, paneID, agentStatus), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			mu.Lock()
+			spawned = true
+			mu.Unlock()
+			return []byte(`{"result":{}}`), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "list":
+			return fmt.Appendf(nil, `{"result":{"panes":[{"pane_id":%q,"agent_status":%q}]}}`, paneID, agentStatus), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+}
+
+// TestDispatchRebaseWorkerHerdrStuckFailsFast is the regression test for
+// argus issue #383: a worktree with no live pane falls back to spawning a
+// fresh worker (see dispatchIntoPane), and a launcher that wedges on an
+// interactive prompt herdr reports as "blocked" must fail fast with a clear
+// error instead of dispatchRebaseWorker hanging on WaitForStatus forever. A
+// 3-minute interval — comfortably over internal/supervisor's own
+// herdrStuckThreshold (2 minutes) — makes WaitForStatus's very first tick
+// (fired immediately, see time.NewTimer(0)) already cross the threshold, so
+// this resolves in milliseconds of real time rather than actually waiting
+// out the threshold.
+func TestDispatchRebaseWorkerHerdrStuckFailsFast(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClientStuckPane("w1:p1", "blocked")
+	var buf bytes.Buffer
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
+		worktree: t.TempDir(), base: "main", launcher: "claude", interval: 3 * time.Minute,
+	})
+	if err == nil || !strings.Contains(err.Error(), "agent_status") {
+		t.Fatalf("want a herdr-stuck escalation error, got %v", err)
+	}
+}
+
 // TestDispatchRebaseWorkerReusesLiveAgent is the regression test for argus issue
 // #88: rebase targets a worktree an earlier task's worker already ran in, so its
 // root pane very often still holds that worker's live, idle Claude Code session

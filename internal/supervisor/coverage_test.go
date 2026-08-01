@@ -301,6 +301,35 @@ func TestWaitForStatusReportsHerdrBlockedPane(t *testing.T) {
 	}
 }
 
+// TestWaitForStatusEscalatesOnStuckPane is the WaitForStatus-level regression
+// test for argus issue #383, exercising the wiring in WaitForStatus itself
+// (as opposed to TestPaneStuckTracker*'s direct calls to the tracker): a
+// worktree with no live pane falls back to spawning a fresh worker, and a
+// launcher that wedges on a prompt herdr reports as "blocked" must make
+// WaitForStatus return a clear error instead of polling status.json forever.
+// interval is deliberately 3 minutes — comfortably over herdrStuckThreshold
+// (2 minutes) — so WaitForStatus's very first tick (fired immediately, see
+// time.NewTimer(0) in its own loop) already crosses the threshold in one
+// step: this resolves in milliseconds of real time, not an actual 2-minute
+// wait, exactly like the accumulation trick TestPaneStuckTracker* use.
+func TestWaitForStatusEscalatesOnStuckPane(t *testing.T) {
+	wt := t.TempDir()
+	client := herdr.NewWithRunner(fakePaneListRunner(func() string { return "blocked" }))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, seen, err := WaitForStatus(ctx, client, "w1:p1", wt, 3*time.Minute, time.Now(), nil)
+	if err == nil {
+		t.Fatal("want a herdr-stuck escalation error, got nil")
+	}
+	if seen {
+		t.Error("no status.json was ever written; WaitForStatus should not report one seen")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("escalation reason should name herdr's reported agent_status, got %q", err)
+	}
+}
+
 // TestPaneStuckTrackerEscalatesOnIdleWithNoReport reproduces argus issue
 // #383: a rework/rebase dispatch into a worktree with no live pane falls
 // back to spawning a fresh worker (see dispatchIntoPane), and that worker's
@@ -314,16 +343,20 @@ func TestWaitForStatusReportsHerdrBlockedPane(t *testing.T) {
 func TestPaneStuckTrackerEscalatesOnIdleWithNoReport(t *testing.T) {
 	client := herdr.NewWithRunner(fakePaneListRunner(func() string { return "idle" }))
 	var tracker paneStuckTracker
+	var buf bytes.Buffer
 
-	if err := tracker.check(context.Background(), client, "w1:p1", nil, false, time.Minute); err != nil {
+	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
 		t.Fatalf("must not escalate before herdrStuckThreshold is crossed, got %v", err)
 	}
-	err := tracker.check(context.Background(), client, "w1:p1", nil, false, time.Minute)
+	err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute)
 	if err == nil {
 		t.Fatal("must escalate once an idle, never-reported pane crosses herdrStuckThreshold")
 	}
 	if !strings.Contains(err.Error(), "never been written") {
 		t.Errorf("escalation reason should call out that status.json was never written, got %q", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "is idle but has never written a status") {
+		t.Errorf("want an idle-without-report notice naming the pane, got %q", got)
 	}
 }
 
@@ -370,8 +403,9 @@ func TestPaneStuckTrackerResetsWhenPaneRecovers(t *testing.T) {
 	status := "blocked"
 	client := herdr.NewWithRunner(fakePaneListRunner(func() string { return status }))
 	var tracker paneStuckTracker
+	var buf bytes.Buffer
 
-	if err := tracker.check(context.Background(), client, "w1:p1", nil, false, time.Minute); err != nil {
+	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if tracker.elapsed == 0 {
@@ -379,11 +413,36 @@ func TestPaneStuckTrackerResetsWhenPaneRecovers(t *testing.T) {
 	}
 
 	status = "working"
-	if err := tracker.check(context.Background(), client, "w1:p1", nil, false, time.Minute); err != nil {
+	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if tracker.elapsed != 0 {
 		t.Errorf("expected stuck time to reset once the pane recovers, got %v", tracker.elapsed)
+	}
+	if got := buf.String(); !strings.Contains(got, "pane w1:p1 resumed") {
+		t.Errorf("want a resumed notice naming the pane, got %q", got)
+	}
+}
+
+// TestPaneStuckTrackerPaneListErrorLeavesUnchanged verifies that a herdr
+// transport failure (which says nothing about the worker's real state) never
+// itself counts as evidence of being stuck: it must not escalate, print a
+// notice, or perturb the tracker's accumulated state.
+func TestPaneStuckTrackerPaneListErrorLeavesUnchanged(t *testing.T) {
+	client := herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
+		return nil, errors.New("boom")
+	})
+	var tracker paneStuckTracker
+	var buf bytes.Buffer
+
+	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
+		t.Fatalf("a herdr transport error must never escalate, got %v", err)
+	}
+	if tracker.elapsed != 0 || tracker.wasStuck {
+		t.Errorf("a herdr transport error must not perturb tracker state, got %+v", tracker)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a herdr transport error must not print a notice, got %q", buf.String())
 	}
 }
 
@@ -414,11 +473,15 @@ func TestPaneStuckTrackerNudgesDoneBeforeEscalating(t *testing.T) {
 	var promptCalls int
 	client := herdr.NewWithRunner(fakePaneListAndPromptRunner(func() string { return "done" }, nil, &promptCalls))
 	var tracker paneStuckTracker
+	var buf bytes.Buffer
 
-	if err := tracker.check(context.Background(), client, "w1:p1", nil, false, time.Minute); err != nil {
+	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
 		t.Fatalf("must not escalate before herdrStuckThreshold is crossed, got %v", err)
 	}
-	if err := tracker.check(context.Background(), client, "w1:p1", nil, false, time.Minute); err != nil {
+	if got := buf.String(); !strings.Contains(got, "pane w1:p1 ended without writing a terminal status") {
+		t.Errorf("want a done-pane notice naming the pane, got %q", got)
+	}
+	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
 		t.Fatalf("crossing the threshold for the first time must nudge, not escalate, got %v", err)
 	}
 	if promptCalls != 1 {
@@ -428,10 +491,10 @@ func TestPaneStuckTrackerNudgesDoneBeforeEscalating(t *testing.T) {
 		t.Errorf("nudging should reset the stuck timer to give the worker a fresh window, got %v", tracker.elapsed)
 	}
 
-	if err := tracker.check(context.Background(), client, "w1:p1", nil, false, time.Minute); err != nil {
+	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
 		t.Fatalf("must not escalate before the second threshold window is crossed, got %v", err)
 	}
-	if err := tracker.check(context.Background(), client, "w1:p1", nil, false, time.Minute); err == nil {
+	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err == nil {
 		t.Fatal("must escalate once the worker stays stuck through a second threshold window")
 	}
 	if promptCalls != 1 {
