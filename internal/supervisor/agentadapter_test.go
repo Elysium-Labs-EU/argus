@@ -52,6 +52,17 @@ func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 	}
 }
 
+// TestSettingsForEnablesAllProjectMcpServers guards against a headless
+// worker hanging forever on Claude Code's one-time MCP-server consent gate:
+// with no human present to answer it, every project MCP server must already
+// be pre-approved before the worker's launcher ever starts.
+func TestSettingsForEnablesAllProjectMcpServers(t *testing.T) {
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil)
+	if !settings.EnableAllProjectMcpServers {
+		t.Error("expected EnableAllProjectMcpServers to be true so the first-run MCP consent gate never blocks a headless worker")
+	}
+}
+
 func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
 	settings := settingsFor(wt, nil, nil)

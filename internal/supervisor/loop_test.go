@@ -1590,13 +1590,14 @@ func TestExecuteInvalidatesStaleStatusBeforeSpawn(t *testing.T) {
 	}
 }
 
-// fakePaneListRunner answers `pane list` with a single pane whose agent_status
-// is whatever agentStatus() currently returns, so a test can flip herdr's
-// reported state between calls without a real herdr process.
-func fakePaneListRunner(paneID string, agentStatus func() string) herdr.Runner {
+// fakePaneListRunner answers `pane list` with a single pane (id "w1:p1")
+// whose agent_status is whatever agentStatus() currently returns, so a test
+// can flip herdr's reported state between calls without a real herdr
+// process.
+func fakePaneListRunner(agentStatus func() string) herdr.Runner {
 	return func(_ context.Context, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "pane" && args[1] == "list" {
-			return []byte(`{"result":{"panes":[{"pane_id":"` + paneID + `","agent_status":"` + agentStatus() + `"}]}}`), nil
+			return []byte(`{"result":{"panes":[{"pane_id":"w1:p1","agent_status":"` + agentStatus() + `"}]}}`), nil
 		}
 		return []byte(`{"result":{}}`), nil
 	}
@@ -1609,7 +1610,7 @@ func fakePaneListRunner(paneID string, agentStatus func() string) herdr.Runner {
 // tick is fed in threshold-sized steps rather than waiting on
 // herdrStuckThreshold (2 minutes) in real time.
 func TestCheckHerdrStuckEscalatesAfterThreshold(t *testing.T) {
-	client := herdr.NewWithRunner(fakePaneListRunner("w1:p1", func() string { return "blocked" }))
+	client := herdr.NewWithRunner(fakePaneListRunner(func() string { return "blocked" }))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
 	log := eventlog.New(io.Discard, "supervise", "run1", nil)
 
@@ -1635,10 +1636,12 @@ func TestCheckHerdrStuckEscalatesAfterThreshold(t *testing.T) {
 // a pane that was blocked (e.g. on a permission prompt) and then recovered
 // (the prompt got answered) must not accumulate stuck time across the gap, so
 // a brief blip never counts toward the same threshold as a genuinely wedged
-// pane.
+// pane. Recovery is modeled as "working" rather than "idle" — idle with
+// status.json never written is itself a stuck state (see
+// TestCheckHerdrStuckEscalatesOnIdleWithNoReport), not a recovery.
 func TestCheckHerdrStuckResetsWhenPaneRecovers(t *testing.T) {
 	status := "blocked"
-	client := herdr.NewWithRunner(fakePaneListRunner("w1:p1", func() string { return status }))
+	client := herdr.NewWithRunner(fakePaneListRunner(func() string { return status }))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
 
 	checkHerdrStuck(context.Background(), client, nil, st, time.Minute)
@@ -1646,13 +1649,55 @@ func TestCheckHerdrStuckResetsWhenPaneRecovers(t *testing.T) {
 		t.Fatal("expected stuck time to accumulate while herdr reports blocked")
 	}
 
-	status = "idle"
+	status = "working"
 	checkHerdrStuck(context.Background(), client, nil, st, time.Minute)
 	if st.herdrStuckElapsed != 0 {
 		t.Errorf("expected stuck time to reset once the pane recovers, got %v", st.herdrStuckElapsed)
 	}
 	if st.herdrEscalation != "" {
 		t.Error("a recovered pane must never be escalated")
+	}
+}
+
+// TestCheckHerdrStuckEscalatesOnIdleWithNoReport reproduces the reported hang:
+// a worker's launcher lands on an interactive prompt herdr doesn't recognize
+// as "blocked" (e.g. Claude Code's first-run MCP server consent gate), so the
+// pane reads as idle indefinitely and status.json is never written even
+// once (st.hasFile stays false, its zero value) — indistinguishable from
+// "hasn't started yet" without this check.
+func TestCheckHerdrStuckEscalatesOnIdleWithNoReport(t *testing.T) {
+	client := herdr.NewWithRunner(fakePaneListRunner(func() string { return "idle" }))
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
+	log := eventlog.New(io.Discard, "supervise", "run1", nil)
+
+	if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
+		t.Fatal("must not escalate before herdrStuckThreshold is crossed")
+	}
+	if !checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
+		t.Fatal("must escalate once an idle, never-reported pane crosses herdrStuckThreshold")
+	}
+	if !strings.Contains(st.herdrEscalation, "never been written") {
+		t.Errorf("escalation reason should call out that status.json was never written, got %q", st.herdrEscalation)
+	}
+}
+
+// TestCheckHerdrStuckIdleWithPriorReportIsNotStuck guards against a false
+// positive: a worker that already reported at least once (st.hasFile true)
+// and is now idle between turns — the ordinary resting state for a launcher
+// that isn't mid-generation — must never be treated as stuck by the
+// idle-without-report path.
+func TestCheckHerdrStuckIdleWithPriorReportIsNotStuck(t *testing.T) {
+	client := herdr.NewWithRunner(fakePaneListRunner(func() string { return "idle" }))
+	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1", hasFile: true}
+	log := eventlog.New(io.Discard, "supervise", "run1", nil)
+
+	for range 5 {
+		if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
+			t.Fatal("a worker that already reported must never escalate merely for idling")
+		}
+	}
+	if st.herdrEscalation != "" {
+		t.Error("expected no escalation for an idle worker that already reported")
 	}
 }
 
