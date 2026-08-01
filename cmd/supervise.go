@@ -138,7 +138,7 @@ each pane's directory in --panes mode).`,
 			applyRepoWorktreeDir(workers, resolveWorktreeDir(cmd.Flags().Changed("worktree-dir"), worktreeDir, &rc))
 
 			resolvedBase := resolveSuperviseBase(cmd.Context(), cmd.Flags().Changed("base"), base, repoRoot, &rc)
-			policy := resolveGatePolicy(gateFlags{
+			policy, err := resolveGatePolicy(gateFlags{
 				maxDiffLines:          maxDiffLines,
 				proofRequiredPaths:    proofRequiredPaths,
 				alwaysReviewPaths:     alwaysReviewPaths,
@@ -146,6 +146,9 @@ each pane's directory in --panes mode).`,
 				proofRequiredExplicit: cmd.Flags().Changed("proof-required-path"),
 				alwaysReviewExplicit:  cmd.Flags().Changed("always-review-path"),
 			}, &rc)
+			if err != nil {
+				return err
+			}
 			gateVerifyExplicit := cmd.Flags().Changed("gate-verify-command") || cmd.Flags().Changed("verify-cmd")
 			worktreeBootstrapExplicit := cmd.Flags().Changed("worktree-bootstrap-command") || cmd.Flags().Changed("worktree-setup-cmd")
 			gateVerifyCommand := resolveGateVerifyCommand(gateVerifyExplicit, gateVerifyCmd, &rc)
@@ -178,7 +181,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in each worker pane after cd into its worktree. Without this flag, this repo's .argus/config.yml launcher wins, then this default")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "how often to poll each worker's status file")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "per-worker wall-clock deadline before argus stops waiting on it (0 = wait indefinitely)")
-	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
+	cmd.Flags().IntVar(&maxDiffLines, "max-diff-lines", policyDefaults.MaxDiffLines, "review gate: diffs larger than this (insertions+deletions) escalate; 0 disables, negative is rejected. Without this flag, this repo's .argus/config.yml max_diff_lines wins, then this default")
 	cmd.Flags().StringSliceVar(&proofRequiredPaths, "proof-required-path", policyDefaults.ProofRequiredPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) needs real-world proof. Without this flag, this repo's .argus/config.yml proof_required_paths wins, then this default")
 	cmd.Flags().StringSliceVar(&alwaysReviewPaths, "always-review-path", policyDefaults.AlwaysReviewPaths, "review gate: a touched path matching one of these (whole word, or path substring if it contains /) always escalates, even for a small clean diff. Without this flag, this repo's .argus/config.yml always_review_paths wins, then this default")
 	cmd.Flags().StringVar(&gateVerifyCmd, "gate-verify-command", "", "review gate: shell command re-run in a worker's worktree once it reaches a terminal phase (e.g. this repo's own lint/build/pre-commit); a non-zero exit is an unwaivable escalation. Empty (default) runs nothing — today's behavior. Without this flag, this repo's .argus/config.yml gate_verify_command wins, then this default")

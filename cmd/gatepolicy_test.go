@@ -25,7 +25,10 @@ func TestResolveGatePolicyExplicitFlagWinsOutright(t *testing.T) {
 		proofRequiredExplicit: true,
 		alwaysReviewExplicit:  true,
 	}
-	got := resolveGatePolicy(f, &rc)
+	got, err := resolveGatePolicy(f, &rc)
+	if err != nil {
+		t.Fatalf("resolveGatePolicy: %v", err)
+	}
 	if got.MaxDiffLines != 100 {
 		t.Errorf("MaxDiffLines = %d, want the explicit flag value", got.MaxDiffLines)
 	}
@@ -45,7 +48,10 @@ func TestResolveGatePolicyPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
 		AlwaysReviewPaths:  []string{"auth", "billing"},
 	}
 	f := gateFlags{maxDiffLines: 400, proofRequiredPaths: []string{"default"}, alwaysReviewPaths: []string{"default"}}
-	got := resolveGatePolicy(f, &rc)
+	got, err := resolveGatePolicy(f, &rc)
+	if err != nil {
+		t.Fatalf("resolveGatePolicy: %v", err)
+	}
 	if got.MaxDiffLines != 250 {
 		t.Errorf("MaxDiffLines = %d, want 250 from repo config", got.MaxDiffLines)
 	}
@@ -59,7 +65,10 @@ func TestResolveGatePolicyPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
 
 func TestResolveGatePolicyFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
 	f := gateFlags{maxDiffLines: 400, proofRequiredPaths: []string{"systemd"}, alwaysReviewPaths: []string{"monitor"}}
-	got := resolveGatePolicy(f, &repoconfig.Config{})
+	got, err := resolveGatePolicy(f, &repoconfig.Config{})
+	if err != nil {
+		t.Fatalf("resolveGatePolicy: %v", err)
+	}
 	if got.MaxDiffLines != 400 {
 		t.Errorf("MaxDiffLines = %d, want the flag's own default", got.MaxDiffLines)
 	}
@@ -78,9 +87,35 @@ func TestResolveGatePolicyFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
 func TestResolveGatePolicyRepoConfigMaxDiffLinesZeroIsMeaningful(t *testing.T) {
 	zero := 0
 	rc := repoconfig.Config{MaxDiffLines: &zero}
-	got := resolveGatePolicy(gateFlags{maxDiffLines: 400}, &rc)
+	got, err := resolveGatePolicy(gateFlags{maxDiffLines: 400}, &rc)
+	if err != nil {
+		t.Fatalf("resolveGatePolicy: %v", err)
+	}
 	if got.MaxDiffLines != 0 {
 		t.Errorf("MaxDiffLines = %d, want 0 (explicit disable from repo config)", got.MaxDiffLines)
+	}
+}
+
+// TestResolveGatePolicyNegativeFlagValueErrors checks that a negative
+// --max-diff-lines is rejected rather than silently accepted: diff line
+// counts are never negative, so a negative ceiling would escalate every
+// diff instead of doing what its author intended.
+func TestResolveGatePolicyNegativeFlagValueErrors(t *testing.T) {
+	_, err := resolveGatePolicy(gateFlags{maxDiffLines: -5, maxDiffLinesExplicit: true}, &repoconfig.Config{})
+	if err == nil {
+		t.Fatal("want an error for a negative --max-diff-lines value")
+	}
+}
+
+// TestResolveGatePolicyNegativeRepoConfigValueErrors checks the same
+// rejection applies when the negative value comes from
+// .argus/config.yml's max_diff_lines instead of the flag.
+func TestResolveGatePolicyNegativeRepoConfigValueErrors(t *testing.T) {
+	neg := -5
+	rc := repoconfig.Config{MaxDiffLines: &neg}
+	_, err := resolveGatePolicy(gateFlags{maxDiffLines: 400}, &rc)
+	if err == nil {
+		t.Fatal("want an error for a negative repo config max_diff_lines value")
 	}
 }
 
