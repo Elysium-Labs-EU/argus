@@ -98,6 +98,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
 	cmd.Flags().DurationVar(&ownerStaleAfter, "owner-stale-after", ownership.DefaultStaleAfter, ownerStaleAfterFlagHelp)
 	cmd.Flags().StringVar(&shipVerifyCmd, "ship-verify-command", "", "controller-side gate command run before ship commits, in addition to argus's own built-in hook detection (lefthook/pre-commit-framework). Empty (default) runs no extra command. Without this flag, this repo's .argus/config.yml ship_verify_command key wins, then this default")
+	addDebugFlag(cmd)
 	return cmd
 }
 
