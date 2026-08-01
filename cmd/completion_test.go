@@ -186,35 +186,34 @@ func TestCompletionFishCmd_PrintsToStdout(t *testing.T) {
 	}
 }
 
+// These two drive rootCmd (not a standalone newCompletionCmd) because cobra's
+// default Args validation (legacyArgs) only defers to a command's own RunE
+// for unmatched positional args when the command has a parent; a parentless
+// completion command would be rejected by cobra itself ("unknown command"),
+// never reaching our own unsupported-shell error.
 func TestCompletionCmd_UnsupportedShellArg(t *testing.T) {
-	cmd := newCompletionCmd(rootCmd)
-	var out, errBuf bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{"powershell"})
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetArgs([]string{"completion", "powershell"})
 
-	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for unsupported shell argument, got nil")
-	}
-	if !strings.Contains(err.Error(), "powershell") {
-		t.Errorf("expected error to name the rejected shell, got: %v", err)
+	err := rootCmd.Execute()
+	want := `unsupported shell "powershell"; supported shells: bash, zsh, fish`
+	if err == nil || err.Error() != want {
+		t.Fatalf("got error %v, want %q", err, want)
 	}
 }
 
 func TestCompletionCmd_UnsupportedExtraArgs(t *testing.T) {
-	cmd := newCompletionCmd(rootCmd)
-	var out, errBuf bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{"foo", "bar", "baz"})
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetArgs([]string{"completion", "foo", "bar", "baz"})
 
-	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for unrecognized shell arguments, got nil")
-	}
-	if !strings.Contains(err.Error(), "foo") {
-		t.Errorf("expected error to name the rejected shell, got: %v", err)
+	err := rootCmd.Execute()
+	want := `unsupported shell "foo"; supported shells: bash, zsh, fish`
+	if err == nil || err.Error() != want {
+		t.Fatalf("got error %v, want %q", err, want)
 	}
 }
 
