@@ -577,7 +577,11 @@ func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Lo
 		return protocol.Status{}, "", dispatchedAt, err
 	}
 
-	status, seen := supervisor.WaitForStatus(ctx, client, wt.RootPaneID, opts.worktree, opts.interval, dispatchedAt, out)
+	status, seen, werr := supervisor.WaitForStatus(ctx, client, wt.RootPaneID, opts.worktree, opts.interval, dispatchedAt, out)
+	if werr != nil {
+		logger.Action("rework", branch, "herdr-stuck", werr.Error())
+		return protocol.Status{}, "", dispatchedAt, fmt.Errorf("round %d/%d: %w", round, opts.maxRounds, werr)
+	}
 	if !seen {
 		return protocol.Status{}, "", dispatchedAt, fmt.Errorf("worker wrote no status before the deadline (round %d/%d)", round, opts.maxRounds)
 	}

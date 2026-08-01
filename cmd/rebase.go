@@ -290,7 +290,11 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	}
 
 	_, _ = fmt.Fprintf(out, "%s dispatched rebase worker in pane %s; waiting...\n", ui.LabelInfo.Render("i"), wt.RootPaneID)
-	status, seen := supervisor.WaitForStatus(ctx, client, wt.RootPaneID, opts.worktree, opts.interval, dispatchedAt, out)
+	status, seen, werr := supervisor.WaitForStatus(ctx, client, wt.RootPaneID, opts.worktree, opts.interval, dispatchedAt, out)
+	if werr != nil {
+		logger.Action("rebase", branch, "herdr-stuck", werr.Error())
+		return werr
+	}
 	if !seen {
 		logger.Action("rebase", branch, "no-status", "")
 		return fmt.Errorf("worker wrote no status before the deadline")
@@ -419,9 +423,15 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	// (a relative --worktree reused into a pane already
 	// rooted there breaks the `cd ... && <launcher>` chain, so the launcher
 	// never runs and no agent ever comes up). Confirming liveness here,
-	// bounded, catches that before it becomes an open-ended hang in
-	// WaitForStatus below, which is legitimately unbounded once an agent is
-	// known to be live.
+	// bounded, catches that before it becomes a much longer wait in
+	// WaitForStatus below — deliberately open-ended while the agent keeps
+	// reporting a normal state, since real work can take arbitrarily long,
+	// but not unconditionally: WaitForStatus's own paneStuckTracker escalates
+	// once herdr reports this pane stuck or idle-without-ever-reporting for
+	// too long, so a launcher that comes up live but then wedges on a prompt
+	// waitForAgentLive can't see (e.g. a first-run MCP consent gate reached
+	// only once the agent starts actually running) still fails fast instead
+	// of hanging forever.
 	return waitForAgentLive(ctx, client, paneID, target.livenessTimeout, target.livenessInterval)
 }
 
