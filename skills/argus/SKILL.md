@@ -304,9 +304,13 @@ escalation, a `blocked` phase, or a worker still running all stay `in_progress`.
 Ending the turn to wait on workers rather than finishing them now is a legitimate
 pause — say so, don't go quiet.
 
-`--tasks` is CSV-parsed, so a free-text brief containing commas or quotes will fail
-to parse. For multi-sentence briefs with punctuation, put one brief per line in a
-file and pass `--tasks-file` instead (appended after any `--tasks`):
+`--tasks` is CSV-parsed: a bare, unmatched `"` in a brief fails outright, but an
+unquoted comma does not — it's read as another task, silently turning one intended
+brief into two (argus warns when a split item has leading/trailing whitespace, the
+tell-tale sign, but doesn't block the run, since a genuine multi-task list has the
+same shape). Wrap a comma-bearing brief in CSV quotes (`--tasks '"brief, with a
+comma"'`), or for multi-sentence briefs with heavier punctuation, put one brief per
+line in a file and pass `--tasks-file` instead (appended after any `--tasks`):
 
 ```bash
 argus supervise --repo <path> --tasks-file briefs.txt --branches feat-a,feat-b

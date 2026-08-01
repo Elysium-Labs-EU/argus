@@ -718,15 +718,39 @@ func TestRunSupervisionSpawnRepoExplicitOmitsWorkspace(t *testing.T) {
 }
 
 // TestTasksFlagRejectsFreeTextBrief pins down the reported bug (#40): --tasks is
-// parsed as CSV by pflag, so a free-text brief containing commas and quotes fails
-// at flag-parse time with "bare \" in non-quoted-field" rather than being taken
-// literally. --tasks-file (tested below) is the escape hatch for that content.
+// parsed as CSV by pflag, so a free-text brief containing a bare, unmatched `"`
+// fails at flag-parse time with "bare \" in non-quoted-field" rather than being
+// taken literally. --tasks-file (tested below) is the escape hatch for that
+// content. The comma in this brief is incidental to the failure — see
+// TestTasksFlagSplitsOnUnquotedCommaWithoutFailing for what a comma alone does.
 func TestTasksFlagRejectsFreeTextBrief(t *testing.T) {
 	cmd := newSuperviseCmd()
 	brief := `Fix the parser: it treats "quoted" text, and commas, as CSV.`
 	err := cmd.Flags().Parse([]string{"--tasks", brief})
 	if err == nil {
-		t.Fatal("want a CSV parse error for a comma-and-quote brief passed to --tasks, got nil")
+		t.Fatal("want a CSV parse error for a bare-quote brief passed to --tasks, got nil")
+	}
+}
+
+// TestTasksFlagSplitsOnUnquotedCommaWithoutFailing pins down the actual bug
+// reported for a comma-only brief (no quotes): unlike a bare quote, an unquoted
+// comma is not a parse error — pflag's CSV reader treats it as an ordinary field
+// separator, so one intended brief silently becomes two, the second with its
+// leading space intact. This is exactly the shape warnAmbiguousTaskSplit exists
+// to flag (see TestSpawnWorkersWarnsOnUnquotedCommaSplit): the flag layer alone
+// cannot fail this without also breaking a deliberate "task one,task two" list.
+func TestTasksFlagSplitsOnUnquotedCommaWithoutFailing(t *testing.T) {
+	cmd := newSuperviseCmd()
+	if err := cmd.Flags().Parse([]string{"--tasks", "risky change, with a comma no quotes"}); err != nil {
+		t.Fatalf("want no CSV parse error for an unquoted comma, got %v", err)
+	}
+	got, err := cmd.Flags().GetStringSlice("tasks")
+	if err != nil {
+		t.Fatalf("GetStringSlice: %v", err)
+	}
+	want := []string{"risky change", " with a comma no quotes"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("want the brief split in two with the leading space preserved %q, got %q", want, got)
 	}
 }
 
@@ -873,6 +897,47 @@ func TestSpawnWorkersTasksFileAppendsToTasks(t *testing.T) {
 	}
 	if len(workers) != 1 || workers[0].Task != brief {
 		t.Errorf("want one worker with the brief as its task, got %+v", workers)
+	}
+}
+
+// TestSpawnWorkersWarnsOnUnquotedCommaSplit reproduces the exact footgun
+// reported for --tasks: an unquoted comma inside one intended brief is not a
+// CSV parse error, it's read as a field separator, silently turning one
+// worker into two (leading space on the second field preserved). argus can't
+// fail the run outright — a genuine multi-task list has the identical shape
+// — but it must at least warn, since the plan otherwise looks completely
+// sane despite being semantically wrong.
+func TestSpawnWorkersWarnsOnUnquotedCommaSplit(t *testing.T) {
+	client := fakeClient()
+	var buf bytes.Buffer
+	workers, err := spawnWorkers(context.Background(), &buf, client, &workerInput{
+		repo: "/pinned", tasks: []string{"risky change", " with a comma no quotes"}, branches: []string{"x", "y"},
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	if err != nil {
+		t.Fatalf("spawnWorkers: %v", err)
+	}
+	if len(workers) != 2 {
+		t.Fatalf("want 2 workers (the run still proceeds), got %d", len(workers))
+	}
+	if !strings.Contains(buf.String(), "--tasks item 2") || !strings.Contains(buf.String(), "leading/trailing whitespace") {
+		t.Errorf("want a warning about the ambiguous split, got %q", buf.String())
+	}
+}
+
+// TestSpawnWorkersNoWarningForCleanTasks is the control: an intentional,
+// evenly-written multi-task list produces no warning at all, since that's
+// the ordinary --tasks usage and must not become noisy.
+func TestSpawnWorkersNoWarningForCleanTasks(t *testing.T) {
+	client := fakeClient()
+	var buf bytes.Buffer
+	_, err := spawnWorkers(context.Background(), &buf, client, &workerInput{
+		repo: "/pinned", tasks: []string{"fix the login bug", "add retry to the uploader"}, branches: []string{"x", "y"},
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	if err != nil {
+		t.Fatalf("spawnWorkers: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("want no warning for a clean task list, got %q", buf.String())
 	}
 }
 
