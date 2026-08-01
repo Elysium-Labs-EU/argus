@@ -17,12 +17,18 @@ import "slices"
 // Phase("") is the fresh-worktree case: no status.json exists yet, so Load
 // returns a zero Status and the only legal first move is into planning.
 //
+// Planning also self-loops: RequiresPlanEvidence blocks planning -> working
+// when the planning report on file carried an empty plan, and self-loop is
+// the only way for a worker to refile that same phase with a filled-in plan
+// — without it, an empty first planning report would be a dead end with no
+// legal move at all.
+//
 // PhaseDone is deliberately absent from every value list: a worker report can
 // never set it. "Done" means shipped, and only argus's own ship path (not a
 // worker call) ever gets to declare that — see the IsTerminal doc comment.
 var legalTransitions = map[Phase][]Phase{
 	Phase(""):           {PhasePlanning},
-	PhasePlanning:       {PhaseWorking},
+	PhasePlanning:       {PhasePlanning, PhaseWorking},
 	PhaseWorking:        {PhaseSelfTest, PhaseBlocked},
 	PhaseSelfTest:       {PhaseAwaitingReview, PhaseWorking, PhaseBlocked},
 	PhaseAwaitingReview: {PhaseWorking, PhaseBlocked},

@@ -111,6 +111,34 @@ func TestRunWorkerReportAcceptsWorkingWithPlanEvidence(t *testing.T) {
 	}
 }
 
+// TestRunWorkerReportRecoversFromEmptyPlanningViaSelfLoop pins the documented
+// recovery flow from an empty first planning report: working is rejected for
+// lack of plan evidence, and planning -> planning must stay legal so a worker
+// has a way to refile the same phase with a filled-in plan instead of being
+// stuck with no legal move at all.
+func TestRunWorkerReportRecoversFromEmptyPlanningViaSelfLoop(t *testing.T) {
+	wt := t.TempDir()
+	if err := runWorkerReport(wt, protocol.PhasePlanning, &protocol.Status{Task: "t", Branch: "b"}, fixedNow(time.Now())); err != nil {
+		t.Fatalf("first planning report rejected: %v", err)
+	}
+	if err := runWorkerReport(wt, protocol.PhaseWorking, &protocol.Status{Task: "t", Branch: "b"}, fixedNow(time.Now())); err == nil {
+		t.Fatal("want working rejected with no plan evidence, got nil")
+	}
+	if err := runWorkerReport(wt, protocol.PhasePlanning, &protocol.Status{Task: "t", Branch: "b", Plan: []string{"x"}}, fixedNow(time.Now())); err != nil {
+		t.Fatalf("planning self-loop with a filled-in plan rejected: %v", err)
+	}
+	if err := runWorkerReport(wt, protocol.PhaseWorking, &protocol.Status{Task: "t", Branch: "b"}, fixedNow(time.Now())); err != nil {
+		t.Fatalf("working rejected even after plan evidence was refiled: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Phase != protocol.PhaseWorking {
+		t.Errorf("final phase = %q, want working", got.Phase)
+	}
+}
+
 func TestRunWorkerReportFullLegalSequence(t *testing.T) {
 	wt := t.TempDir()
 	now := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)

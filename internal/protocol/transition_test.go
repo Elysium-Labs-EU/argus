@@ -5,6 +5,7 @@ import "testing"
 func TestIsLegalTransition(t *testing.T) {
 	legal := []struct{ cur, next Phase }{
 		{"", PhasePlanning},
+		{PhasePlanning, PhasePlanning},
 		{PhasePlanning, PhaseWorking},
 		{PhaseWorking, PhaseSelfTest},
 		{PhaseWorking, PhaseBlocked},
