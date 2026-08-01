@@ -166,3 +166,71 @@ func TestWriteIsAtomicUnderConcurrentReads(t *testing.T) {
 	wg.Wait()
 	close(stop)
 }
+
+func TestSelfReportEqual(t *testing.T) {
+	base := func() Status {
+		return Status{
+			Title:          "fix: narrow the claimed test run",
+			RealWorldProof: "ran the two commands directly",
+			DiffStat:       DiffStat{Files: 1, Insertions: 2, Deletions: 1},
+			FilesTouched:   []string{"a.go", "b.go"},
+			Plan:           []string{"narrow tests", "verify"},
+			Tests:          []TestRun{{Cmd: "go test ./...", Result: ResultPass}},
+			// Fields SelfReportEqual deliberately ignores: a diff here must never
+			// flip the result, since these are argus's own bookkeeping, not the
+			// worker's report content.
+			UpdatedAt:     time.Now(),
+			Phase:         PhaseAwaitingReview,
+			BlockedReason: "stuck",
+			Task:          "issue-369",
+			Branch:        "argus-fix-issue-369",
+			PRURL:         "https://example.com/pr/1",
+		}
+	}
+
+	cases := []struct {
+		modify func(*Status)
+		name   string
+		want   bool
+	}{
+		{modify: func(s *Status) {}, name: "identical reports", want: true},
+		{modify: func(s *Status) { s.Title = "fix: something else" }, name: "differing title", want: false},
+		{modify: func(s *Status) { s.RealWorldProof = "" }, name: "differing real world proof", want: false},
+		{modify: func(s *Status) { s.DiffStat.Insertions++ }, name: "differing diff stat", want: false},
+		{modify: func(s *Status) { s.FilesTouched = append(s.FilesTouched, "c.go") }, name: "differing files touched", want: false},
+		{modify: func(s *Status) { s.Plan = []string{"different plan"} }, name: "differing plan", want: false},
+		{
+			modify: func(s *Status) {
+				s.Tests = []TestRun{{Cmd: "go test ./... -race -count=2", Result: ResultPass}}
+			},
+			name: "differing tests",
+			want: false,
+		},
+		{
+			name: "argus-owned fields differ but self-report is identical",
+			modify: func(s *Status) {
+				s.UpdatedAt = s.UpdatedAt.Add(time.Hour)
+				s.Phase = PhaseWorking
+				s.BlockedReason = ""
+				s.Task = "different-task"
+				s.Branch = "different-branch"
+				s.PRURL = ""
+			},
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := base()
+			b := base()
+			tc.modify(&b)
+			if got := SelfReportEqual(&a, &b); got != tc.want {
+				t.Errorf("SelfReportEqual(a, b) = %v, want %v (a=%+v, b=%+v)", got, tc.want, a, b)
+			}
+			if got := SelfReportEqual(&b, &a); got != tc.want {
+				t.Errorf("SelfReportEqual is not symmetric: SelfReportEqual(b, a) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

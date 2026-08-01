@@ -955,10 +955,19 @@ type workerState struct {
 	// during the round even when priorContentHash still matches contentHash.
 	headSHA      string
 	priorHeadSHA string
-	plan         *WorkerPlan
-	review       *ReviewResult
-	status       protocol.Status
-	measured     protocol.DiffStat
+	// priorStatus is the worker's own status.json content as it stood before
+	// this rework round's dispatch (see JudgeOne) — the report the prior
+	// verdict already found wanting. Set only on a rework round, nil
+	// otherwise. gateVerdict's zero-delta check uses protocol.SelfReportEqual
+	// against it: a round can leave the source tree and HEAD untouched and
+	// still have addressed its findings, if the finding was about the
+	// worker's own report content (e.g. an over-claimed test) rather than the
+	// source diff.
+	priorStatus *protocol.Status
+	plan        *WorkerPlan
+	review      *ReviewResult
+	status      protocol.Status
+	measured    protocol.DiffStat
 	// priorMeasured is a rework round's pre-dispatch verdict measurement,
 	// set only by JudgeOne (see priorMeasuredOK); gateVerdict subtracts it from
 	// measured so that round is judged on its own delta, not the cumulative
