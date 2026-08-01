@@ -80,6 +80,7 @@ func runReview(cmd *cobra.Command, worktree, base, task string, reasons []string
 	ctx := cmd.Context()
 	diff, err := supervisor.DiffFor(ctx, worktree, base)
 	if err != nil {
+		logger.Fail("diff", base, err)
 		return err
 	}
 	if diff == "" {

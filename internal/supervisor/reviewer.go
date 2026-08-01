@@ -92,14 +92,16 @@ func (r CLIReviewer) WithLog(log *eventlog.Logger) CLIReviewer {
 // DiffFor returns the worker's change as a diff against base, read-only via
 // git -C (argus never edits a worktree; it reviews via git). The worker leaves
 // its change uncommitted, so a plain `git diff <base>` captures the working tree.
+// Routed through the shared git() helper (rather than its own exec.Command,
+// as before) so a bad --worktree or --base surfaces git's actual stderr,
+// translated where recognized — previously stderr was discarded entirely and
+// both failures collapsed into an identical, undiagnosable "exit status 128".
 func DiffFor(ctx context.Context, worktree, base string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "diff", base) //nolint:gosec // fixed git binary; worktree/base are argus-derived
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	out, err := git(ctx, worktree, "diff", base)
+	if err != nil {
 		return "", fmt.Errorf("diffing worktree against %s: %w", base, err)
 	}
-	return out.String(), nil
+	return out, nil
 }
 
 func claudeRunner() reviewRunner {

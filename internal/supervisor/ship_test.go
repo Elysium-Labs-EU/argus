@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 func TestParseOwnerRepo(t *testing.T) {
@@ -247,5 +249,64 @@ func TestCommitAllControlPlaneOnlyIsNothingToCommit(t *testing.T) {
 	// The only change is argus's own control plane → nothing worth shipping.
 	if err := CommitAll(context.Background(), wt, "m"); !errors.Is(err, ErrNothingToCommit) {
 		t.Fatalf("want ErrNothingToCommit, got %v", err)
+	}
+}
+
+// TestGitTranslatesBadWorktreePath is the regression test for issue #393's
+// core symptom: a --worktree git can't cd into used to surface as the raw
+// "git rev-parse: fatal: cannot change to '<path>': No such file or
+// directory". git() must instead return a *ui.UserError naming the bad path.
+func TestGitTranslatesBadWorktreePath(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "does-not-exist")
+	_, err := git(context.Background(), bad, "rev-parse", "HEAD")
+	if err == nil {
+		t.Fatal("want an error for a nonexistent worktree path")
+	}
+	var uerr *ui.UserError
+	if !errors.As(err, &uerr) {
+		t.Fatalf("want *ui.UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(uerr.Error(), bad) {
+		t.Errorf("error %q does not name the bad path %q", uerr.Error(), bad)
+	}
+	if strings.Contains(uerr.Error(), "fatal:") || strings.Contains(uerr.Error(), "exit status") {
+		t.Errorf("error %q leaks raw git internals", uerr.Error())
+	}
+}
+
+// TestGitTranslatesBadRemoteRef is the regression test for rebase's
+// "git fetch: fatal: couldn't find remote ref <base>" leak on a nonexistent
+// --base.
+func TestGitTranslatesBadRemoteRef(t *testing.T) {
+	worktree, _ := initGitRepo(t)
+	_, err := git(context.Background(), worktree, "fetch", "origin", "nonexistent-base-ref")
+	if err == nil {
+		t.Fatal("want an error for a nonexistent remote ref")
+	}
+	var uerr *ui.UserError
+	if !errors.As(err, &uerr) {
+		t.Fatalf("want *ui.UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(uerr.Error(), "nonexistent-base-ref") {
+		t.Errorf("error %q does not name the bad ref", uerr.Error())
+	}
+}
+
+// TestGitTranslatesAmbiguousRef covers a bad ref caught locally (e.g. `git
+// diff <bad-base>`) rather than by a remote fetch — git's own message shape
+// ("ambiguous argument") differs from "couldn't find remote ref", so this is
+// a distinct pattern translateGitFailure must also recognize.
+func TestGitTranslatesAmbiguousRef(t *testing.T) {
+	worktree, _ := initGitRepo(t)
+	_, err := git(context.Background(), worktree, "diff", "nonexistent-base-ref")
+	if err == nil {
+		t.Fatal("want an error for a nonexistent ref")
+	}
+	var uerr *ui.UserError
+	if !errors.As(err, &uerr) {
+		t.Fatalf("want *ui.UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(uerr.Error(), "nonexistent-base-ref") {
+		t.Errorf("error %q does not name the bad ref", uerr.Error())
 	}
 }
