@@ -2,6 +2,204 @@
 
 All notable changes to argus are documented here.
 
+## [0.2.0] - 2026-08-01
+
+### Bug Fixes
+- Fail fast when a worker pane wedges, not hang forever (#399) ([`716f3df`](https://github.com/Elysium-Labs-EU/argus/commit/716f3dfbbdd28f69aaa30ebd3a74393d9daf6233))
+- Allow planning self-transition to fill an empty plan (#400) ([`7845523`](https://github.com/Elysium-Labs-EU/argus/commit/784552336463bb74ff8275c02d1b4d7564e67e82))
+- Reject --max-rounds <= 0 instead of silently defaulting (#401) ([`f00960a`](https://github.com/Elysium-Labs-EU/argus/commit/f00960a72da98538c0200727697b3297624a68e2))
+
+
+### Testing
+- Cover DefaultOwnerLabel, Write/Load/Enforce error paths (#380) ([`d984b83`](https://github.com/Elysium-Labs-EU/argus/commit/d984b83c90b3316f5de8f1e484961677d8334ee6))
+- Cover SettingsPath and write/error paths (#381) ([`8992dcf`](https://github.com/Elysium-Labs-EU/argus/commit/8992dcfb78d67b741195add5dfcb3797ff2cc8f9))
+- Cover Write/Load error paths to reach 80% coverage (#382) ([`4fa1f1c`](https://github.com/Elysium-Labs-EU/argus/commit/4fa1f1ccc2e4da6970c9ec443538064d82851794))
+- Cover Confirm and renderSpinner in internal/ui (#398) ([`ace23e1`](https://github.com/Elysium-Labs-EU/argus/commit/ace23e1b3fb3868d9fcfaefad16b544e0685d802))
+
+## [0.2.0-rc.13] - 2026-08-01
+
+### Bug Fixes
+- Pre-approve MCP consent, detect idle no-report hangs (#374) ([`99b5754`](https://github.com/Elysium-Labs-EU/argus/commit/99b57545cb4c2902529ead338013ede344968332))
+- Pre-authorize the sanctioned force-push (#375) ([`2d9b9ad`](https://github.com/Elysium-Labs-EU/argus/commit/2d9b9adf3be74ac42d3e4a4eb736e1be6306a2bc))
+- Don't hard-escalate a zero-diff self-report fix (#376) ([`8f70182`](https://github.com/Elysium-Labs-EU/argus/commit/8f70182239775c7c0489fff37dd3b78e7b2586ac))
+- Worker never commits/pushes; argus does (#378) ([`a98b87d`](https://github.com/Elysium-Labs-EU/argus/commit/a98b87d95c88ff306db0aeb7041d4f6cc9489524))
+
+
+### Documentation
+- Sync argus SKILL.md and README with shipped flags (#372) ([`607bc25`](https://github.com/Elysium-Labs-EU/argus/commit/607bc25932eb3d6fd778730d50ab67854d6ed687))
+
+
+### Features
+- Join tokens with outcome, add model/effort to tokens event (#377) ([`0bc01cb`](https://github.com/Elysium-Labs-EU/argus/commit/0bc01cbc529b3321e5e2d913e7bc5f80c3fb3ae2))
+
+## [0.2.0-rc.12] - 2026-07-31
+
+### CI/CD
+- Add SonarQube Cloud scan workflow (#368) ([`5f60b76`](https://github.com/Elysium-Labs-EU/argus/commit/5f60b76ece1a2b5b71e826224b9c23ba385d8208))
+
+
+### Features
+- Preflight config commands before spawn (#358) ([`898d0a9`](https://github.com/Elysium-Labs-EU/argus/commit/898d0a9401b7fabef2aa14f019b22d589279bd1e))
+- Bound rework with a persisted cross-invocation restart budget (#359) ([`75f8c5f`](https://github.com/Elysium-Labs-EU/argus/commit/75f8c5f86415f77e6faebfca1d578d213fc024d5))
+- Add argus tend to poll a shipped PR's CI checks (#363) ([`64fb73e`](https://github.com/Elysium-Labs-EU/argus/commit/64fb73ea67f4521f1b3cebfe6003de1093e5ab23))
+- Deny raw herdr pane mutation on config check --write (#365) ([`95503e7`](https://github.com/Elysium-Labs-EU/argus/commit/95503e7c1e0f475649793818472d1347a0d8d668))
+- Add status_page override for self-hosted forges (#361) ([`5a541d0`](https://github.com/Elysium-Labs-EU/argus/commit/5a541d024729802ec07b6e9434883f768847fae6))
+
+## [0.2.0-rc.11] - 2026-07-31
+
+### Bug Fixes
+- No-op-round gate ignored HEAD moving on a real rework commit (#324) ([`72d7363`](https://github.com/Elysium-Labs-EU/argus/commit/72d73638e39c26b23f1101be64324e1056f43208))
+- Enforce release-signature verification now that v0.2.0-rc.10 shipped signed (#325) ([`25b0d18`](https://github.com/Elysium-Labs-EU/argus/commit/25b0d18ff189d80624e8771196e4d7a9f72750eb))
+- Error on task/branch mismatch, cap branch names (#328) ([`0c763ed`](https://github.com/Elysium-Labs-EU/argus/commit/0c763ed641c38f2fafe551dce00281b32d48ab6b))
+- Hint at manual-install fallback on signature refusal (#330) ([`65efbc2`](https://github.com/Elysium-Labs-EU/argus/commit/65efbc2428fae23f5b5fabed13d165786bc0f0dd))
+- Reuse existing PR on ship retry instead of duplicating (#337) ([`31f6af7`](https://github.com/Elysium-Labs-EU/argus/commit/31f6af74bdba16757f9526e98a9f77cd01384ed4))
+- Reject paragraph-shaped --tasks-file input before spawning workers (#336) ([`a9e1522`](https://github.com/Elysium-Labs-EU/argus/commit/a9e15228b79346413d052cbe37e88d48a8690b87))
+- Strip trailing parenthetical asides from replayed Cmd (#346) ([`583865f`](https://github.com/Elysium-Labs-EU/argus/commit/583865fc6eba03679e1fb74aebe44721d145cbeb))
+- Run replayed test cmd from Target subdir when it exists (#351) ([`b2595d6`](https://github.com/Elysium-Labs-EU/argus/commit/b2595d67bca7106092ad45977275084709bc5254))
+- Close Jira double-notify gap, document checkpoint/resume contract (#355) ([`0b9cf3b`](https://github.com/Elysium-Labs-EU/argus/commit/0b9cf3bf8923c6381537057a90e3e94110e9343e))
+- Soften shell-parse failures in VerifyTests to a waivable reason (#356) ([`454be54`](https://github.com/Elysium-Labs-EU/argus/commit/454be54405a0a2511ec2c8ef69ab063615dd7c9b))
+- Don't require an origin ref for a zero-divergence branch (#357) ([`87b9bcb`](https://github.com/Elysium-Labs-EU/argus/commit/87b9bcb363d12904834077ee5eac8b22a9a64c9f))
+
+
+### Features
+- File-based ownership lease for supervised worktrees (#349) ([`b5dab08`](https://github.com/Elysium-Labs-EU/argus/commit/b5dab086b2075d3949ac09313352b4509caf98ba))
+- Let a supervisor steer a working worker mid-turn (#354) ([`1dbadfd`](https://github.com/Elysium-Labs-EU/argus/commit/1dbadfd3d3b0e27d2096479c07577b14d02c8847))
+- Harmonize config-key/CLI-flag naming and close two review-gate safety gaps (#344) ([`d138017`](https://github.com/Elysium-Labs-EU/argus/commit/d1380178ca93b3087f21eb52f7554dd0e2d12353))
+
+
+### Maintenance
+- Bump softprops/action-gh-release from 2 to 3 (#319) ([`0ed16f1`](https://github.com/Elysium-Labs-EU/argus/commit/0ed16f17d8f04a0dec63de5db3ebba879d211730))
+- Bump actions/download-artifact from 7 to 8 (#320) ([`cf2e5af`](https://github.com/Elysium-Labs-EU/argus/commit/cf2e5af4ff8ee566c8079780a5754ca9fa2dac36))
+- Bump actions/upload-artifact from 6 to 7 (#322) ([`794b490`](https://github.com/Elysium-Labs-EU/argus/commit/794b490e60d51e4f508842fa7a7e01dbc8da4f5b))
+- Bump the go-dependencies group with 2 updates (#321) ([`d2ad045`](https://github.com/Elysium-Labs-EU/argus/commit/d2ad0459de579a674e7a6dac93263b959f22cf6b))
+- Add typos, verify, file-size, interface{} gates (#353) ([`03b6dbe`](https://github.com/Elysium-Labs-EU/argus/commit/03b6dbe8365199ab48e23a145a3ba961104050fe))
+
+
+### Refactoring
+- Share --worktree/--base/--repo/--verify-cmd flag binding (#352) ([`9abece7`](https://github.com/Elysium-Labs-EU/argus/commit/9abece78d14592082ba39582426322869ca2fa84))
+
+## [0.2.0-rc.10] - 2026-07-28
+
+### Bug Fixes
+- Provision real release-signing keypair, embed matching pubkey (#323) ([`c91a17c`](https://github.com/Elysium-Labs-EU/argus/commit/c91a17c48de97c583305e86b142aa9a72c2e0d03))
+
+## [0.2.0-rc.9] - 2026-07-28
+
+### Bug Fixes
+- Tighten local-state file perms and stamp audit-log actor (#297) ([`46050d5`](https://github.com/Elysium-Labs-EU/argus/commit/46050d58af52cb72736a4eb6d6d15f371d53f28e))
+- Stop --attach reusing a stale prior-verdict baseline (#317) ([`ac38a95`](https://github.com/Elysium-Labs-EU/argus/commit/ac38a955e189bdd65b618c311875adf082fe351c))
+- Skip appending label-shaped test Target to rerun Cmd (#318) ([`bb73321`](https://github.com/Elysium-Labs-EU/argus/commit/bb733214afa90e9fb4bdc9ebf8e0f9060dd71f9d))
+
+
+### Features
+- Allow tests[] entries to mark expected/intentional failures (#316) ([`1d83223`](https://github.com/Elysium-Labs-EU/argus/commit/1d8322390cce34918d70bcd22d5a18397b286a69))
+- Add dependabot, gitleaks, and govulncheck to CI (#298) ([`ddcefc2`](https://github.com/Elysium-Labs-EU/argus/commit/ddcefc263c689df47353a37f2c60b6c898f3d235))
+
+## [0.2.0-rc.8] - 2026-07-28
+
+### Bug Fixes
+- Replay worker test/verify commands argv-style, not via sh -c (#296) ([`ff63604`](https://github.com/Elysium-Labs-EU/argus/commit/ff636042617c04af1adcb8c915fb3660c5758880))
+- Exclude binary untracked files from MeasureDiff line counts (#306) ([`9caa190`](https://github.com/Elysium-Labs-EU/argus/commit/9caa19003c6182c01d6fc8df6be312530362ac2d))
+
+
+### Features
+- Hint at forge status page on request/push failures (#295) ([`c7e22d7`](https://github.com/Elysium-Labs-EU/argus/commit/c7e22d7d6f559ba6b673179f0d95938f482ca1a1))
+- Mechanically enforce repo title_prefix_template at ship time (#307) ([`c77ff39`](https://github.com/Elysium-Labs-EU/argus/commit/c77ff396874ad92c48f6c79e3ba85d7eb37e8716))
+- Add launcher key to .argus/config.yml (#308) ([`5ef5c13`](https://github.com/Elysium-Labs-EU/argus/commit/5ef5c13bcc4b6cf699c5a55b65f5498c8bc59eee))
+- Add repo-configurable worktree_setup_cmd bootstrap hook (#309) ([`8367e7d`](https://github.com/Elysium-Labs-EU/argus/commit/8367e7d18d7180e7ed893968c3490212753959dd))
+
+## [0.2.0-rc.7] - 2026-07-28
+
+### Bug Fixes
+- Merge issue-fetched branch defaults into correct slots (#294) ([`d7edf5b`](https://github.com/Elysium-Labs-EU/argus/commit/d7edf5bdf17fd7be1384b1fea831eef42e4f1ad7))
+- Worker diff_stat instruction now matches gate's base ref (#310) ([`84070c1`](https://github.com/Elysium-Labs-EU/argus/commit/84070c1796e41bef13562159cc86f98c4a46545c))
+
+## [0.2.0-rc.6] - 2026-07-27
+
+### Bug Fixes
+- Escalate no-op rework rounds (#288) ([`3f62e47`](https://github.com/Elysium-Labs-EU/argus/commit/3f62e475bf5dff9b447b1c98212e6f7c7614cfe5))
+
+
+### Features
+- Surface per-worker approval provenance and verify-once contract (#286) ([`3bb3c62`](https://github.com/Elysium-Labs-EU/argus/commit/3bb3c62efd5d6baf301c0c6194a4fb248b6fe443))
+- Repeatable --findings and --findings-file for argus rework (#289) ([`ce796a2`](https://github.com/Elysium-Labs-EU/argus/commit/ce796a28dfc322596dfccd89760ff252df94e086))
+
+## [0.2.0-rc.5] - 2026-07-27
+
+### Bug Fixes
+- Stop mis-shaping gate's replay of worker-claimed test commands (#273) ([`60939e2`](https://github.com/Elysium-Labs-EU/argus/commit/60939e2a65b8583e622aaacf2d4718298b02ca63))
+- Preserve PR title across rework's InvalidateStatus reset (#284) ([`ab88881`](https://github.com/Elysium-Labs-EU/argus/commit/ab888819a28e773a59f4848392753b20d35663d8))
+
+
+### Features
+- Structured blocked questions with `argus worker answer` (#279) ([`9f831ae`](https://github.com/Elysium-Labs-EU/argus/commit/9f831aee69f50dc20ea12139232af83c94d225e6))
+- Interactive shell-completion installer for argus completion (#281) ([`790a079`](https://github.com/Elysium-Labs-EU/argus/commit/790a079767b5d60763f9ebc35ac5e0868e6e3d49))
+
+
+### Refactoring
+- Split runShip and runWorktreePrune to cut CRAP score (#274) ([`b79fc40`](https://github.com/Elysium-Labs-EU/argus/commit/b79fc40937d2f061c3cdd72a7a47131668979903))
+- Extract sub-steps to drop CRAP under 20 (#275) ([`0862ff3`](https://github.com/Elysium-Labs-EU/argus/commit/0862ff30ec81a6f0344d97d373cbffdb41a66364))
+- Cut CRAP score of reconcile and checkHerdrStuck (#276) ([`abea0eb`](https://github.com/Elysium-Labs-EU/argus/commit/abea0eb10e628a1e24aa7347cc7459a10f34007b))
+- Extract allow-entry merge and settings write from Ensure (#277) ([`e5967e0`](https://github.com/Elysium-Labs-EU/argus/commit/e5967e00ddcbba959f40c2cf1b8a99c77e7d69fc))
+- Extract parseYAML scalar-key switch into helper (#278) ([`406b593`](https://github.com/Elysium-Labs-EU/argus/commit/406b5936a2d0e7937f7bca0938a99b8b4c94733a))
+
+## [0.2.0-rc.4] - 2026-07-27
+
+### Bug Fixes
+- Surface herdr permission-prompt blocks during rebase/rework waits (#237) ([`341b627`](https://github.com/Elysium-Labs-EU/argus/commit/341b627c240e4c48b4f1d54cb6e565da39c23bfd))
+- Allow awaiting_review to self-recover to working (#238) ([`d20ab89`](https://github.com/Elysium-Labs-EU/argus/commit/d20ab89a87b442b0c5c58373226b39810828ce01))
+- Gate must not check diff under-report before terminal phase (#250) ([`de44e78`](https://github.com/Elysium-Labs-EU/argus/commit/de44e78b02b848797ed8a63b0695ad58b422b149))
+- Nudge herdr-done worker before escalating to a human (#251) ([`7b22346`](https://github.com/Elysium-Labs-EU/argus/commit/7b2234666c8cd1d590e02d51bccad11178d80a32))
+- Log transcript count on missing plan-evidence verdict (#252) ([`c7e968b`](https://github.com/Elysium-Labs-EU/argus/commit/c7e968b5c73bcbf753d1d3ffa914a49f674b389a))
+- Allowlist forges by host, require --forge for the rest (#254) ([`fbcab53`](https://github.com/Elysium-Labs-EU/argus/commit/fbcab534e10646cd12d2aa504ecc1fd716698e42))
+- Glab token fallback uses config get, not nonexistent auth token (#257) ([`5b7f7ec`](https://github.com/Elysium-Labs-EU/argus/commit/5b7f7ec8394335aa953c10e92f50895fae50d0ee))
+- Capture ship-gate subprocess output via a real file, not a pipe (#264) ([`4eb0907`](https://github.com/Elysium-Labs-EU/argus/commit/4eb0907808217ce6e8fcafe76468d175295611be))
+- VerifyTests join Cmd and Target when re-running claimed test pass (#265) ([`0d7cfc4`](https://github.com/Elysium-Labs-EU/argus/commit/0d7cfc49380accb11980ee8432dc9a766646dc33))
+
+
+### Features
+- Add config.schema.json + LSP header for .argus/config.yml (#246) ([`6ecdb66`](https://github.com/Elysium-Labs-EU/argus/commit/6ecdb663a3639a964667521e2dfea9d1985f7f0a))
+- Make worker worktree location configurable via worktree_dir (#249) ([`0dd9bb2`](https://github.com/Elysium-Labs-EU/argus/commit/0dd9bb2518969bedf4403d9c8b7be34145680986))
+- Assign/transition Jira issues at supervise spawn time (#253) ([`a4032c4`](https://github.com/Elysium-Labs-EU/argus/commit/a4032c477f4c340d15f960710e8798d8eace1e3f))
+- Forge config key + --forge on supervise/worktree prune (#258) ([`178999f`](https://github.com/Elysium-Labs-EU/argus/commit/178999f95623f1e6bfff571554ee2916f20a252c))
+
+
+### Maintenance
+- Trim external-precedent aside from check-schema-sync comment (#247) ([`c334c20`](https://github.com/Elysium-Labs-EU/argus/commit/c334c206c6c7cfe637cb789e3b42c5412ceb2052))
+- Gitignore the locally-built argus binary (#255) ([`ce2df67`](https://github.com/Elysium-Labs-EU/argus/commit/ce2df67ffa3e2996916d1701229f4f5fc6ccb051))
+- Tighten go-crap gate threshold from 30 to 20 (#262) ([`580c653`](https://github.com/Elysium-Labs-EU/argus/commit/580c6532b67598c09e8ed07c0bf6886a657ff627))
+- Sweep issue-number citations from comments (#263) ([`d0e2979`](https://github.com/Elysium-Labs-EU/argus/commit/d0e297913a78c46c0d7d8916f7d2ff7b24e5c4a8))
+
+## [0.2.0-rc.3] - 2026-07-27
+
+### Bug Fixes
+- Argus-fix-issue-229 (#229) (#230) ([`b2fd6bd`](https://github.com/Elysium-Labs-EU/argus/commit/b2fd6bdc107c284c05d28874af1b128bf06bdbd8))
+- Argus-fix-issue-226 (#226) (#231) ([`7915c75`](https://github.com/Elysium-Labs-EU/argus/commit/7915c75d962f8dfdc11a55ef5fb514aa3f1c2db1))
+- Argus-fix-issue-227 (#227) (#232) ([`6024381`](https://github.com/Elysium-Labs-EU/argus/commit/602438111aac79ff511878ca6cb1747005f353b9))
+- Argus-fix-issue-225 (#225) (#233) ([`d96146f`](https://github.com/Elysium-Labs-EU/argus/commit/d96146f284a5de3c488cbe63d9639dae9f8a4271))
+- Argus-fix-issue-228 (#228) (#234) ([`b478532`](https://github.com/Elysium-Labs-EU/argus/commit/b478532d4604c1717a57806964b03aca76986191))
+
+## [0.2.0-rc.2] - 2026-07-26
+
+### Bug Fixes
+- Argus-fix-issue-211 (#211) (#215) ([`4433990`](https://github.com/Elysium-Labs-EU/argus/commit/44339901a04660fb73162d06cda3927d00146d4e))
+- Argus-fix-issue-212 (#212) (#213) ([`1f4862b`](https://github.com/Elysium-Labs-EU/argus/commit/1f4862be2da0369c5b04c63502f65c311e649c87))
+- Argus-fix-issue-210 (#210) (#217) ([`69f85ce`](https://github.com/Elysium-Labs-EU/argus/commit/69f85ce4a50e7c3814338dc614489540caa13b3c))
+- Argus-fix-issue-209 (#209) (#218) ([`f9bd118`](https://github.com/Elysium-Labs-EU/argus/commit/f9bd118f946136502871e525728a2101c24e64c5))
+- Argus-fix-issue-214 (#214) (#219) ([`5a1ce24`](https://github.com/Elysium-Labs-EU/argus/commit/5a1ce246a2a40cc1f2bdbee8f329a8de6d163006))
+- Argus-fix-issue-216 (#216) (#220) ([`ca96863`](https://github.com/Elysium-Labs-EU/argus/commit/ca9686301fc197f470766251cac4f9a003a1c5c6))
+- Argus-fix-issue-222 (#222) (#223) ([`8bd366c`](https://github.com/Elysium-Labs-EU/argus/commit/8bd366c06f84ba22875abb17784cac0497e3cb8a))
+- Argus-fix-issue-216 (#224) ([`f8ea5db`](https://github.com/Elysium-Labs-EU/argus/commit/f8ea5db9a2b54987c029cb79547dd1fcaa046b49))
+
+
+### Documentation
+- Rewrite README around architecture, LLMs, setup, tools (#221) ([`7e0e7a6`](https://github.com/Elysium-Labs-EU/argus/commit/7e0e7a6ebefd6fe2acfd0f860472c840955d5596))
+
+## [0.2.0-rc.1] - 2026-07-25
+
+### Bug Fixes
+- Argus-fix-issue-207 (#207) (#208) ([`2814e23`](https://github.com/Elysium-Labs-EU/argus/commit/2814e23460f2d196fb54f3f3f53afd690b946b38))
+
 ## [0.1.0] - 2026-07-25
 
 ### Bug Fixes
