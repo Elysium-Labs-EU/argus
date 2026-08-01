@@ -186,6 +186,38 @@ func TestCompletionFishCmd_PrintsToStdout(t *testing.T) {
 	}
 }
 
+func TestCompletionCmd_UnsupportedShellArg(t *testing.T) {
+	cmd := newCompletionCmd(rootCmd)
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"powershell"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for unsupported shell argument, got nil")
+	}
+	if !strings.Contains(err.Error(), "powershell") {
+		t.Errorf("expected error to name the rejected shell, got: %v", err)
+	}
+}
+
+func TestCompletionCmd_UnsupportedExtraArgs(t *testing.T) {
+	cmd := newCompletionCmd(rootCmd)
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"foo", "bar", "baz"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for unrecognized shell arguments, got nil")
+	}
+	if !strings.Contains(err.Error(), "foo") {
+		t.Errorf("expected error to name the rejected shell, got: %v", err)
+	}
+}
+
 func TestCompletionInteractive_NoShell(t *testing.T) {
 	t.Setenv("SHELL", "")
 	cmd := newCompletionCmd(rootCmd)

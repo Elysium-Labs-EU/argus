@@ -27,7 +27,10 @@ To print the script to stdout instead (for manual setup or scripting), pass the 
   argus completion bash
   argus completion zsh
   argus completion fish`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("unsupported shell %q; supported shells: bash, zsh, fish", args[0])
+			}
 			return runInteractiveCompletion(cmd, root)
 		},
 	}
