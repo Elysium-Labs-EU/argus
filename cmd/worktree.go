@@ -73,6 +73,7 @@ worktree under the repo.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan (which worktrees, which check failed/passed) without deleting anything")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
+	addDebugFlag(cmd)
 	return cmd
 }
 

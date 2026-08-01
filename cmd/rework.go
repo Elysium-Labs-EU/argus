@@ -128,6 +128,7 @@ outcome instead of retrying forever.`,
 	cmd.Flags().StringVar(&owner, "owner", "", ownerFlagHelp)
 	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
 	cmd.Flags().DurationVar(&ownerStaleAfter, "owner-stale-after", ownership.DefaultStaleAfter, ownerStaleAfterFlagHelp)
+	addDebugFlag(cmd)
 	return cmd
 }
 

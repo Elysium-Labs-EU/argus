@@ -81,6 +81,7 @@ or git push itself, only the conflict resolution needs its judgment.`,
 	cmd.Flags().StringVar(&owner, "owner", "", ownerFlagHelp)
 	cmd.Flags().BoolVar(&forceForeignOwner, "force-foreign-owner", false, forceForeignOwnerFlagHelp)
 	cmd.Flags().DurationVar(&ownerStaleAfter, "owner-stale-after", ownership.DefaultStaleAfter, ownerStaleAfterFlagHelp)
+	addDebugFlag(cmd)
 	return cmd
 }
 

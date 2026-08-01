@@ -204,6 +204,7 @@ each pane's directory in --panes mode).`,
 	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist, on top of this repo's .argus/config.yml allow list if any (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a one-off run)")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host when fetching --issues: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
+	addDebugFlag(cmd)
 	return cmd
 }
 

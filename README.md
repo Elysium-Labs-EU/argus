@@ -113,7 +113,7 @@ argus tend    --worktree /path/to/project-feat-retry --dry-run           # poll 
 | `argus worktree prune` | Clean up a merged worktree (`--branch <name>`, or `--merged` to sweep the repo) |
 | `argus stats` | Aggregate run logs into escalation rate, review parse fail rate, and tokens per task |
 
-Pass `--debug` on any command to tee the typed event log to stderr as it runs. It always persists under `~/.argus/runs` either way.
+Pass `--debug` on `supervise`, `review`, `ship`, `rebase`, `rework`, `tend`, `worktree prune`, `worker answer`, or `worker steer` — the commands that actually write a run log — to tee that log to stderr as it runs. It always persists under `~/.argus/runs` either way.
 
 ## Supported tools
 

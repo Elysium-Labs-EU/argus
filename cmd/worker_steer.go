@@ -41,6 +41,7 @@ silent substitute for the phase-transition table itself.`,
 			return runWorkerSteer(cmd, herdr.New(), logger, args[0], args[1], time.Now)
 		},
 	}
+	addDebugFlag(cmd)
 	return cmd
 }
 

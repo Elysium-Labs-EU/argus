@@ -48,6 +48,7 @@ deterministic gate escalates, pointed at any worktree on demand.`,
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for the review (low, medium, high, xhigh, max; default: claude's default)")
 	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
+	addDebugFlag(cmd)
 	return cmd
 }
 
