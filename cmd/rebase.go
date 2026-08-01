@@ -285,6 +285,13 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	if werr := supervisor.WriteBrief(opts.worktree, supervisor.RebaseBrief(branch, opts.base)); werr != nil {
 		return werr
 	}
+	// Pre-authorizes the exact force-push RebaseBrief just instructed, so the
+	// worker's own Bash tool call for it never raises an interactive
+	// permission dialog — see EnsureRebasePushAllowed's doc for why this has
+	// to run before dispatch, not after.
+	if perr := supervisor.EnsureRebasePushAllowed(opts.worktree, branch); perr != nil {
+		return perr
+	}
 
 	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget()); err != nil {
 		return err

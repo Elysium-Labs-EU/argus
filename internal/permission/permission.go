@@ -166,6 +166,10 @@ func denyList(raw rawSettings) ([]string, map[string]json.RawMessage, error) {
 	return permList(raw, "deny")
 }
 
+func askList(raw rawSettings) ([]string, map[string]json.RawMessage, error) {
+	return permList(raw, "ask")
+}
+
 // Check reports whether the settings file at path already has a
 // permissions.allow entry covering argus, and returns every matching entry
 // found (so a caller can tell the operator exactly what already covers it).
@@ -206,6 +210,70 @@ func Ensure(path, entry string) (added bool, err error) {
 	}
 
 	raw, err = withEntries(raw, perms, "allow", allow, entry)
+	if err != nil {
+		return false, err
+	}
+	if err := writeSettingsFile(path, raw); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// EnsureExactAllow adds entry to permissions.allow at path verbatim if no
+// entry already there is identical to it, creating the file (and its
+// .claude directory) if necessary and leaving every other key untouched.
+// Unlike Ensure, which treats any entry matching Covers as already
+// satisfying argus's own broad self-allowlisting, this is a plain
+// membership check — for a caller granting one specific, literal command
+// rather than a family of them, where a byte-for-byte duplicate is the only
+// thing that should suppress a write.
+func EnsureExactAllow(path, entry string) (added bool, err error) {
+	raw, err := load(path)
+	if err != nil {
+		return false, err
+	}
+	allow, perms, err := allowList(raw)
+	if err != nil {
+		return false, err
+	}
+	if slices.Contains(allow, entry) {
+		return false, nil
+	}
+
+	raw, err = withEntries(raw, perms, "allow", allow, entry)
+	if err != nil {
+		return false, err
+	}
+	if err := writeSettingsFile(path, raw); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// RemoveAsk deletes entry from permissions.ask at path if present verbatim,
+// leaving every other key (including permissions.allow/deny and any other
+// ask entry) untouched. A missing file, or one that never had entry to
+// begin with, is not an error — removed is simply false. This is the one
+// place the package retracts a rule instead of only ever adding one: see
+// supervisor.EnsureRebasePushAllowed's doc for why an ask rule already on
+// disk has to be lifted before an allow rule for the same command can take
+// effect at all.
+func RemoveAsk(path, entry string) (removed bool, err error) {
+	raw, err := load(path)
+	if err != nil {
+		return false, err
+	}
+	ask, perms, err := askList(raw)
+	if err != nil {
+		return false, err
+	}
+	idx := slices.Index(ask, entry)
+	if idx < 0 {
+		return false, nil
+	}
+	ask = slices.Delete(ask, idx, idx+1)
+
+	raw, err = withEntries(raw, perms, "ask", ask)
 	if err != nil {
 		return false, err
 	}
