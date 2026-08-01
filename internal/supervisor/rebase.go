@@ -7,12 +7,14 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
+	"github.com/Elysium-Labs-EU/argus/internal/permission"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -243,13 +245,60 @@ This is expected. Update your branch in place (do NOT open a new PR):
   git rebase origin/%s
   # resolve conflicts so BOTH your change and the merged change coexist
   # re-run the repo's checks (make ci, or make test + make lint)
-  git push --force-with-lease
+  git push --force-with-lease origin %s
 
 Confirm the checks pass and the branch is mergeable, then set your status phase to
 "awaiting_review". Use "blocked" if the resolution needs a decision only the
 supervisor can make.
 
-%s`, branch, base, base, base, protocol.WriterBrief("origin/"+base))
+%s`, branch, base, base, base, branch, protocol.WriterBrief("origin/"+base))
+}
+
+// rebasePushAskEntry is the blanket ask rule settingsFor writes into every
+// worker's settings.local.json at spawn time (see agentadapter.go's Ask
+// list): it exists so a normal worker can never commit or push on its own
+// initiative, forcing a supervisor's eyes on it instead. Claude Code's ask
+// category always wins over allow regardless of pattern specificity — rules
+// are checked deny, then ask, then allow, first match wins, and a matching
+// ask rule still fires even when a narrower allow rule also matches the same
+// call — so as long as this entry is on disk, no allow rule, however
+// narrowly scoped, can stop it from raising an interactive dialog. A rebase
+// dispatch inverts that premise: argus itself is authorizing exactly one
+// push before it ever types the brief, so the blanket rule has to be lifted
+// or EnsureRebasePushAllowed's own allow entry below can never take effect.
+const rebasePushAskEntry = "Bash(git push:*)"
+
+// RebasePushAllowEntry is the Bash allow-glob for the one force-push a
+// rebase dispatch pre-authorizes: HEAD (already resolved onto base by the
+// worker's own `git rebase`) force-pushed to origin/branch. Deliberately no
+// trailing wildcard — an exact match on the literal command RebaseBrief
+// instructs, so it can never be read as covering any other push.
+func RebasePushAllowEntry(branch string) string {
+	return "Bash(git push --force-with-lease origin " + branch + ")"
+}
+
+// EnsureRebasePushAllowed grants a rebase-dispatched worker exactly the one
+// force-push its brief instructs (see RebaseBrief) without Claude Code
+// raising an interactive permission dialog for it. It writes an additive,
+// idempotent allow entry scoped to branch into worktree's
+// .claude/settings.json — the same only-touches-this-key pattern
+// cmd/config_check.go's permission.Ensure already uses for argus's own
+// allowlisting — and retracts the pre-existing blanket push ask rule from
+// .claude/settings.local.json that would otherwise still win over it (see
+// rebasePushAskEntry). A worktree rebase dispatches into but that a worker
+// never spawned in (so settings.local.json doesn't exist yet) is not an
+// error: RemoveAsk is a no-op against a missing file. Both writes are
+// idempotent, so calling this again on a redispatch is a no-op once done.
+func EnsureRebasePushAllowed(worktree, branch string) error {
+	settingsPath := permission.SettingsPath(worktree)
+	if _, err := permission.EnsureExactAllow(settingsPath, RebasePushAllowEntry(branch)); err != nil {
+		return fmt.Errorf("allowing rebase push for %s: %w", branch, err)
+	}
+	localPath := filepath.Join(worktree, ".claude", "settings.local.json")
+	if _, err := permission.RemoveAsk(localPath, rebasePushAskEntry); err != nil {
+		return fmt.Errorf("clearing blanket push ask rule before rebase push for %s: %w", branch, err)
+	}
+	return nil
 }
 
 // InvalidateStatus removes a worktree's status and verdict files, if present,

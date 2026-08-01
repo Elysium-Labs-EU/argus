@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Elysium-Labs-EU/argus/internal/permission"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
@@ -617,5 +618,110 @@ func TestRebaseBriefCarriesRebaseSteps(t *testing.T) {
 		if !strings.Contains(b, want) {
 			t.Errorf("rebase brief missing %q", want)
 		}
+	}
+}
+
+// TestRebaseBriefPushLineMatchesAllowEntry guards the literal coupling
+// EnsureRebasePushAllowed depends on: the exact push command the brief
+// instructs the worker to type has to be the exact command
+// RebasePushAllowEntry allowlists, or the allow entry silently stops
+// covering what the worker actually runs.
+func TestRebaseBriefPushLineMatchesAllowEntry(t *testing.T) {
+	b := RebaseBrief("feat-x", "main")
+	want := "git push --force-with-lease origin feat-x"
+	if !strings.Contains(b, want) {
+		t.Errorf("rebase brief push line = %q not found in brief; want it to match RebasePushAllowEntry's command", want)
+	}
+}
+
+func TestRebasePushAllowEntryIsAnExactMatchNoWildcard(t *testing.T) {
+	got := RebasePushAllowEntry("feat-x")
+	want := "Bash(git push --force-with-lease origin feat-x)"
+	if got != want {
+		t.Errorf("RebasePushAllowEntry(%q) = %q, want %q", "feat-x", got, want)
+	}
+}
+
+func TestEnsureRebasePushAllowedWritesScopedAllowEntry(t *testing.T) {
+	wt := t.TempDir()
+	if err := EnsureRebasePushAllowed(wt, "feat-x"); err != nil {
+		t.Fatalf("EnsureRebasePushAllowed: %v", err)
+	}
+	covered, matches, err := permission.Check(permission.SettingsPath(wt))
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if covered {
+		t.Errorf("the rebase-push allow entry should not satisfy argus's own Covers check, got matches %v", matches)
+	}
+	data, err := os.ReadFile(permission.SettingsPath(wt))
+	if err != nil {
+		t.Fatalf("reading settings.json: %v", err)
+	}
+	if !strings.Contains(string(data), RebasePushAllowEntry("feat-x")) {
+		t.Errorf("settings.json missing the scoped allow entry: %s", data)
+	}
+	// A different branch never sanctioned by this dispatch must not become
+	// pushable — the entry has to name feat-x specifically, not git push in
+	// general.
+	if strings.Contains(string(data), RebasePushAllowEntry("other-branch")) {
+		t.Errorf("settings.json unexpectedly allows a different branch's push: %s", data)
+	}
+}
+
+func TestEnsureRebasePushAllowedClearsBlanketPushAskRule(t *testing.T) {
+	wt := t.TempDir()
+	localPath := filepath.Join(wt, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPath, []byte(`{"permissions":{"ask":["Bash(git commit:*)","Bash(git push:*)"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureRebasePushAllowed(wt, "feat-x"); err != nil {
+		t.Fatalf("EnsureRebasePushAllowed: %v", err)
+	}
+
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("reading settings.local.json: %v", err)
+	}
+	if strings.Contains(string(data), "Bash(git push:*)") {
+		t.Errorf("blanket push ask rule survived — it always wins over the new allow entry regardless of specificity: %s", data)
+	}
+	if !strings.Contains(string(data), "Bash(git commit:*)") {
+		t.Errorf("unrelated commit ask rule was dropped, want it left in place: %s", data)
+	}
+}
+
+func TestEnsureRebasePushAllowedToleratesMissingSettingsLocal(t *testing.T) {
+	wt := t.TempDir()
+	if err := EnsureRebasePushAllowed(wt, "feat-x"); err != nil {
+		t.Fatalf("EnsureRebasePushAllowed on a worktree with no settings.local.json: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".claude", "settings.local.json")); err == nil {
+		t.Error("EnsureRebasePushAllowed should not create settings.local.json when it never existed")
+	}
+}
+
+func TestEnsureRebasePushAllowedIsIdempotent(t *testing.T) {
+	wt := t.TempDir()
+	if err := EnsureRebasePushAllowed(wt, "feat-x"); err != nil {
+		t.Fatalf("first EnsureRebasePushAllowed: %v", err)
+	}
+	before, err := os.ReadFile(permission.SettingsPath(wt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rerr := EnsureRebasePushAllowed(wt, "feat-x"); rerr != nil {
+		t.Fatalf("second EnsureRebasePushAllowed: %v", rerr)
+	}
+	after, err := os.ReadFile(permission.SettingsPath(wt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("redispatch rewrote settings.json even though the entry was already there:\nbefore: %s\nafter:  %s", before, after)
 	}
 }
