@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,8 +53,12 @@ func (s *Stats) ReAskRate() float64 {
 }
 
 // ReadDir reads every *.jsonl run log under dir into a flat event slice. A missing
-// dir is not an error — it means no runs have been recorded yet.
-func ReadDir(dir string) ([]Event, error) {
+// dir is not an error — it means no runs have been recorded yet. A malformed line
+// is skipped rather than failing the whole read (a partially-written line from a
+// crash mid-write shouldn't take down every other event in the file); when debug
+// is non-nil, each file with skipped lines reports the count so that kind of
+// corruption doesn't go unnoticed indefinitely.
+func ReadDir(dir string, debug io.Writer) ([]Event, error) {
 	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("globbing run logs: %w", err)
@@ -61,36 +66,41 @@ func ReadDir(dir string) ([]Event, error) {
 	sort.Strings(matches)
 	var events []Event
 	for _, path := range matches {
-		fileEvents, rerr := readFile(path)
+		fileEvents, skipped, rerr := readFile(path)
 		if rerr != nil {
 			return nil, rerr
+		}
+		if skipped > 0 && debug != nil {
+			_, _ = fmt.Fprintf(debug, "skipped %d malformed line(s) in %s\n", skipped, path)
 		}
 		events = append(events, fileEvents...)
 	}
 	return events, nil
 }
 
-func readFile(path string) ([]Event, error) {
+func readFile(path string) ([]Event, int, error) {
 	f, err := os.Open(path) //nolint:gosec // path came from a glob under the run-log dir
 	if err != nil {
-		return nil, fmt.Errorf("opening run log: %w", err)
+		return nil, 0, fmt.Errorf("opening run log: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
 	var events []Event
+	skipped := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		var e Event
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
-			continue // skip a malformed line rather than fail the whole read
+			skipped++
+			continue
 		}
 		events = append(events, e)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("scanning run log: %w", err)
+		return nil, 0, fmt.Errorf("scanning run log: %w", err)
 	}
-	return events, nil
+	return events, skipped, nil
 }
 
 // Summarize folds events into Stats. It counts distinct run ids, tallies gate and

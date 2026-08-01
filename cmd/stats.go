@@ -36,7 +36,11 @@ pass reads instead of hand-correlating separate event types.`,
 				return fmt.Errorf("resolving home dir: %w", err)
 			}
 			dir := filepath.Join(home, ".argus", "runs")
-			events, err := eventlog.ReadDir(dir)
+			var debug io.Writer
+			if debugLog {
+				debug = cmd.ErrOrStderr()
+			}
+			events, err := eventlog.ReadDir(dir, debug)
 			if err != nil {
 				return err
 			}
