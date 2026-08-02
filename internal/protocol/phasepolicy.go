@@ -23,18 +23,33 @@ type PhasePolicy struct {
 // values.
 type PhaseConfig map[Phase]PhasePolicy
 
+// AlwaysDeniedCommands are Bash prefixes denied in every phase, independent
+// of DeniedInPhase's per-phase table: argus's own supervisor-side commands, a
+// worker must never invoke on itself. A worker's only legitimate
+// self-invocations are `argus worker report/answer/steer`; ship/rework/
+// review/supervise are the operator's (or supervising session's) own tools —
+// a worker running `argus ship --force` on itself would commit/push/open a
+// PR and bypass the entire verdict-required gate, the same severity as
+// committing before a plan exists, just for a different command set. Nothing
+// prevented this before: an unlisted Bash command falls through to Claude
+// Code's default ask-prompt, which just hangs a headless worker rather than
+// actually blocking it.
+var AlwaysDeniedCommands = []string{"argus ship", "argus rework", "argus review", "argus supervise"}
+
 // DeniedInPhase returns the Bash command prefixes denied while a worker
 // reports phase p, before any repo config is applied — the floor
-// ResolvedDenyForPhase always includes and no config can remove. Only
-// PhasePlanning denies anything today (commit/push, same set as
-// AskGatedCommands) — a worker shouldn't touch git before it has even
-// reported a plan. Every other phase returns nil; commit/push stay ask-gated
-// there instead (see AgentAdapter.RenderSettings).
+// ResolvedDenyForPhase always includes and no config can remove.
+// AlwaysDeniedCommands applies regardless of p; PhasePlanning additionally
+// denies commit/push (same set as AskGatedCommands) — a worker shouldn't
+// touch git before it has even reported a plan. Every other phase gets only
+// AlwaysDeniedCommands; commit/push stay ask-gated there instead (see
+// AgentAdapter.RenderSettings).
 func DeniedInPhase(p Phase) []string {
+	denied := slices.Clone(AlwaysDeniedCommands)
 	if p == PhasePlanning {
-		return AskGatedCommands
+		denied = append(denied, AskGatedCommands...)
 	}
-	return nil
+	return denied
 }
 
 // ResolvedDenyForPhase merges DeniedInPhase's floor with project's own

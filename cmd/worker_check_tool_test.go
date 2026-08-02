@@ -28,6 +28,15 @@ func TestEvaluateToolGate(t *testing.T) {
 	if _, blocked := evaluateToolGate("npm publish", protocol.PhaseWorking, []string{"npm publish"}); !blocked {
 		t.Error("evaluateToolGate(npm publish, working, configured deny) = not blocked, want blocked")
 	}
+	for _, p := range protocol.ConfigurablePhases {
+		reason, blocked := evaluateToolGate("argus ship --force", p, protocol.DeniedInPhase(p))
+		if !blocked {
+			t.Errorf("evaluateToolGate(argus ship, %q) = not blocked, want blocked (AlwaysDeniedCommands)", p)
+		}
+		if !strings.Contains(reason, "supervising session") {
+			t.Errorf("evaluateToolGate(argus ship, %q) reason = %q, want it to explain the always-denied case", p, reason)
+		}
+	}
 }
 
 func TestRunWorkerCheckTool(t *testing.T) {
@@ -99,6 +108,19 @@ func TestRunWorkerCheckTool(t *testing.T) {
 		}
 		if exitCode != 0 {
 			t.Errorf("exit code = %d, want 0", exitCode)
+		}
+	})
+
+	t.Run("blocks argus ship regardless of phase", func(t *testing.T) {
+		exitCode = 0
+		wt := newWorktree(t, protocol.PhaseWorking)
+		stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":"argus ship --force"}}`, wt))
+		var stderr bytes.Buffer
+		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+			t.Fatalf("runWorkerCheckTool: %v", err)
+		}
+		if exitCode != 2 {
+			t.Errorf("exit code = %d, want 2 — a worker must never invoke argus's own supervisor commands on itself", exitCode)
 		}
 	})
 

@@ -6,14 +6,33 @@ import (
 )
 
 func TestDeniedInPhase(t *testing.T) {
-	if got := DeniedInPhase(PhasePlanning); !slices.Equal(got, AskGatedCommands) {
-		t.Errorf("DeniedInPhase(planning) = %v, want %v", got, AskGatedCommands)
+	planning := DeniedInPhase(PhasePlanning)
+	for _, want := range AskGatedCommands {
+		if !slices.Contains(planning, want) {
+			t.Errorf("DeniedInPhase(planning) = %v, missing AskGatedCommands entry %q", planning, want)
+		}
+	}
+	for _, want := range AlwaysDeniedCommands {
+		if !slices.Contains(planning, want) {
+			t.Errorf("DeniedInPhase(planning) = %v, missing AlwaysDeniedCommands entry %q", planning, want)
+		}
 	}
 
 	other := []Phase{Phase(""), PhaseWorking, PhaseSelfTest, PhaseAwaitingReview, PhaseBlocked, PhaseDone}
 	for _, p := range other {
-		if got := DeniedInPhase(p); got != nil {
-			t.Errorf("DeniedInPhase(%q) = %v, want nil", p, got)
+		got := DeniedInPhase(p)
+		if !slices.Equal(got, AlwaysDeniedCommands) {
+			t.Errorf("DeniedInPhase(%q) = %v, want exactly AlwaysDeniedCommands %v", p, got, AlwaysDeniedCommands)
+		}
+	}
+}
+
+func TestAlwaysDeniedCommandsBlockedEveryPhase(t *testing.T) {
+	for _, p := range append([]Phase{Phase(""), PhaseDone}, ConfigurablePhases...) {
+		for _, cmd := range AlwaysDeniedCommands {
+			if _, ok := MatchesDeniedCommand(cmd, DeniedInPhase(p)); !ok {
+				t.Errorf("phase %q: AlwaysDeniedCommands entry %q not blocked", p, cmd)
+			}
 		}
 	}
 }
@@ -55,8 +74,8 @@ func TestMatchesDeniedCommand(t *testing.T) {
 }
 
 func TestResolvedDenyForPhase(t *testing.T) {
-	if got := ResolvedDenyForPhase(PhaseWorking, nil); got != nil {
-		t.Errorf("no project config, working phase = %v, want nil (floor is empty for working)", got)
+	if got := ResolvedDenyForPhase(PhaseWorking, nil); !slices.Equal(got, AlwaysDeniedCommands) {
+		t.Errorf("no project config, working phase = %v, want exactly the AlwaysDeniedCommands floor %v", got, AlwaysDeniedCommands)
 	}
 
 	project := PhaseConfig{PhaseWorking: {Deny: []string{"npm publish"}}}

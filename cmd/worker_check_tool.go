@@ -95,6 +95,12 @@ func evaluateToolGate(cmdStr string, phase protocol.Phase, denied []string) (rea
 	if !ok {
 		return "", false
 	}
+	if slices.Contains(protocol.AlwaysDeniedCommands, matched) {
+		return fmt.Sprintf(
+			"argus: %q is denied — argus's own supervisor commands (ship/rework/review/supervise) are for the supervising session only, never a worker's own self-invocation",
+			matched,
+		), true
+	}
 	if phase == protocol.PhasePlanning && slices.Contains(protocol.AskGatedCommands, matched) {
 		return fmt.Sprintf(
 			"argus: %q is denied during phase %q — report a plan first (`argus worker report <worktree> planning`) before committing or pushing",
