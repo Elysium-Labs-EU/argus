@@ -78,6 +78,7 @@ func (claudeCodeAdapter) PlanEvidence(home, worktree string) (bool, int, error) 
 // status.json never written, indistinguishable from "hasn't started yet".
 type permissionSettings struct {
 	Permissions                permissionBlock `json:"permissions"`
+	Hooks                      hooksBlock      `json:"hooks"`
 	EnableAllProjectMcpServers bool            `json:"enableAllProjectMcpServers"`
 }
 
@@ -85,6 +86,37 @@ type permissionBlock struct {
 	Allow []string `json:"allow"`
 	Ask   []string `json:"ask"`
 	Deny  []string `json:"deny"`
+}
+
+// hooksBlock mirrors the shape Claude Code reads from settings.json's "hooks"
+// key. Only PreToolUse is populated today — see checkToolHook.
+type hooksBlock struct {
+	PreToolUse []hookMatcher `json:"PreToolUse,omitempty"`
+}
+
+// hookMatcher pairs a tool-name matcher (Claude Code's own glob-like syntax,
+// e.g. "Bash") with the commands to run when it fires.
+type hookMatcher struct {
+	Matcher string      `json:"matcher"`
+	Hooks   []hookEntry `json:"hooks"`
+}
+
+type hookEntry struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+// checkToolHook wires `argus worker check-tool` as a PreToolUse/Bash hook on
+// every worker. The static allow/ask/deny lists below are read once at
+// session launch, so a phase-conditional rule (protocol.DeniedInPhase) needs
+// a hook that re-checks the worktree's current status.json live instead.
+func checkToolHook() hookMatcher {
+	return hookMatcher{
+		Matcher: "Bash",
+		Hooks: []hookEntry{
+			{Type: "command", Command: "argus worker check-tool"},
+		},
+	}
 }
 
 // settingsFor builds the worktree-scoped permission settings. This is the single
@@ -154,6 +186,7 @@ func settingsFor(worktree string, repoAllow, extraAllow []string) permissionSett
 			Ask:   askGlobEntries(protocol.AskGatedCommands),
 			Deny:  deny,
 		},
+		Hooks:                      hooksBlock{PreToolUse: []hookMatcher{checkToolHook()}},
 		EnableAllProjectMcpServers: true,
 	}
 }

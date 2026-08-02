@@ -23,22 +23,18 @@ func newWorkerCmd() *cobra.Command {
 	cmd.AddCommand(newWorkerReportCmd())
 	cmd.AddCommand(newWorkerAnswerCmd())
 	cmd.AddCommand(newWorkerSteerCmd())
+	cmd.AddCommand(newWorkerCheckToolCmd())
 	return cmd
 }
 
 var workerCmd = newWorkerCmd()
 
 // reportablePhases is every phase a worker may name as the <phase> argument to
-// `argus worker report`. protocol.PhaseDone is deliberately excluded: see
-// internal/protocol/transition.go — a worker report can never set it, only
-// argus's own ship path does.
-var reportablePhases = []protocol.Phase{
-	protocol.PhasePlanning,
-	protocol.PhaseWorking,
-	protocol.PhaseSelfTest,
-	protocol.PhaseAwaitingReview,
-	protocol.PhaseBlocked,
-}
+// `argus worker report` — the same set protocol.ConfigurablePhases exposes to
+// repo phase policy, so both surfaces name identical phases by construction.
+// protocol.PhaseDone is deliberately excluded: see internal/protocol/transition.go
+// — a worker report can never set it, only argus's own ship path does.
+var reportablePhases = protocol.ConfigurablePhases
 
 func newWorkerReportCmd() *cobra.Command {
 	var (

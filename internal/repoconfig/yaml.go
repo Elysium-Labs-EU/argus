@@ -2,8 +2,11 @@ package repoconfig
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 // configSchemaHeader points editors with the yaml-language-server extension
@@ -89,6 +92,16 @@ func encodeYAML(cfg *Config) string {
 	}
 	writeYAMLList(&b, "proof_required_paths", cfg.ProofRequiredPaths)
 	writeYAMLList(&b, "always_review_paths", cfg.AlwaysReviewPaths)
+	for _, p := range protocol.ConfigurablePhases {
+		policy, ok := cfg.Phases[p]
+		if !ok {
+			continue
+		}
+		if policy.Skip {
+			fmt.Fprintf(&b, "phase.%s.skip: true\n", p)
+		}
+		writeYAMLList(&b, "phase."+string(p)+".deny", policy.Deny)
+	}
 	return b.String()
 }
 
@@ -121,6 +134,64 @@ func unquoteYAML(s string) (string, error) {
 	return s, nil
 }
 
+// phaseKeyPrefix precedes every per-phase policy key: phase.<name>.<subkey>.
+const phaseKeyPrefix = "phase."
+
+// parsePhaseKey splits a phase.<name>.<subkey> config key into its phase and
+// subkey parts. ok is false for any key not shaped like phase.<name>.<subkey>
+// — such a key falls through to listFieldFor/assignScalarField as usual.
+func parsePhaseKey(key string) (phase protocol.Phase, subkey string, ok bool) {
+	rest, found := strings.CutPrefix(key, phaseKeyPrefix)
+	if !found {
+		return "", "", false
+	}
+	name, subkey, found := strings.Cut(rest, ".")
+	if !found {
+		return "", "", false
+	}
+	return protocol.Phase(name), subkey, true
+}
+
+// assignPhaseKey sets cfg.Phases[phase]'s Skip or Deny field for one
+// phase.<name>.<subkey> config key. Both an unrecognized phase name and an
+// unrecognized subkey are hard errors — unlike a wholly unrelated unknown
+// top-level key, anything under the phase.* namespace belongs to this
+// schema, so a typo here (phase.plannning.deny, phase.planning.frobnicate)
+// should fail loudly rather than silently do nothing. consumed is how many
+// extra lines a list-shaped subkey (deny) read past line, for the caller to
+// skip past, mirroring listFieldFor's own list-consuming callers.
+func assignPhaseKey(cfg *Config, phase protocol.Phase, subkey, value string, lines []string, next, line int) (consumed int, err error) {
+	if !slices.Contains(protocol.ConfigurablePhases, phase) {
+		return 0, fmt.Errorf("config: line %d: unrecognized phase %q", line, phase)
+	}
+	if cfg.Phases == nil {
+		cfg.Phases = protocol.PhaseConfig{}
+	}
+	policy := cfg.Phases[phase]
+	switch subkey {
+	case "skip":
+		b, perr := strconv.ParseBool(value)
+		if perr != nil {
+			return 0, fmt.Errorf("config: line %d: phase.%s.skip: %w", line, phase, perr)
+		}
+		policy.Skip = b
+	case "deny":
+		if value != "" {
+			return 0, fmt.Errorf("config: line %d: phase.%s.deny expects a list on following indented lines, not an inline value", line, phase)
+		}
+		items, listConsumed, lerr := parseYAMLList(lines, next)
+		if lerr != nil {
+			return 0, lerr
+		}
+		policy.Deny = items
+		consumed = listConsumed
+	default:
+		return 0, fmt.Errorf("config: line %d: unrecognized phase policy key %q", line, subkey)
+	}
+	cfg.Phases[phase] = policy
+	return consumed, nil
+}
+
 // listFieldFor returns a pointer to cfg's field for key, for the keys whose
 // value is a list block (`allow`, `proof_required_paths`,
 // `always_review_paths`), or nil if key names a scalar or unknown key.
@@ -144,9 +215,13 @@ func listFieldFor(cfg *Config, key string) *[]string {
 // gate_verify_command, worktree_bootstrap_command, title_prefix_template,
 // owner_stale_after, review_effort, max_diff_lines, rework_budget; value
 // optionally quoted, plus
-// deprecatedKeyAliases' old names), and a top-level list key (`allow`, `proof_required_paths`,
-// `always_review_paths`) followed by indented `- value` list items. Any
-// other top-level key is ignored (along with any indented block under it),
+// deprecatedKeyAliases' old names), a top-level list key (`allow`, `proof_required_paths`,
+// `always_review_paths`) followed by indented `- value` list items, and a
+// dotted `phase.<name>.skip`/`phase.<name>.deny` key per protocol.
+// ConfigurablePhases (see parsePhaseKey/assignPhaseKey) — an unrecognized
+// phase name or subkey under that namespace is a hard error, unlike an
+// unrelated unknown top-level key, which is ignored (along with any
+// indented block under it),
 // so a future config key this version doesn't know about doesn't break
 // parsing — the same forward-compatibility internal/config's TOML parser
 // gives unknown sections.
@@ -190,6 +265,16 @@ func parseYAML(data string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("config: line %d: bad value %q: %w", i+1, rest, err)
 		}
+
+		if phase, subkey, ok := parsePhaseKey(key); ok {
+			consumed, perr := assignPhaseKey(&cfg, phase, subkey, value, lines, i+1, i+1)
+			if perr != nil {
+				return Config{}, perr
+			}
+			i += consumed
+			continue
+		}
+
 		handled, err := assignScalarField(&cfg, key, value, i+1)
 		if err != nil {
 			return Config{}, err

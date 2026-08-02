@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 // Config is the in-memory shape of .argus/config.yml. All fields are
@@ -165,6 +167,11 @@ type Config struct {
 	// independent of this list, so a repo's own AlwaysReviewPaths can never
 	// silently drop that check by omission — see supervisor's selfConfigPath.
 	AlwaysReviewPaths []string
+	// Phases adds Bash-command denials on top of protocol.DeniedInPhase's
+	// hardcoded floor, per phase — see protocol.ResolvedDenyForPhase. A repo
+	// can only add restrictions this way, never remove the floor: Skip drops
+	// this repo's own addition for that phase, not the floor itself.
+	Phases protocol.PhaseConfig
 	// Deprecated is populated only by Load/parseYAML reading an old-named key
 	// (see deprecatedKeyAliases) — never set by anything that constructs a
 	// Config directly, such as runInit's own suggested/cfg values.
