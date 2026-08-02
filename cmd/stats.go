@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -15,8 +16,21 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
+// defaultTaskLimit bounds the "tokens per task" list to a quick read instead
+// of an itemized dump — a real run history runs into the thousands of tasks.
+const defaultTaskLimit = 20
+
+// maxTaskLabelWidth is the printed width of a task label before it gets
+// ellipsis-truncated. Kept independent of taskLabel's own 60-char cut in
+// internal/supervisor/loop.go: older run logs predate that cut and can carry
+// a task's entire multi-line brief, so stats must re-bound at render time
+// regardless of what's actually stored on disk.
+const maxTaskLabelWidth = 60
+
 func newStatsCmd() *cobra.Command {
 	var export bool
+	var limit int
+	var all bool
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "Aggregate the run logs under ~/.argus/runs into supervision metrics",
@@ -26,11 +40,17 @@ how often a review reply had to be re-asked, the terminal-phase breakdown, and
 tokens spent per task. It is the analysis half of the log->analyze->improve loop:
 plain code over typed events, no LLM.
 
+The "tokens per task" list is capped at --limit highest-spend tasks (default
+20); pass --all to print every task instead.
+
 --export switches to a CSV of one row per task, joining token spend (with the
 cache-read/input ratio) to the model/effort it ran with and the gate/review/
 verdict/phase outcome for that same task — the input a manual dispatch-tuning
 pass reads instead of hand-correlating separate event types.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !all && limit <= 0 {
+				return fmt.Errorf("--limit must be positive (use --all to show every task)")
+			}
 			home, err := os.UserHomeDir()
 			if err != nil {
 				return fmt.Errorf("resolving home dir: %w", err)
@@ -53,11 +73,17 @@ pass reads instead of hand-correlating separate event types.`,
 				return writeTaskCSV(out, eventlog.JoinTasks(events))
 			}
 			stats := eventlog.Summarize(events)
-			renderStats(cmd, &stats)
+			taskLimit := limit
+			if all {
+				taskLimit = -1
+			}
+			renderStats(cmd, &stats, taskLimit)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&export, "export", false, "print one CSV row per task (tokens, model, effort, gate/review/verdict/phase) instead of the aggregate summary")
+	cmd.Flags().IntVar(&limit, "limit", defaultTaskLimit, "cap the \"tokens per task\" list to the N highest-spend tasks")
+	cmd.Flags().BoolVar(&all, "all", false, "show every task in \"tokens per task\" instead of capping at --limit")
 	return cmd
 }
 
@@ -92,7 +118,7 @@ func writeTaskCSV(out io.Writer, rows []eventlog.TaskRow) error {
 
 var statsCmd = newStatsCmd()
 
-func renderStats(cmd *cobra.Command, s *eventlog.Stats) {
+func renderStats(cmd *cobra.Command, s *eventlog.Stats, taskLimit int) {
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out, "\n%s argus stats — %d run(s), %d worker(s)\n\n",
 		ui.LabelInfo.Render("i"), s.Runs, s.Workers)
@@ -119,10 +145,34 @@ func renderStats(cmd *cobra.Command, s *eventlog.Stats) {
 
 	if len(s.TokensByTask) > 0 {
 		_, _ = fmt.Fprintf(out, "  tokens per task:\n")
-		for _, task := range sortedTokenKeys(s.TokensByTask) {
-			_, _ = fmt.Fprintf(out, "               · %s: %d\n", task, s.TokensByTask[task])
+		keys := sortedTokenKeys(s.TokensByTask)
+		shown, omitted := keys, 0
+		if taskLimit >= 0 && len(keys) > taskLimit {
+			shown, omitted = keys[:taskLimit], len(keys)-taskLimit
+		}
+		for _, task := range shown {
+			_, _ = fmt.Fprintf(out, "               · %s: %d\n", truncateTaskLabel(task, maxTaskLabelWidth), s.TokensByTask[task])
+		}
+		if omitted > 0 {
+			_, _ = fmt.Fprintf(out, "               … %d more task(s) omitted (--limit %d or --all to see them)\n", omitted, len(keys))
 		}
 	}
+}
+
+// truncateTaskLabel bounds task to a single line of at most width runes,
+// appending an unambiguous "…" marker when it cuts — a bare cut is
+// indistinguishable from a task whose own text happens to end at that byte,
+// and task descriptions routinely contain colons themselves.
+func truncateTaskLabel(task string, width int) string {
+	if nl := strings.IndexByte(task, '\n'); nl >= 0 {
+		task = task[:nl]
+	}
+	task = strings.TrimSpace(task)
+	runes := []rune(task)
+	if len(runes) <= width {
+		return task
+	}
+	return string(runes[:width]) + "…"
 }
 
 func sortedKeys(m map[string]int) []string {

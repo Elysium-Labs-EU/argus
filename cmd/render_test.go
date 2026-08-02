@@ -25,7 +25,7 @@ func TestRenderStats(t *testing.T) {
 		Phases:          map[string]int{"awaiting_review": 2},
 		TokensByTask:    map[string]int64{"a": 1000, "b": 3000},
 	}
-	renderStats(cmd, s)
+	renderStats(cmd, s, -1)
 	out := buf.String()
 	for _, want := range []string{"2 run(s)", "escalation rate 67%", "parse-fail rate 50%", "awaiting_review", "3000"} {
 		if !strings.Contains(out, want) {
@@ -52,7 +52,7 @@ func TestRenderStatsBlockedOnQuestion(t *testing.T) {
 		Phases:            map[string]int{"awaiting_review": 1, "blocked": 2},
 		BlockedOnQuestion: 1,
 	}
-	renderStats(cmd, s)
+	renderStats(cmd, s, -1)
 	out := buf.String()
 	if !strings.Contains(out, "blocked: 2 (1 on a structured question)") {
 		t.Errorf("stats output missing blocked-on-question suffix:\n%s", out)
@@ -74,7 +74,7 @@ func TestRenderStatsBlockedWithNoQuestions(t *testing.T) {
 		Runs: 1, Workers: 1,
 		Phases: map[string]int{"blocked": 1},
 	}
-	renderStats(cmd, s)
+	renderStats(cmd, s, -1)
 	out := buf.String()
 	if !strings.Contains(out, "blocked: 1\n") {
 		t.Errorf("stats output missing plain blocked line:\n%s", out)
@@ -134,5 +134,83 @@ func TestSortedKeys(t *testing.T) {
 	got := sortedKeys(map[string]int{"b": 1, "a": 2, "c": 3})
 	if strings.Join(got, ",") != "a,b,c" {
 		t.Errorf("sortedKeys not sorted: %v", got)
+	}
+}
+
+// TestRenderStatsCapsTaskList pins that a positive taskLimit shows only the
+// top-N (by spend) tasks and appends an omitted-count footer naming both
+// how many were dropped and the full total.
+func TestRenderStatsCapsTaskList(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	s := &eventlog.Stats{
+		Runs: 1, Workers: 1,
+		TokensByTask: map[string]int64{"a": 300, "b": 200, "c": 100},
+	}
+	renderStats(cmd, s, 2)
+	out := buf.String()
+	if !strings.Contains(out, "a: 300") || !strings.Contains(out, "b: 200") {
+		t.Errorf("expected the two highest-spend tasks in output:\n%s", out)
+	}
+	if strings.Contains(out, "c: 100") {
+		t.Errorf("task beyond the limit should be omitted, not printed:\n%s", out)
+	}
+	if !strings.Contains(out, "1 more task(s) omitted (--limit 3 or --all to see them)") {
+		t.Errorf("expected an omitted-count footer naming the full total:\n%s", out)
+	}
+}
+
+// TestRenderStatsNegativeLimitShowsEverything pins that a negative taskLimit
+// (the --all sentinel) prints every task with no footer.
+func TestRenderStatsNegativeLimitShowsEverything(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	s := &eventlog.Stats{
+		Runs: 1, Workers: 1,
+		TokensByTask: map[string]int64{"a": 300, "b": 200, "c": 100},
+	}
+	renderStats(cmd, s, -1)
+	out := buf.String()
+	for _, want := range []string{"a: 300", "b: 200", "c: 100"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected every task in output, missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "omitted") {
+		t.Errorf("no footer expected when every task is shown:\n%s", out)
+	}
+}
+
+// TestTruncateTaskLabel pins the ellipsis-truncation contract: bounded width,
+// single line, and an unambiguous "…" marker on cut so a task's own colon
+// can never be mistaken for the truncation point.
+func TestTruncateTaskLabel(t *testing.T) {
+	cases := []struct {
+		name  string
+		task  string
+		want  string
+		width int
+	}{
+		{"under width passes through", "short task", "short task", 60},
+		{"exact width passes through unmarked", strings.Repeat("x", 10), strings.Repeat("x", 10), 10},
+		{"over width gets ellipsis", strings.Repeat("x", 11), strings.Repeat("x", 10) + "…", 10},
+		{"first line only", "line one\nline two", "line one", 60},
+		{"trims surrounding whitespace", "  padded  ", "padded", 60},
+		{
+			"task text containing a colon still gets an unambiguous marker",
+			"Fix Elysium-Labs-EU/argus issue #161: Add a minimal declarative thing",
+			"Fix Elysium-Labs-EU/argus issue #161: Ad" + "…",
+			40,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := truncateTaskLabel(c.task, c.width)
+			if got != c.want {
+				t.Errorf("truncateTaskLabel(%q, %d) = %q, want %q", c.task, c.width, got, c.want)
+			}
+		})
 	}
 }
