@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 func TestPathDefault(t *testing.T) {
@@ -511,6 +513,49 @@ func TestEncodeYAMLNeverEmitsOldKeyNamesAfterLoadingOldNamedFile(t *testing.T) {
 	}
 	if len(reloaded.Deprecated) != 0 {
 		t.Errorf("Deprecated = %+v, want empty on the second load (file now uses new names only)", reloaded.Deprecated)
+	}
+}
+
+func TestSaveLoadRoundTripPhases(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	want := Config{
+		Phases: protocol.PhaseConfig{
+			protocol.PhasePlanning: {Deny: []string{"npm publish"}},
+			protocol.PhaseWorking:  {Skip: true, Deny: []string{"docker push"}},
+		},
+	}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadPhaseKeyUnrecognizedPhaseErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "phase.plannning.skip: true\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load(unrecognized phase name): want error, got nil")
+	}
+}
+
+func TestLoadPhaseKeyUnrecognizedSubkeyErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "phase.planning.frobnicate: true\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load(unrecognized phase subkey): want error, got nil")
 	}
 }
 

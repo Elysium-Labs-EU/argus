@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # schemas/config.schema.json hand-mirrors the key set internal/repoconfig/
-# yaml.go's parseYAML/listFieldFor switches recognize, plus the deprecated
-# aliases deprecatedKeyAliases still accepts. Three hand-duplicated sources
-# drift silently if only one is updated, so this gate diffs the key sets on
-# every run instead of trusting them to stay in sync by hand.
+# yaml.go's parseYAML/listFieldFor/assignPhaseKey switches recognize, plus the
+# deprecated aliases deprecatedKeyAliases still accepts. Three hand-duplicated
+# sources drift silently if only one is updated, so this gate diffs the key
+# sets on every run instead of trusting them to stay in sync by hand. Dotted
+# phase.<name>.<subkey> keys live under the schema's patternProperties (a
+# literal property per phase name would be 10 near-identical blocks), so
+# schema_keys below also pulls the trailing subkey out of each pattern.
 set -euo pipefail
 
 TARGET="${1:-.}"
@@ -19,7 +22,13 @@ schema_keys="$(python3 -c '
 import json, sys
 with open(sys.argv[1]) as f:
     doc = json.load(f)
-for key in sorted(doc.get("properties", {})):
+keys = set(doc.get("properties", {}))
+# patternProperties keys are regexes, not literal names — a dotted phase
+# policy key (phase.<name>.skip/deny) always ends in \.<subkey>$, so the
+# trailing segment is the same literal subkey yaml.go switches on.
+for pattern in doc.get("patternProperties", {}):
+    keys.add(pattern.rstrip("$").rsplit("\\.", 1)[-1])
+for key in sorted(keys):
     print(key)
 ' "$SCHEMA_FILE")"
 

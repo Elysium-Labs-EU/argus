@@ -122,5 +122,17 @@
       "description": "Path globs that always escalate to human/reviewer attention regardless of diff size. Setting this key entirely replaces argus's own built-in default list rather than merging with it. The one exception is .argus/config.yml itself: it is always checked regardless of this list, since it governs next run's own gate policy and can't be allowed to silently drop out by omission.",
       "items": { "type": "string" }
     }
+  },
+  "patternProperties": {
+    "^phase\\.(planning|working|self_test|awaiting_review|blocked)\\.skip$": {
+      "type": "boolean",
+      "description": "Drops this repo's own phase.<name>.deny addition for the named phase. Never removes argus's own hardcoded floor (e.g. planning always denies git commit/push, regardless of this key)."
+    },
+    "^phase\\.(planning|working|self_test|awaiting_review|blocked)\\.deny$": {
+      "type": "array",
+      "description": "Bash command prefixes denied live (via a PreToolUse hook) while a worker reports the named phase, added on top of argus's own hardcoded floor for that phase. A repo can only add restrictions this way, never remove the floor.",
+      "items": { "type": "string" },
+      "examples": [["npm publish"], ["docker push"]]
+    }
   }
 }

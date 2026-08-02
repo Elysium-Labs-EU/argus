@@ -133,6 +133,31 @@ These are enforced in code, not conventions the worker is merely asked to follow
   syntax error in one is reported immediately, against every planned worker
   at once, instead of surfacing only once that specific worker reaches the
   gate — no wasted worker turns on a config typo.
+- **A worker cannot commit/push before it has reported a plan, and cannot
+  invoke argus's own supervisor commands on itself, ever — enforced live, not
+  by settings.json (not yet released as of this writing, still on a branch).**
+  `settings.json`/`settings.local.json` are read once at Claude Code session
+  launch, so a phase-conditional rule can't live there — a `PreToolUse` hook
+  (`argus worker check-tool`, wired via `internal/supervisor/agentadapter.go`'s
+  `checkToolHook`) re-checks the worktree's live `status.json` on every
+  matching Bash call instead. Two floors, hardcoded in
+  `internal/protocol.DeniedInPhase`, apply regardless of any repo config:
+  - `git commit`/`git push` are denied outright during `planning` (ask-gated,
+    not denied, in every other phase).
+  - `argus ship`/`rework`/`review`/`supervise` are denied in **every** phase —
+    a worker calling `argus ship --force` on itself would bypass the entire
+    verdict-required gate; before this, an unlisted command just hit Claude
+    Code's default ask-prompt, which hangs a headless worker instead of
+    actually blocking it.
+  A repo's own `.argus/config.yml` can *add* more denied commands per phase
+  (`phase.<name>.deny`) and can `phase.<name>.skip` to drop its own addition
+  — but never the hardcoded floor above, resolved from the repo's main
+  checkout so a worker editing its own worktree's copy has no effect. See
+  `schemas/config.schema.json`'s `phase.*` keys for the full shape. **What
+  this does not do**: there is no system-wide (cross-repo) config tier yet,
+  no per-phase scripts-on-entry, and matching is a plain string-prefix check
+  — the same trust model as the rest of this list, not hardened against
+  deliberate shell-level evasion.
 
 ## Known gaps — still manual, no first-class command yet
 

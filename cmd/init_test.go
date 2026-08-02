@@ -14,13 +14,12 @@ import (
 
 // initPromptExemptFields lists Config fields runInit deliberately does not
 // prompt for, with the reason it's fine to stay hand-edit-only (see
-// schemas/config.schema.json). Empty today — every field is either
-// interactively prompted or (Forge) has its own dedicated flag/prompt path —
-// so the next field that genuinely warrants hand-edit-only status has a
-// place to record why, instead of that decision happening by omission.
-var initPromptExemptFields = map[string]string{}
+// schemas/config.schema.json).
+var initPromptExemptFields = map[string]string{
+	"Phases": "a per-phase policy map (skip/deny per protocol.ConfigurablePhases entry), not a single scalar or flat list runInit's interactive prompts can represent — hand-edit .argus/config.yml's phase.<name>.<subkey> keys directly, with schemas/config.schema.json's patternProperties giving editor validation/autocomplete.",
+}
 
-const wantConfigFieldCount = 20 // repoconfig.Config's current field count
+const wantConfigFieldCount = 21 // repoconfig.Config's current field count
 
 func writeMarker(t *testing.T, dir, name string) {
 	t.Helper()

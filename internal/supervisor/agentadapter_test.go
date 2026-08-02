@@ -98,6 +98,25 @@ func TestSettingsForAskListMatchesAskGatedCommands(t *testing.T) {
 	}
 }
 
+// TestSettingsForWiresCheckToolHook confirms every freshly spawned worker
+// gets the phase-aware PreToolUse hook without any operator config: the
+// static allow/ask/deny lists above are only read once at session launch,
+// so DeniedInPhase's live per-phase enforcement depends on this hook
+// actually being present in every rendered settings file.
+func TestSettingsForWiresCheckToolHook(t *testing.T) {
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil)
+	if len(settings.Hooks.PreToolUse) != 1 {
+		t.Fatalf("PreToolUse hooks = %d, want 1", len(settings.Hooks.PreToolUse))
+	}
+	matcher := settings.Hooks.PreToolUse[0]
+	if matcher.Matcher != "Bash" {
+		t.Errorf("matcher = %q, want %q", matcher.Matcher, "Bash")
+	}
+	if len(matcher.Hooks) != 1 || matcher.Hooks[0].Command != "argus worker check-tool" {
+		t.Errorf("hook entries = %+v, want a single \"argus worker check-tool\" command", matcher.Hooks)
+	}
+}
+
 func TestClaudeCodeAdapterPlanEvidenceDelegates(t *testing.T) {
 	home := t.TempDir()
 	wt := t.TempDir()
