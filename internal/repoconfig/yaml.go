@@ -92,17 +92,24 @@ func encodeYAML(cfg *Config) string {
 	}
 	writeYAMLList(&b, "proof_required_paths", cfg.ProofRequiredPaths)
 	writeYAMLList(&b, "always_review_paths", cfg.AlwaysReviewPaths)
+	writePhaseKeys(&b, cfg.Phases)
+	return b.String()
+}
+
+// writePhaseKeys writes phase.<name>.skip/.deny for every configured phase,
+// in protocol.ConfigurablePhases order — split out of encodeYAML to keep
+// that function's own complexity down, not for reuse.
+func writePhaseKeys(b *strings.Builder, phases protocol.PhaseConfig) {
 	for _, p := range protocol.ConfigurablePhases {
-		policy, ok := cfg.Phases[p]
+		policy, ok := phases[p]
 		if !ok {
 			continue
 		}
 		if policy.Skip {
-			fmt.Fprintf(&b, "phase.%s.skip: true\n", p)
+			fmt.Fprintf(b, "phase.%s.skip: true\n", p)
 		}
-		writeYAMLList(&b, "phase."+string(p)+".deny", policy.Deny)
+		writeYAMLList(b, "phase."+string(p)+".deny", policy.Deny)
 	}
-	return b.String()
 }
 
 // writeYAMLList writes a key's indented "- value" list block, or nothing if
