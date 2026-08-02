@@ -125,15 +125,20 @@ func credentialHelperToken(host string) string {
 	return gitCredentialFill(ctx, host)
 }
 
-// runTrimmed runs name with args and returns its trimmed stdout, or "" on any
-// failure (binary missing, not authenticated, non-zero exit). name is always
-// a fixed literal ("gh", "glab") from credentialHelperToken's call sites,
-// never attacker- or user-controlled input.
-func runTrimmed(ctx context.Context, name string, args ...string) string {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // name is a fixed literal from credentialHelperToken, not user input
-
+// newFixedCmd builds a command for name with args, GIT_TERMINAL_PROMPT
+// disabled so nothing blocks on an interactive credential prompt. name is
+// always a fixed literal ("gh", "glab", "git") from this file's own call
+// sites, never attacker- or user-controlled input.
+func newFixedCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // name is a fixed literal from this file's own call sites, not user input
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	out, err := cmd.Output()
+	return cmd
+}
+
+// runTrimmed runs name with args and returns its trimmed stdout, or "" on any
+// failure (binary missing, not authenticated, non-zero exit).
+func runTrimmed(ctx context.Context, name string, args ...string) string {
+	out, err := newFixedCmd(ctx, name, args...).Output()
 	if err != nil {
 		return ""
 	}
@@ -143,8 +148,7 @@ func runTrimmed(ctx context.Context, name string, args ...string) string {
 // gitCredentialFill asks `git credential fill` for a password on host via
 // git's credential.helper chain and returns it, or "" if no helper answers.
 func gitCredentialFill(ctx context.Context, host string) string {
-	cmd := exec.CommandContext(ctx, "git", "credential", "fill")
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd := newFixedCmd(ctx, "git", "credential", "fill")
 	cmd.Stdin = strings.NewReader(fmt.Sprintf("protocol=https\nhost=%s\n\n", host))
 	out, err := cmd.Output()
 	if err != nil {
