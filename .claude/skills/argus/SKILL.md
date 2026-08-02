@@ -626,8 +626,11 @@ Remember: `~/.argus/runs` only records events for runs where a worker actually
 spawned. A `supervise` call that errors out beforehand (e.g. worktree-already-exists)
 leaves nothing here — track those failures yourself.
 
-`system update` verifies the release's `sha256sums.txt` before replacing the running
-binary (checksum-only, no signature verification yet).
+`system update` verifies both the release's `sha256sums.txt` and a detached ECDSA
+signature over it before replacing the running binary, refusing outright on a
+mismatch. A release with no `sha256sums.txt.sig` (only possible on `--pre`, since a
+normal release always has one) is a warning, not a refusal — checksum verification
+still runs regardless.
 
 ## What NOT to do
 

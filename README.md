@@ -72,17 +72,28 @@ To build from source instead, `git clone` the repo and run `make build` (needs G
 
 **Configure a repo**
 
-Run `argus init` to scaffold `.argus/config.yml`. It guesses toolchain values from your `Makefile`, `Taskfile.yml`, `package.json`, or `go.mod`. Every key is optional and mirrors a CLI flag, so you can set them once here instead of repeating flags on every run:
+Run `argus init` to scaffold `.argus/config.yml`. It peeks for `Taskfile.yml`, `Makefile`, `package.json`, or `go.mod` (in that order, first match wins) to guess toolchain values; `base_branch` is derived separately, from `refs/remotes/origin/HEAD`. Every key is optional and mirrors a CLI flag, so you can set them once here instead of repeating flags on every run:
 
 ```yaml
-base_branch: main              # branch to diff and PR against
-allow: []                      # extra Bash permission entries for every worker
-brief_note: ""                 # text appended to every generated worker brief
-max_diff_lines: 0              # gate: diffs larger than this escalate (0 disables the ceiling)
-proof_required_paths: []       # gate: paths needing real world proof before auto approval
-always_review_paths: []        # gate: behavior critical paths that always escalate
-verify_command: ""             # gate: shell command re-run in the worktree before approval (e.g. "make lint"); non-zero exit always escalates
-worktree_setup_cmd: ""         # bootstrap: shell command run once in a freshly created worktree, before the worker is spawned (e.g. copying in gitignored local config); non-zero exit fails worktree creation
+base_branch: main                  # branch to diff and PR against
+allow: []                          # extra Bash permission entries for every worker
+brief_note: ""                     # text appended to every generated worker brief
+max_diff_lines: 0                  # gate: diffs larger than this escalate (0 disables the ceiling)
+proof_required_paths: []           # gate: paths needing real world proof before auto approval
+always_review_paths: []            # gate: behavior critical paths that always escalate
+gate_verify_command: ""            # gate: shell command re-run in the worktree before approval (e.g. "make lint"); non-zero exit always escalates
+ship_verify_command: ""            # ship: shell command re-run before opening the PR; non-zero exit refuses the ship
+worktree_bootstrap_command: ""     # bootstrap: shell command run once in a freshly created worktree, before the worker is spawned (e.g. copying in gitignored local config); non-zero exit fails worktree creation
+worktree_dir: ""                   # where new worktrees are created (default: sibling of the repo)
+worker_placement: workspace        # "workspace" (new herdr workspace) or "tab" (nested in the current one)
+launcher: claude                   # agent CLI to spawn in each worker pane
+forge: ""                          # "gitlab" or "gitea", for a self-hosted host auto-detect can't identify by hostname alone
+status_page: ""                    # status-page URL to hint at on a self-hosted forge's request/push failure
+review_note: ""                    # text appended to every review prompt
+review_effort: ""                  # reasoning effort passed to the review model
+title_prefix_template: ""          # template for generated PR titles
+owner_stale_after: 30m             # how long a worktree's ownership lease may go quiet before a mismatched caller may proceed
+rework_budget: 0                   # cross-invocation cap on rework rounds per worktree (0 disables it)
 ```
 
 **Run**
@@ -112,6 +123,8 @@ argus tend    --worktree /path/to/project-feat-retry --dry-run           # poll 
 | `argus tend` | Poll a shipped PR's CI checks to a terminal state (GitHub only) |
 | `argus worktree prune` | Clean up a merged worktree (`--branch <name>`, or `--merged` to sweep the repo) |
 | `argus stats` | Aggregate run logs into escalation rate, review parse fail rate, and tokens per task |
+| `argus config check` | Check (and optionally fix) the Bash allow/deny entries argus itself needs |
+| `argus config set` | Persist a `credential.<name>` override so it doesn't need repeating via `--credential-env` |
 
 Pass `--debug` on `supervise`, `review`, `ship`, `rebase`, `rework`, `tend`, `worktree prune`, `worker answer`, or `worker steer` — the commands that actually write a run log — to tee that log to stderr as it runs. It always persists under `~/.argus/runs` either way.
 
@@ -120,7 +133,7 @@ Pass `--debug` on `supervise`, `review`, `ship`, `rebase`, `rework`, `tend`, `wo
 Beyond the worker agent, argus plugs into:
 
 * **herdr**, the terminal multiplexer argus drives (through its CLI only) to host worker panes.
-* **Forges**, auto-detected from the git remote, for `ship` and `--issues`: GitHub, GitLab (`gitlab.com`), and Codeberg, Gitea, or Forgejo. A self hosted GitLab host is treated as Gitea or Forgejo.
+* **Forges**, auto-detected from the git remote, for `ship` and `--issues`: GitHub, GitLab (`gitlab.com`), and Codeberg. A self hosted host (GitLab, Gitea, or Forgejo) can't be told apart by hostname alone, so it's refused until you pass `--forge gitlab` or `--forge gitea` (or set the `forge` key in `.argus/config.yml`).
 * **Jira Cloud.** `argus supervise --jira-issues PROJ-123,...` turns issue keys into worker briefs. Add `--jira-assign-on-spawn` and/or `--jira-transition-on-spawn "In Progress"` to claim each ticket for the caller and move it into an in-progress-shaped status before its worker starts. Needs `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`, or a `~/.argus/jira.json` config file.
 * **A Claude Code skill.** A bundled skill at `.claude/skills/argus/` teaches Claude Code to drive `supervise`, `review`, and `ship` for you. Copy it to `~/.claude/skills/argus/` to use it in any repo.
 
@@ -129,7 +142,7 @@ Beyond the worker agent, argus plugs into:
 ```bash
 make build   # build ./bin/argus
 make test    # go test -race
-make ci      # test, lint, nilaway, coverage gate (75 percent), change-scoped risk gate
+make ci      # test, lint, nilaway, coverage gate (75 percent), change-scoped risk gate, eventlog/pubkey/schema/file-size checks, govulncheck, secrets scan
 ```
 
 Commands live in `cmd/` as cobra `newXxxCmd` constructors; everything else lives in `internal/` (there is no `pkg/`). Run `make help` for the full target list.
