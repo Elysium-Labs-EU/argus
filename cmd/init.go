@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Elysium-Labs-EU/argus/internal/permission"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
@@ -123,7 +124,45 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "%s wrote %s\n", ui.LabelSuccess.Render("✓"), path)
+	printNextSteps(out)
+	// The offer is interactive-only: --yes is the non-interactive path, and the
+	// step it runs mutates .claude/settings.json, so it must never fire off an
+	// unattended write.
+	if !a.yes {
+		offerConfigCheck(cmd, reader, out, repoRoot)
+	}
 	return nil
+}
+
+// printNextSteps names the two onboarding actions init deliberately can't
+// perform for you: config check --write lives in .claude/settings.json, which
+// is untracked and per-clone (so it can't be folded into the config.yml init
+// just wrote — every fresh clone would otherwise dead-end at a manual approval
+// prompt on the first argus call), and a first --dry-run is the safe way to see
+// a run before it spawns any workers.
+func printNextSteps(out io.Writer) {
+	_, _ = fmt.Fprintf(out, "\n%s\n", ui.TextBold.Render("Next steps:"))
+	_, _ = fmt.Fprintf(out, "  1. %s  %s\n",
+		ui.TextCommand.Render("argus config check --write"),
+		ui.TextMuted.Render("allowlist argus in this clone's .claude/settings.json"))
+	_, _ = fmt.Fprintf(out, "  2. %s  %s\n",
+		ui.TextCommand.Render("argus supervise <task> --dry-run"),
+		ui.TextMuted.Render("preview a run before spawning workers"))
+}
+
+// offerConfigCheck offers to run `config check --write` inline. It defaults to
+// no because, unlike everything else init does, running it mutates
+// .claude/settings.json — the same reason `config check` itself needs an
+// explicit --write rather than fixing by default. A failure here is only
+// warned about: the config.yml write already succeeded, so init should not
+// exit non-zero over the optional follow-up.
+func offerConfigCheck(cmd *cobra.Command, reader *bufio.Reader, out io.Writer, repoRoot string) {
+	if !ui.Confirm(reader, out, "Run `argus config check --write` now?", false) {
+		return
+	}
+	if err := runConfigCheck(cmd, &configCheckArgs{repo: repoRoot, entry: permission.DefaultAllowEntry, write: true}); err != nil {
+		_, _ = fmt.Fprintf(out, "%s config check: %v\n", ui.LabelWarning.Render("!"), err)
+	}
 }
 
 // toolchainGuess is one entry in detectRepoConfig's ordered detection table:
