@@ -85,6 +85,14 @@ worker check-tool): it can never invoke argus's own supervisor commands
 commit/push before it has reported a plan. This floor is not a flag and
 cannot be disabled by repo config.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Fail fast with an install hint if a hard prerequisite is missing,
+			// before any worktree is created or pane opened. A spawn needs herdr
+			// to open panes and claude to launch each worker; --attach only
+			// watches existing panes (herdr, no launch) unless --review also
+			// runs claude; a dry run needs neither (see superviseRequiredBinaries).
+			if err := requireBinaries(binaryLookPath, superviseRequiredBinaries(dryRun, attach, review)...); err != nil {
+				return err
+			}
 			client := herdr.New()
 
 			overrides, err := resolveCredentialOverrides(credentialEnv)

@@ -195,6 +195,15 @@ func runRebase(cmd *cobra.Command, client herdr.Client, opts *rebaseOpts) error 
 		return nil
 	}
 
+	// Only now, once a worker dispatch is actually happening, require the
+	// binaries it needs: herdr to open the pane, claude to run the worker. The
+	// no-conflict fast paths above (direct force-push, nothing-to-rebase) use
+	// neither, so this must not sit up front where it would force claude onto a
+	// run that never launches a worker.
+	if err := requireBinaries(binaryLookPath, binHerdr, binClaude); err != nil {
+		return err
+	}
+
 	return dispatchRebaseWorker(ctx, logger, client, out, repoRoot, branch, opts)
 }
 

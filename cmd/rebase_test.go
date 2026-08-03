@@ -1314,6 +1314,7 @@ func TestRebaseSpawnLineUsesAbsoluteWorktree(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
+			setBinaryLookPath(t, found)
 			base := t.TempDir()
 			repoDir, cwd, rel := tc.setup(t, base)
 			initGitDirAt(t, repoDir)
@@ -1352,6 +1353,7 @@ func TestRebaseSpawnLineUsesAbsoluteWorktree(t *testing.T) {
 // rewrite it to something else.
 func TestRebaseSpawnLineAbsoluteWorktreePassesThroughUnchanged(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	setBinaryLookPath(t, found)
 	repoDir := filepath.Join(t.TempDir(), "featx")
 	initGitDirAt(t, repoDir)
 
@@ -1384,6 +1386,7 @@ func TestRebaseSpawnLineAbsoluteWorktreePassesThroughUnchanged(t *testing.T) {
 // rather than something it evaluates.
 func TestRebaseSpawnLineWorktreeWithShellMetacharsSingleQuoted(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	setBinaryLookPath(t, found)
 	base := t.TempDir()
 	const segment = "feat $(whoami)"
 	repoDir := filepath.Join(base, segment)
