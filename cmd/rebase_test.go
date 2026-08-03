@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
@@ -1190,11 +1192,15 @@ func TestDispatchIntoPaneLiveAgentPromptUsesLivenessTimeout(t *testing.T) {
 // "pane run" call succeeds, so waitForAgentLive's first poll finds it live
 // immediately) plus recording of the exact command line PaneRun was asked to
 // type into the pane, so a test can assert on the resolved --worktree's
-// absolute cd target.
-func capturingSpawnClient(paneID string) (client herdr.Client, spawnLine func() string) {
+// absolute cd target. captured closes the instant that command line lands,
+// letting a caller stop waiting on runRebase (see runRebaseUntilSpawnCaptured)
+// without racing a fixed wall-clock budget against the real git subprocesses
+// runRebase runs beforehand.
+func capturingSpawnClient(paneID string) (client herdr.Client, spawnLine func() string, captured <-chan struct{}) {
 	var mu sync.Mutex
 	var spawned bool
 	var line string
+	done := make(chan struct{})
 	client = herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
 		switch {
 		case len(args) > 0 && args[0] == "worktree":
@@ -1214,6 +1220,7 @@ func capturingSpawnClient(paneID string) (client herdr.Client, spawnLine func() 
 				line = args[3]
 			}
 			mu.Unlock()
+			close(done)
 			return []byte(`{"result":{}}`), nil
 		default:
 			return []byte(`{"result":{}}`), nil
@@ -1223,6 +1230,45 @@ func capturingSpawnClient(paneID string) (client herdr.Client, spawnLine func() 
 		mu.Lock()
 		defer mu.Unlock()
 		return line
+	}, done
+}
+
+// runRebaseUntilSpawnCaptured runs runRebase in the background against a
+// cancelable (not deadline-bound) context, waits only until captured fires,
+// then cancels — so dispatchRebaseWorker's WaitForStatus (open-ended here:
+// none of these tests ever write a status.json) gives up immediately instead
+// of needing a fixed timeout generous enough to outlast runRebase's own real
+// git subprocesses (fetch, rev-parse, merge-tree) under system load. Those
+// subprocesses used to share a single 200-500ms deadline with WaitForStatus,
+// so any load-induced slowness in them could exhaust the budget before the
+// fake PaneRun ever ran, leaving spawnLine() empty — see argus issue #424.
+// safetyTimeout only guards against a genuine hang (a real regression), not
+// against system slowness, so it can be generous without reintroducing flake.
+func runRebaseUntilSpawnCaptured(t *testing.T, cmd *cobra.Command, client herdr.Client, opts *rebaseOpts, captured <-chan struct{}) {
+	t.Helper()
+	const safetyTimeout = 10 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd.SetContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = runRebase(cmd, client, opts)
+	}()
+
+	select {
+	case <-captured:
+	case <-time.After(safetyTimeout):
+		t.Fatal("timed out waiting for the fake PaneRun to capture a spawn line")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(safetyTimeout):
+		t.Fatal("runRebase did not return after its context was canceled")
 	}
 }
 
@@ -1277,18 +1323,13 @@ func TestRebaseSpawnLineUsesAbsoluteWorktree(t *testing.T) {
 			var buf bytes.Buffer
 			cmd.SetOut(&buf)
 			cmd.SetErr(&buf)
-			// 500ms, not 200ms: runRebase's no-conflict path now also
-			// round-trips ls-remote/rev-parse against origin before dispatch.
-			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			defer cancel()
-			cmd.SetContext(ctx)
 
-			client, spawnLine := capturingSpawnClient("w1:p1")
+			client, spawnLine, captured := capturingSpawnClient("w1:p1")
 			opts := &rebaseOpts{
 				worktree: rel, base: "feat-x", force: true, launcher: "claude", noCredProxy: true,
 				interval: 10 * time.Millisecond, livenessTimeout: 100 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
 			}
-			_ = runRebase(cmd, client, opts) // no status.json ever written; only the spawn line matters here
+			runRebaseUntilSpawnCaptured(t, cmd, client, opts, captured) // no status.json ever written; only the spawn line matters here
 
 			if !filepath.IsAbs(opts.worktree) {
 				t.Errorf("opts.worktree = %q after runRebase, want an absolute path", opts.worktree)
@@ -1318,17 +1359,13 @@ func TestRebaseSpawnLineAbsoluteWorktreePassesThroughUnchanged(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	// 500ms, not 200ms: see TestRebaseSpawnLineUsesAbsoluteWorktree.
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	cmd.SetContext(ctx)
 
-	client, spawnLine := capturingSpawnClient("w1:p1")
+	client, spawnLine, captured := capturingSpawnClient("w1:p1")
 	opts := &rebaseOpts{
 		worktree: repoDir, base: "feat-x", force: true, launcher: "claude", noCredProxy: true,
 		interval: 10 * time.Millisecond, livenessTimeout: 100 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
 	}
-	_ = runRebase(cmd, client, opts)
+	runRebaseUntilSpawnCaptured(t, cmd, client, opts, captured)
 
 	if opts.worktree != repoDir {
 		t.Errorf("opts.worktree = %q, want the already-absolute %q unchanged", opts.worktree, repoDir)
@@ -1357,17 +1394,13 @@ func TestRebaseSpawnLineWorktreeWithShellMetacharsSingleQuoted(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	// 500ms, not 200ms: see TestRebaseSpawnLineUsesAbsoluteWorktree.
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	cmd.SetContext(ctx)
 
-	client, spawnLine := capturingSpawnClient("w1:p1")
+	client, spawnLine, captured := capturingSpawnClient("w1:p1")
 	opts := &rebaseOpts{
 		worktree: "./" + segment, base: "feat-x", force: true, launcher: "claude", noCredProxy: true,
 		interval: 10 * time.Millisecond, livenessTimeout: 100 * time.Millisecond, livenessInterval: 5 * time.Millisecond,
 	}
-	_ = runRebase(cmd, client, opts)
+	runRebaseUntilSpawnCaptured(t, cmd, client, opts, captured)
 
 	if !filepath.IsAbs(opts.worktree) {
 		t.Errorf("opts.worktree = %q, want an absolute path", opts.worktree)
