@@ -22,6 +22,22 @@ manual workaround is required. Both are labeled explicitly. Treating a gap as if
 it were already covered is how a stale verdict or unenforced instruction reaches
 a PR.
 
+## Quickstart — brand-new repo, first run
+
+Five steps from nothing to a shipped PR; each is expanded later in this doc. Run
+them from inside a herdr pane, in the target repo.
+
+```bash
+argus doctor --repo .                                                 # prerequisites in one check (see Preflight)
+argus config check --repo . --write --entry "Bash(argus supervise *)" # once per clone: allowlist argus needs
+argus init                                                            # detect toolchain, write .argus/config.yml
+argus supervise --repo . --issues 42 --review --dry-run              # confirm the plan, then drop --dry-run
+argus ship --worktree <path> --issue 42 --dry-run                   # then drop --dry-run to open the PR
+```
+
+If `argus doctor` fails a hard check (herdr or claude missing), fix that first —
+nothing else runs without it. Everything below is the reference for these steps.
+
 ## Quick reference
 
 | Situation | Command |
@@ -41,7 +57,15 @@ a PR.
 | Check/fix the Bash allowlist argus itself needs | `argus config check --write` |
 | Set up a repo's own base branch/allow list/brief note (see `docs/repo-config.md`) | `argus init` |
 
-If `argus` isn't on PATH, fall back to [[supervise-agents]] and say so.
+If `argus` isn't on PATH, don't silently downgrade — **offer to install it first**:
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/scripts/install.sh | sh
+argus doctor --repo .   # re-check readiness once installed, then proceed
+```
+
+Only fall back to [[supervise-agents]] (and say so) if the user declines the install
+or it fails. Absence is a setup trigger, not a dead end.
 
 **Non-Go/non-make repos**: `argus init` detects a repo's toolchain
 (Taskfile.yml/Makefile/package.json/go.mod) and writes `.argus/config.yml` with a
@@ -172,10 +196,15 @@ Enforced in code, not conventions the worker is merely asked to follow.
 
 ## Preflight
 
+One command runs every prerequisite check — herdr + claude on PATH (hard, exits
+non-zero), forge token + Bash allowlist + repo `.argus/config.yml` (soft, warns):
+
 ```bash
-command -v argus herdr claude    # all three must resolve
-gh auth status                   # or: [ -n "$GITHUB_TOKEN" ] (don't echo the token itself)
+argus doctor --repo .
 ```
+
+Each failed line carries the exact fix. The individual checks, if you need to reason
+about one in isolation:
 
 - `herdr` on PATH — argus talks to it over its CLI. You're usually already inside herdr.
 - `claude` on PATH — needed for `argus review` and `supervise --review`.
