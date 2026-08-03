@@ -188,6 +188,17 @@ gh auth status                   # or: [ -n "$GITHUB_TOKEN" ] (don't echo the to
   falling back to `gh`/`glab`/`git credential fill`. `--jira-issues`/
   `--jira-issue` additionally need `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN`.
 
+**Three config files, one map.** argus reads/writes three files with overlapping
+names but no overlap in purpose. Don't confuse them — `config check` and `config
+set` touch two *different* files, and neither is the `.argus/config.yml` that
+`init` wrote:
+
+| File | Written by | Format | Holds | Scope |
+|---|---|---|---|---|
+| `.argus/config.yml` | `argus init` | YAML | Per-repo defaults: base branch, toolchain, gate/ship keys (docs/repo-config.md) | Per repo, committed |
+| `.claude/settings.json` | `argus config check --write` | JSON | Bash allow/deny entries argus needs | Per clone, untracked |
+| `~/.argus/config.toml` | `argus config set` | TOML | Credential name → env-var overrides only | Per user |
+
 **Bash-permission allowlist and herdr-pane denylist — do this once per clone**,
 or every `argus` call prompts for manual approval and raw herdr pane mutation
 stays uncoordinated with argus's own dispatch:
