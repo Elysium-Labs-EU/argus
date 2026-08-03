@@ -77,7 +77,13 @@ decisions) are surfaced to you; no LLM sits in this loop.
 Workers are defined by paired --tasks and --branches; argus creates a worktree per
 worker and runs it in the pane herdr opens there. Pass --panes only to reuse
 existing panes instead. --repo sets the repo (default: the current directory, or
-each pane's directory in --panes mode).`,
+each pane's directory in --panes mode).
+
+Every spawned worker also gets a phase-conditional PreToolUse hook (argus
+worker check-tool): it can never invoke argus's own supervisor commands
+(ship, rework, review, supervise) on itself in any phase, and can't run git
+commit/push before it has reported a plan. This floor is not a flag and
+cannot be disabled by repo config.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client := herdr.New()
 

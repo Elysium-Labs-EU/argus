@@ -85,7 +85,7 @@ owner/name and branch are derived from the worktree unless overridden.`,
 	cmd.Flags().IntVar(&issue, "issue", 0, "issue number this change closes")
 	cmd.Flags().StringVar(&title, "title", "", "PR title (default derived from the branch/issue)")
 	bindRepoFlag(cmd, &repo, "owner/name override (default: parsed from the worktree's origin remote)")
-	cmd.Flags().BoolVar(&force, "force", false, "ship even without an approving argus verdict (skips the gate/review check)")
+	cmd.Flags().BoolVar(&force, "force", false, "ship even without an approving argus verdict (skips the gate/review check); does not lift a spawned worker's own PreToolUse floor, which still blocks it from invoking ship/rework/review/supervise on itself or committing/pushing before it has reported a plan")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be committed and opened, without doing it")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	cmd.Flags().StringVar(&jiraIssue, "jira-issue", "", "Jira issue key (e.g. PROJ-123) to update once the PR is open; unset by default, which skips the Jira post-ship hook entirely. Requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
