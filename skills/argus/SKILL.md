@@ -5,24 +5,22 @@ description: "Supervise parallel herdr worker agents through to a forge PR (GitH
 
 # argus — deterministic agent supervisor
 
-argus runs multi-pane agent supervision as a Go CLI. It discovers or opens herdr
-panes, gives each worker its own git worktree, spawns it in auto mode with a scoped
-permission file, and tracks each worker's typed `status.json` instead of scraping
-scrollback. A gate cross-checks each worker's self-report against the real `git diff`
-and auto-approves only the safe majority; the LLM re-enters only for the escalated
-minority. `ship` refuses to open a PR without a recorded approving verdict.
+Go CLI for multi-pane agent supervision. Discovers/opens herdr panes, gives each
+worker its own git worktree, spawns it in auto mode with a scoped permission file,
+tracks each worker's typed `status.json` (not scrollback). A gate cross-checks
+each worker's self-report against the real `git diff` and auto-approves the safe
+majority; the LLM re-enters only for escalations. `ship` refuses to open a PR
+without a recorded approving verdict.
 
-**Your job with this skill is to drive `argus`, not to hand-run the supervise loop.**
-The hand-run loop lives in the [[supervise-agents]] skill — reach for that only when
-argus is not on PATH. When argus is available, coordination (discovery, worktrees,
-spawning, polling) is the binary's job; you spend tokens only on the judgment calls
-argus escalates to you.
+**Drive `argus`, don't hand-run the supervise loop.** Hand-run loop = [[supervise-agents]]
+skill, only when argus is not on PATH. With argus available, coordination
+(discovery, worktrees, spawning, polling) is the binary's job.
 
-**Read this before trusting argus with anything consequential.** Some of what follows
-is a hard guarantee enforced by the binary. Some of it is a real, current gap where
-argus will not save you and a manual workaround is required. They are labeled
-explicitly below — do not blur the two. Treating a known gap as if argus already
-covers it is how a stale verdict or an unenforced instruction reaches a PR.
+**Hard guarantee vs. known gap — do not blur these.** Below, some behavior is
+enforced in code; some is a real current gap where argus won't save you and a
+manual workaround is required. Both are labeled explicitly. Treating a gap as if
+it were already covered is how a stale verdict or unenforced instruction reaches
+a PR.
 
 ## Quick reference
 
@@ -45,177 +43,133 @@ covers it is how a stale verdict or an unenforced instruction reaches a PR.
 
 If `argus` isn't on PATH, fall back to [[supervise-agents]] and say so.
 
-**Non-Go/non-make repos**: `supervise`'s generated worker permission allowlist and
-default base branch used to hardcode Go/make assumptions. `argus init` detects a
-repo's toolchain (Taskfile.yml/Makefile/package.json/go.mod) and writes
-`.argus/config.yml` with a suggested `base_branch`/`allow`/`brief_note` — see
-`docs/repo-config.md`. With no such file, argus assumes nothing about any
-repo's toolchain.
+**Non-Go/non-make repos**: `argus init` detects a repo's toolchain
+(Taskfile.yml/Makefile/package.json/go.mod) and writes `.argus/config.yml` with a
+suggested `base_branch`/`allow`/`brief_note` — see `docs/repo-config.md`. With no
+such file, argus assumes nothing about a repo's toolchain.
 
 ## What argus guarantees today (rc.20)
 
-These are enforced in code, not conventions the worker is merely asked to follow:
+Enforced in code, not conventions the worker is merely asked to follow.
 
-- **Diff is measured, not trusted — three checks a worker cannot talk past, and
-  none of the three is waivable by `--review`.** The gate always computes the
-  real `git diff` itself and cross-checks it against `status.json`, regardless
-  of what the worker claims. All three land in `Verdict.HardReasons`
-  (`internal/supervisor/review.go`): even a `--review` verdict of "approve" on
-  one of these is recorded as *not approved* (`reviewEscalations` in
-  `internal/supervisor/loop.go` overrides it) — fixing a case where a
-  real under-report ("claimed 215 lines, git measured 461") once got waved
-  through anyway because the escalation was only a factor in the reviewer's
-  holistic judgment, not a hard stop.
-  1. An unmeasurable diff escalates.
-  2. A material under-report (worker's claimed size vs. git's measured size)
-     escalates.
-  3. **Zero measured files changed despite a claimed terminal phase
-     (`awaiting_review`/`done`) escalates** — `internal/supervisor/review.go:129-133`,
-     added after a headless (non-herdr) `supervise` spawn let
-     a fresh worktree pick up a *stale, unrelated Claude session's* `status.json`,
-     and the gate auto-approved it as "6/6 tests passed" with a real, freshly-written
-     `verdict.json` — for zero actual code changes. This check catches that exact
-     symptom. **It does not fix the root cause**: nothing detects or refuses a
-     non-herdr spawn itself, and no open issue currently tracks that root cause as
-     distinct from this symptom guard. Always run `supervise`'s spawn mode from
-     inside a real herdr pane; if you ever must run it headless, independently
-     `git diff` every resulting worktree before trusting any report.
-- **Plan evidence is now enforced — but in two separate places, not one (shipped in
-  v0.1.0-rc.20, not a proposal).** Before rc.20, every worker brief said "write a
-  todo list before anything else" as prose, and nothing enforced it — two full real
-  worker sessions were observed making zero `TodoWrite` calls despite the
-  instruction, and the global Stop hook that blocks incomplete task lists can't
-  catch "never started one" because it only tracks tasks that were actually
-  created. As of rc.20:
-  - `argus worker report` itself (`cmd/worker_report.go`, `runWorkerReport`) rejects
-    the `planning → working` transition outright if the worker's reported `plan`
-    array is empty — immediate, at report time.
-  - Separately, the gate (`internal/supervisor/planevidence.go`, `HasPlanEvidence`,
-    invoked from `gateVerdict`) independently greps the worker's own session
-    transcript for a real `TodoWrite`-shaped tool call — but this only runs later,
-    when the worker reaches `awaiting_review`/`done` during `supervise`/`review`,
-    not at `worker report` time. A worker could satisfy the first check with a
-    token plan entry and still get caught by the second at review time.
-  Treat both as real, current, shipped behavior — not a future plan.
-- **`ship` refuses without a persisted approving verdict.** This is real and it is
-  strict — see the gaps immediately below on exactly which actions do and do not
-  produce a verdict `ship` can see.
-- **Cross-session worktree collision has a guard — an advisory ownership lease,
-  not a hard lock.** Every worktree `supervise` spawns gets a
-  `.claude/argus/owner.json` lease (`owner_id`, `owner_label`, `spawned_at`,
-  `heartbeat_at`, written by `internal/ownership`) at spawn time;
-  `supervise`'s own poll loop re-stamps `heartbeat_at` every tick for as long
-  as it keeps tracking that worktree. `rework`, `rebase`, `ship`, and
-  `worker answer` each check the caller's resolved identity against the
-  recorded lease before touching an existing worktree — identity resolves
-  `--owner` flag > `$ARGUS_OWNER_ID` > `$HERDR_WORKSPACE_ID` > a generated id,
-  the same chain `supervise` itself resolves once per run. A live mismatch
-  refuses outright, naming the actual owner; a mismatch whose `heartbeat_at`
-  has gone quiet longer than `--owner-stale-after` (default 30m) logs a
-  notice and proceeds instead of blocking forever on a session that crashed;
-  `--force-foreign-owner` is the explicit human override for anything else. A
-  worktree with no lease at all (predates this feature, or never went through
-  `supervise`'s own spawn path) is treated as unowned and never refused.
-  **What this does not do**: reap or clean up a worktree with a stale lease —
-  that's `argus worktree prune` (see section 6). A stale lease
-  only ever changes whether a *mismatched* caller may proceed; it is not
-  itself a cleanup mechanism. `--owner`/`--force-foreign-owner` are
-  necessarily per-invocation flags (an override is a human decision, not
-  something to default silently for a whole repo) and are not settable via
-  `.argus/config.yml`. `--owner-stale-after` is different — a repo-wide
-  policy knob, the same shape as `max_diff_lines` — so it *can* be set once
-  as this repo's `.argus/config.yml` `owner_stale_after` key instead of
-  repeated on every invocation (see `docs/repo-config.md`); an explicit
-  `--owner-stale-after` flag still wins over the config key.
-- **A malformed `--gate-verify-command`/worktree-bootstrap command fails before
-  any worker spawns, not partway through a run.** `supervise` shell-parses
-  every configured command upfront (`internal/supervisor/preflight.go`); a
-  syntax error in one is reported immediately, against every planned worker
-  at once, instead of surfacing only once that specific worker reaches the
-  gate — no wasted worker turns on a config typo.
-- **A worker cannot commit/push before it has reported a plan, and cannot
-  invoke argus's own supervisor commands on itself, ever — enforced live, not
-  by settings.json (shipped in rc.2, not merely a documented intent).**
-  `settings.json`/`settings.local.json` are read once at Claude Code session
-  launch, so a phase-conditional rule can't live there — a `PreToolUse` hook
-  (`argus worker check-tool`, wired via `internal/supervisor/agentadapter.go`'s
-  `checkToolHook`) re-checks the worktree's live `status.json` on every
-  matching Bash call instead. Two floors, hardcoded in
-  `internal/protocol.DeniedInPhase`, apply regardless of any repo config:
-  - `git commit`/`git push` are denied outright during `planning` (ask-gated,
-    not denied, in every other phase).
-  - `argus ship`/`rework`/`review`/`supervise` are denied in **every** phase —
-    a worker calling `argus ship --force` on itself would bypass the entire
-    verdict-required gate; before this, an unlisted command just hit Claude
-    Code's default ask-prompt, which hangs a headless worker instead of
-    actually blocking it.
-  A repo's own `.argus/config.yml` can *add* more denied commands per phase
-  (`phase.<name>.deny`) and can `phase.<name>.skip` to drop its own addition
-  — but never the hardcoded floor above, resolved from the repo's main
-  checkout so a worker editing its own worktree's copy has no effect. See
-  `schemas/config.schema.json`'s `phase.*` keys for the full shape. **What
-  this does not do**: there is no system-wide (cross-repo) config tier yet,
-  no per-phase scripts-on-entry, and matching is a plain string-prefix check
-  — the same trust model as the rest of this list, not hardened against
-  deliberate shell-level evasion.
+- **Diff is measured, not trusted — three unwaivable checks.** The gate always
+  computes the real `git diff` and cross-checks it against `status.json`. All
+  three land in `Verdict.HardReasons` (`internal/supervisor/review.go`); even a
+  `--review` "approve" on one of these is recorded as *not approved*
+  (`reviewEscalations` in `internal/supervisor/loop.go` overrides it):
+  1. Unmeasurable diff → escalates.
+  2. Material under-report (claimed size vs. git-measured size) → escalates.
+  3. **Zero measured files changed despite a claimed terminal phase**
+     (`awaiting_review`/`done`) → escalates (`internal/supervisor/review.go:129-133`).
+     Added after a headless (non-herdr) `supervise` spawn let a fresh worktree
+     pick up a *stale, unrelated session's* `status.json` and got auto-approved
+     with a fabricated verdict for zero real changes. Catches that symptom only
+     — does **not** detect/refuse the headless spawn itself. Always spawn from
+     inside a real herdr pane; if you ever must run headless, `git diff` every
+     resulting worktree yourself before trusting any report.
+- **Plan evidence enforced in two separate places (rc.20+, not a proposal)** —
+  the global Stop hook can't catch "never wrote a plan" on its own, since it
+  only tracks tasks that were actually created:
+  - `argus worker report` (`cmd/worker_report.go`, `runWorkerReport`) rejects the
+    `planning → working` transition outright if the reported `plan` array is
+    empty — immediate, at report time.
+  - The gate (`internal/supervisor/planevidence.go`, `HasPlanEvidence`, called
+    from `gateVerdict`) separately greps the worker's session transcript for a
+    real `TodoWrite`-shaped call — only at `awaiting_review`/`done`, during
+    `supervise`/`review`, not at report time.
+  - A worker can satisfy check 1 with a token plan entry and still get caught by
+    check 2 at review time.
+- **`ship` refuses without a persisted approving verdict.** Strict — see "Known
+  gaps" for exactly which actions do/don't produce a verdict `ship` can see.
+- **Cross-session worktree collision guard — advisory lease, not a hard lock.**
+  Every worktree `supervise` spawns gets `.claude/argus/owner.json` (`owner_id`,
+  `owner_label`, `spawned_at`, `heartbeat_at`, written by `internal/ownership`);
+  `supervise` re-stamps `heartbeat_at` every poll tick. `rework`, `rebase`,
+  `ship`, `worker answer` each check the caller's resolved identity against the
+  lease before touching an existing worktree. Identity resolves: `--owner` flag
+  > `$ARGUS_OWNER_ID` > `$HERDR_WORKSPACE_ID` > generated id.
+  - Live mismatch → refuses, names the actual owner.
+  - Mismatch with `heartbeat_at` stale longer than `--owner-stale-after`
+    (default 30m) → logs notice, proceeds.
+  - `--force-foreign-owner` → explicit human override for anything else.
+  - No lease at all (predates this feature, or never went through `supervise`
+    spawn) → treated as unowned, never refused.
+  - **Does not reap/clean a stale-lease worktree** — that's `argus worktree
+    prune` (section 6). A stale lease only changes whether a mismatched caller
+    may proceed.
+  - `--owner`/`--force-foreign-owner`: per-invocation only, not in
+    `.argus/config.yml`. `--owner-stale-after`: repo-wide, settable via config
+    key `owner_stale_after` (docs/repo-config.md); explicit flag wins.
+- **A malformed `--gate-verify-command`/bootstrap command fails before any
+  worker spawns.** `supervise` shell-parses every configured command upfront
+  (`internal/supervisor/preflight.go`); a syntax error is reported immediately
+  against every planned worker at once, not just once that worker reaches the
+  gate.
+- **A worker cannot commit/push before reporting a plan, and cannot invoke
+  argus's own supervisor commands on itself, in any phase — enforced live via a
+  `PreToolUse` hook, not settings.json** (`settings.json`/`settings.local.json`
+  are read once at session launch, so a phase-conditional rule can't live
+  there). `argus worker check-tool`, wired via
+  `internal/supervisor/agentadapter.go`'s `checkToolHook`, re-checks the
+  worktree's live `status.json` on every matching Bash call. Note: as of this
+  writing this hook was still on a branch, not yet released — verify current
+  status before relying on it. Two floors, hardcoded in
+  `internal/protocol.DeniedInPhase`, apply regardless of repo config:
+  - `git commit`/`git push` — denied during `planning` (ask-gated in every
+    other phase).
+  - `argus ship`/`rework`/`review`/`supervise` — denied in **every** phase.
+    Prevents a worker calling `argus ship --force` on itself to bypass the
+    verdict-required gate (previously an unlisted command hit Claude Code's
+    default ask-prompt, which hangs a headless worker instead of blocking it).
+  - A repo's `.argus/config.yml` can *add* denied commands per phase
+    (`phase.<name>.deny`) and `phase.<name>.skip` to drop its own addition —
+    never the hardcoded floor, resolved from the repo's main checkout (a
+    worker editing its own worktree's copy has no effect). Full shape:
+    `schemas/config.schema.json` `phase.*` keys.
+  - Gaps: no cross-repo config tier, no per-phase scripts-on-entry, matching is
+    plain string-prefix (not hardened against shell-level evasion).
 
 ## Known gaps — still manual, no first-class command yet
 
-- **A standalone `argus review` does NOT persist its verdict.** Run it once, get a
-  fresh approve, and `argus ship ... --dry-run` can still fail citing an *older*
-  stale request-changes verdict — confirmed directly. The tool tells you this
-  itself: its own output says the verdict isn't saved and that ship won't see it.
-  Use it only to eyeball a worktree; never as your last step before shipping.
-- **`argus rework` closes the request-changes loop, but it is still a fresh
-  holistic re-review each round, not a checklist against prior findings.** It
-  re-dispatches the worktree's own worker (in place, same branch — reusing its
+- **A standalone `argus review` does NOT persist its verdict.** `ship
+  --dry-run` can still fail citing an *older* stale verdict right after a fresh
+  approve — the tool's own output says the verdict isn't saved and won't be
+  seen by ship. Use it only to eyeball a worktree; never as your last step
+  before shipping.
+- **`argus rework` closes the request-changes loop but is a fresh holistic
+  re-review each round, not a checklist against prior findings.** It
+  re-dispatches the worktree's own worker in place (same branch, reuses its
   live pane the same way `argus rebase` does) with the last verdict's findings
-  as its next brief, waits for it, then re-runs the gate and reviewer and
-  *persists* the resulting verdict so `ship` sees it — no manual
-  `herdr pane run`, no manual `supervise --attach --review` follow-up. It loops on a
-  further request-changes up to `--max-rounds` (default 3), then stops and
-  prints an escalation instead of retrying forever; it also stops immediately
-  (no further rounds) if the worker reports `blocked` or the reviewer comes
-  back `needs-human`. What it does **not** do: verify that a specific prior
-  finding was actually fixed — each round's review is a fresh pass over the
-  whole diff, the same "holistic, not a checklist" caveat as any other review.
-  If a prior verdict named a precise defect, spot-check that exact location
-  yourself once `rework` reports approved, same as you would after a manual
-  re-review.
-
-  `argus rebase` is not a substitute here — it is scoped specifically to
-  sibling-PR-merge-conflict handoff, not review feedback (`argus rework` is
-  the general-rework analog, and shares its live-pane-reuse dispatch logic).
-- **Pre-spawn failures leave zero trace anywhere in argus's own logs.** If
-  `argus supervise` errors before any worker spawns (e.g. "error creating worktree
-  ... already exists"), nothing is written to `~/.argus/runs/*.jsonl` — that log
-  only ever contains events for runs where a worker actually started. This is not
-  hypothetical: a supervise call that failed on a worktree conflict was cleaned up
-  and then genuinely forgotten for a long stretch of a real session because
-  nothing external recorded it was still outstanding. **After any `supervise` call
-  that errors before spawn, note the retry yourself immediately** — argus will not
-  remind you, and there is no log to recover it from later.
+  as its next brief, waits, re-runs the gate and reviewer, and **persists** the
+  resulting verdict so `ship` sees it — no manual `herdr pane run`, no manual
+  `supervise --attach --review` follow-up. Loops on further request-changes up
+  to `--max-rounds` (default 3), then stops and prints an escalation. Stops
+  immediately (no further rounds) if the worker reports `blocked` or the
+  reviewer returns `needs-human`. Does **not** verify a specific prior finding
+  was fixed — spot-check that exact location yourself once `rework` reports
+  approved. `argus rebase` is not a substitute — it's scoped specifically to
+  sibling-PR-merge-conflict handoff, not review feedback (`rework` is the
+  general-rework analog, sharing its live-pane-reuse dispatch logic).
+- **Pre-spawn failures leave zero trace in argus's own logs.** If `argus
+  supervise` errors before any worker spawns (e.g. "error creating worktree
+  ... already exists"), nothing is written to `~/.argus/runs/*.jsonl` — that
+  log only ever contains events for runs where a worker actually started.
+  **After any `supervise` call that errors before spawn, note the retry
+  yourself immediately** — argus will not remind you, no log recovers it.
 - **Any self-hosted forge needs `--forge` set to `gitlab` or `gitea`.**
-  Auto-detection only knows the three hosted forges by their exact host —
-  `github.com`, `gitlab.com`, `codeberg.org` — because a host name is not a
-  reliable signal for which REST shape a self-hosted instance actually speaks
-  (a self-hosted GitLab and a self-hosted Gitea/Forgejo are exactly as likely
-  to be named `git.company.com` as anything mentioning "gitlab"). Any other
-  host now makes `ship`, `supervise` (its `--issues` forge fetch), and
-  `worktree prune` refuse with a clear error instead of silently guessing —
-  including under `--dry-run`, which validates the forge shape with no token
-  so a clean dry-run actually proves the real ship's forge call will hit the
-  right API. Pass `--forge` on any of the three to say which the host is, or
-  set this repo's `.argus/config.yml` `forge` key once instead of repeating
-  the flag on every invocation (see `docs/repo-config.md`) — an explicit
-  `--forge` flag still wins over the config key.
+  Auto-detection only knows `github.com`/`gitlab.com`/`codeberg.org` by exact
+  host — a self-hosted GitLab or Gitea/Forgejo is as likely to be named
+  `git.company.com` as anything mentioning "gitlab". Any other host makes
+  `ship`, `supervise` (`--issues` fetch), and `worktree prune` refuse with a
+  clear error instead of guessing — including under `--dry-run` (validates the
+  forge shape with no token). Pass `--forge` on any of the three, or set this
+  repo's `.argus/config.yml` `forge` key once (docs/repo-config.md); explicit
+  flag wins over config.
 - **A self-hosted forge also has no built-in status-page entry for a
   host-shaped request/push failure.** `internal/svcstatus`'s map only covers
   `github.com`/`gitlab.com`/`codeberg.org`. `ship`'s `--status-page-url` flag
-  (or this repo's `.argus/config.yml` `status_page` key, same flag-wins-over-config
-  precedence as `--forge`) points it at the right page for anything else —
-  without one, a self-hosted host's failure error just omits the status-page
-  hint rather than guessing wrong.
+  (or `.argus/config.yml` `status_page` key, same flag-wins precedence)
+  points it at the right page; without one, the error just omits the hint.
 
 ## Preflight
 
@@ -224,61 +178,50 @@ command -v argus herdr claude    # all three must resolve
 gh auth status                   # or: [ -n "$GITHUB_TOKEN" ] (don't echo the token itself)
 ```
 
-- `herdr` on PATH — argus talks to it over its CLI. You are usually already inside herdr.
+- `herdr` on PATH — argus talks to it over its CLI. You're usually already inside herdr.
 - `claude` on PATH — needed for `argus review` and `supervise --review`.
-- **A forge token is needed for more than just `ship`** — `supervise --issues`/
-  `--jira-issues` also fetches from the forge/Jira API to build briefs, and errors
-  clearly ("no API token for <host> (needed to fetch issues)") if none is found.
-  argus detects the forge (GitHub, GitLab, Codeberg/Gitea) from the repo's git
-  remote and resolves a token itself: env var first (`GITHUB_TOKEN`/`GH_TOKEN` for
-  github.com, `GITLAB_TOKEN` for gitlab.com, `CODEBERG_TOKEN` for codeberg.org,
-  `<HOST>_TOKEN`/`FORGE_TOKEN` otherwise), falling back to `gh`/`glab`/`git
-  credential fill`. Nothing to export by hand if `gh auth login` (or the
-  equivalent) is already done. `--jira-issues`/`--jira-issue` additionally need
-  `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN`.
+- **A forge token is needed for more than `ship`** — `supervise --issues`/
+  `--jira-issues` also fetch from the forge/Jira API to build briefs, erroring
+  clearly ("no API token for `<host>` (needed to fetch issues)") if none found.
+  argus detects the forge from the git remote, resolves a token: env var first
+  (`GITHUB_TOKEN`/`GH_TOKEN` for github.com, `GITLAB_TOKEN` for gitlab.com,
+  `CODEBERG_TOKEN` for codeberg.org, `<HOST>_TOKEN`/`FORGE_TOKEN` otherwise),
+  falling back to `gh`/`glab`/`git credential fill`. `--jira-issues`/
+  `--jira-issue` additionally need `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN`.
 
-**Bash-permission allowlist and herdr-pane denylist (do this once per clone, or
-every `argus` call prompts for manual approval and raw herdr pane mutation stays
-uncoordinated with argus's own dispatch):**
+**Bash-permission allowlist and herdr-pane denylist — do this once per clone**,
+or every `argus` call prompts for manual approval and raw herdr pane mutation
+stays uncoordinated with argus's own dispatch:
 
 ```bash
 argus config check --repo . --write --entry "Bash(argus supervise *)"   # scoped: leaves ship gated
-argus config check           # read-only: reports what's missing without touching the file
+argus config check           # read-only: reports what's missing
 ```
 
-`check --write` also adds a `permissions.deny` entry for `herdr pane
-send-text`/`send-keys`/`run`: those calls return as soon as herdr accepts the
-text, whether or not a live agent turn ever reads it, so a supervising
-session calling them directly gets no delivery confirmation at all — `argus
-worker steer`/`answer` already cover every legitimate need to drive a live
-pane, with a real receipt. Read-only `pane list`/`read`/`get` are left alone.
-`check` only ever reads/writes `permissions.allow`/`permissions.deny` — every
-other key in the file (hooks, model, unrelated permissions) is round-tripped
-untouched.
+- `check --write` also adds `permissions.deny` for `herdr pane
+  send-text`/`send-keys`/`run`: those return as soon as herdr accepts the
+  text, with no confirmation a live agent turn ever read it — use `argus
+  worker steer`/`answer` instead (real receipt). Read-only `pane
+  list`/`read`/`get` are left alone.
+- `check` only reads/writes `permissions.allow`/`permissions.deny` — every
+  other key (hooks, model, unrelated permissions) round-trips untouched.
+- **`.claude/settings.json` is untracked, per-clone** — can't propagate via
+  git. Every operator running argus from their own checkout needs to run
+  `config check --write` once. Workers never call herdr directly so they don't
+  need the deny entries; a supervising session does.
 
-**`.claude/settings.json` is untracked and per-clone, not per-repo** — it can't
-propagate to a worker's worktree or a teammate's clone via git. Every operator
-running argus from their own checkout needs to run `config check --write`
-themselves once; workers never call herdr directly so they don't need the
-deny entries, but a supervising session does.
-
-**Scope the entry away from `ship`, not just to a subcommand.** Bash allow-glob
-only matches a command *prefix* — there is no syntax to permit `argus ship`
-with safe flags while excluding `--force` specifically, since the flag is just
-more text after the same prefix. That means both the blanket wildcard *and* a
-"tighter" `"Bash(argus ship *)"` entry equally authorize `argus ship --force`
-with **no separate approval prompt** — a context that can get `argus ship
---force` typed (a prompt injection into an agent that already holds either
-entry, say) skips argus's own gate outright. `argus config check` warns
-whenever the entry it's about to check or write covers this case; don't ignore
-that warning. If you want `--force` to always need a human's explicit say-so,
-allowlist only the non-`ship` subcommand you call most (usually `supervise`,
-since a spawn loop is where most of the per-call prompting happens) and leave
-`ship` — forced or not — prompting every time. `--write` only ever adds one
-entry per run and treats any existing argus entry (any scope) as already
-sufficient, so it won't stack a second scoped entry on top of the first — to
-cover more than one non-`ship` subcommand, list them yourself in
-`.claude/settings.json`:
+**Scope the entry away from `ship`, not just to a subcommand.** Bash
+allow-glob matches only a command *prefix* — there's no syntax to permit
+`argus ship` with safe flags while excluding `--force` specifically. A blanket
+wildcard and a "tighter" `"Bash(argus ship *)"` entry both equally authorize
+`argus ship --force` with **no separate approval prompt** — a prompt
+injection that gets that string typed skips argus's own gate outright. `argus
+config check` warns whenever the entry it's checking/writing covers this
+case — don't ignore that warning. To require a human's explicit say-so for
+`--force`: allowlist only the non-`ship` subcommand you call most (usually
+`supervise`), leave `ship` prompting every time regardless of flags. `--write`
+adds one entry per run and treats any existing argus entry as sufficient (no
+stacking) — to cover more than one non-`ship` subcommand, list them yourself:
 
 ```json
 {
@@ -288,7 +231,7 @@ cover more than one non-`ship` subcommand, list them yourself in
 }
 ```
 
-The blanket wildcard remains available for repos that accept the risk:
+Blanket wildcard, for repos that accept the risk:
 
 ```json
 {
@@ -298,17 +241,14 @@ The blanket wildcard remains available for repos that accept the risk:
 }
 ```
 
-This is *not* a blanket bypass of judgment calls — `ship --force` and anything this
-skill tells you to hold for the user still needs their explicit say-so, and scoping
-your allow entry away from `ship` is what actually backs that with a real prompt
-instead of just a documented intention.
-
-If `argus` is missing, fall back to the [[supervise-agents]] skill and say so.
+This is *not* a blanket bypass of judgment calls — `ship --force` and anything
+else this skill says to hold for the user still needs their explicit say-so;
+scoping away from `ship` is what backs that with a real prompt.
 
 ## 1. Supervise
 
-Prefer `--tasks`/`--branches` (argus creates a worktree per worker). Use `--panes` only
-to reuse panes that already exist. Always `--dry-run` first to confirm the plan.
+Prefer `--tasks`/`--branches` (creates a worktree per worker). Use `--panes`
+only to reuse panes that already exist. Always `--dry-run` first.
 
 ```bash
 argus supervise --repo <path> \
@@ -319,74 +259,69 @@ argus supervise --repo <path> \
 # then drop --dry-run to run for real
 ```
 
-**Track spawned workers as Claude Code tasks, not just in your head.** On every real
-(non-`--dry-run`) `supervise` call, `TaskCreate` one task per worker/issue spawned —
-description a checkable acceptance criterion, e.g. "`argus ship` succeeds with an
-approved verdict and opens a PR closing #142" — then immediately `TaskUpdate` it to
-`in_progress`: the session's own Stop hook blocks ending the turn on a task left
-`pending`. Mark `completed` only once `ship` actually opens that worker's PR; an
-escalation, a `blocked` phase, or a worker still running all stay `in_progress`.
-Ending the turn to wait on workers rather than finishing them now is a legitimate
-pause — say so, don't go quiet.
+**Track spawned workers as Claude Code tasks, not just in your head.** On every
+real (non-`--dry-run`) `supervise` call, `TaskCreate` one task per
+worker/issue (description = checkable acceptance criterion, e.g. "`argus
+ship` succeeds with an approved verdict and opens a PR closing #142"), then
+`TaskUpdate` it `in_progress` — the session's Stop hook blocks ending the turn
+on a task left `pending`. Mark `completed` only once `ship` actually opens
+that worker's PR; escalation, `blocked`, or still-running all stay
+`in_progress`. Ending the turn to wait on workers is a legitimate pause — say
+so, don't go quiet.
 
-`--tasks` is CSV-parsed: a bare, unmatched `"` in a brief fails outright, but an
-unquoted comma does not — it's read as another task, silently turning one intended
-brief into two (argus warns when a split item has leading/trailing whitespace, the
-tell-tale sign, but doesn't block the run, since a genuine multi-task list has the
-same shape). Wrap a comma-bearing brief in CSV quotes (`--tasks '"brief, with a
-comma"'`), or for multi-sentence briefs with heavier punctuation, put one brief per
-line in a file and pass `--tasks-file` instead (appended after any `--tasks`):
+`--tasks` is CSV-parsed: a bare unmatched `"` fails outright, but an unquoted
+comma silently splits one brief into two (argus warns on leading/trailing
+whitespace in a split item, the tell-tale sign, but doesn't block). Wrap a
+comma-bearing brief in CSV quotes (`--tasks '"brief, with a comma"'`), or for
+heavier punctuation put one brief per line in a file and pass `--tasks-file`
+(appended after any `--tasks`):
 
 ```bash
 argus supervise --repo <path> --tasks-file briefs.txt --branches feat-a,feat-b
 ```
 
-Turn on the LLM review path for escalations with `--review` (headless `claude -p`):
+LLM review path for escalations, `--review` (headless `claude -p`):
 
 ```bash
 argus supervise --repo <path> --tasks "risky change" --branches feat-x --review
 ```
 
-Fetch briefs straight from forge issues (or Jira) instead of writing them by hand:
+Briefs straight from forge issues or Jira:
 
 ```bash
 argus supervise --repo <path> --issues 141,142,143 --review
 argus supervise --repo <path> --jira-issues PROJ-123,PROJ-124 --review
 ```
 
-Claim tickets on Jira's board the moment their workers spawn, instead of only updating Jira after `ship` opens the PR:
+Claim tickets on Jira's board the moment their workers spawn:
 
 ```bash
 argus supervise --repo <path> --jira-issues PROJ-123,PROJ-124 --review \
   --jira-assign-on-spawn --jira-transition-on-spawn "In Progress"
 ```
 
-**If this errors with "error creating worktree ... already exists"** — a worktree
-directory or git-registered worktree entry for that branch name is already there (a
-leftover from a prior manual worktree, or a previous run's worktree/branch that was
-never cleaned up). If its PR already merged, `argus worktree prune --branch <name>`
-clears it (see section 6). Otherwise clean it up manually before retrying:
+**"error creating worktree ... already exists"** — a leftover worktree
+dir/branch entry from a prior manual worktree or an uncleaned previous run. If
+its PR already merged: `argus worktree prune --branch <name>` (section 6).
+Otherwise clean up manually:
 
 ```bash
-trash <path>            # or your repo's guarded delete flow, if it enforces one
+trash <path>            # or your repo's guarded delete flow
 git worktree prune
 ```
 
-Also check for a herdr pane left rooted in the path you just removed — `trash`/`rm`
-moves the directory but never touches the pane's shell, so its `agent_status` stays
-`idle` instead of going away. Recreating a worktree at that same path and re-running
-supervise will then refuse to spawn there ("already has a live agent session"),
-because argus can't tell that pane apart from one genuinely mid-task. Find and close
-it before retrying:
+Also check for a herdr pane still rooted in the removed path — `trash`/`rm`
+never touches the pane's shell, so `agent_status` stays `idle`. Recreating a
+worktree at that path and re-running supervise will then refuse to spawn
+("already has a live agent session"). Find and close it first:
 
 ```bash
 herdr pane list   # look for a pane whose cwd is under the path you just removed
 herdr pane close <pane-id>
 ```
 
-And remember: this failure mode happens *before* any worker spawns, so it will not
-appear in `~/.argus/runs/*.jsonl` — note the retry yourself, don't rely on argus's own
-logs to remind you it's outstanding.
+This failure happens *before* any worker spawns, so it will not appear in
+`~/.argus/runs/*.jsonl` — note the retry yourself.
 
 Useful flags (see `argus supervise --help` for all):
 
@@ -394,194 +329,142 @@ Useful flags (see `argus supervise --help` for all):
 - `--interval 15s` — status poll cadence.
 - `--timeout 0` — per-worker deadline; `0` waits indefinitely.
 - `--review-model <id>` — model for `--review`.
-- `--review-concurrency <n>` — max concurrent `--review` calls when the gate escalates several workers at once (default 4).
-- `--worker-placement <workspace|tab>` (default `workspace`) — `tab` nests each worker's pane as a tab in your current herdr workspace instead of a new top-level one; needs `HERDR_WORKSPACE_ID` set (i.e. running `argus supervise` from inside a herdr pane).
-- `--forge <gitlab|gitea>` — say which API shape a self-hosted host speaks for the `--issues` forge fetch (see the known-gaps note above); this repo's `.argus/config.yml` `forge` key sets a default instead of repeating the flag every run.
-- Gate tuning — `--max-diff-lines` (default 400, `0` disables): counts
-  insertions+deletions together from the *measured* git diff; over the limit
-  escalates regardless of whether every test passed. It's a pure size-based risk
-  proxy, independent of the always-review-path/proof-required-path/under-report
-  checks — real diffs of 1178, 1527, and 461 lines have all correctly escalated
-  past the 400 default. `--proof-required-path` (change needs real-world proof)
-  and `--always-review-path` (behavior-critical, always escalates) are the
-  content-based escalation triggers alongside it. Each matches a whole path
-  segment/word, or — if the value contains `/` — a path substring; these are
-  not shell wildcards, `*` and `?` have no special meaning. All three can also
-  be set once in this repo's `.argus/config.yml` (`max_diff_lines`,
-  `proof_required_paths`, `always_review_paths`) instead of repeating the flag
-  every invocation — an explicitly passed flag still wins. There used to be a
-  separate --shared-glob flag for shared/prod paths; it behaved identically
-  to `--always-review-path` (unconditional escalation, differing only in the
-  reported reason) and was deliberately folded into it rather than kept as a
-  duplicate mechanism. That old flag is gone, not renamed — an invocation
-  still passing it now fails with an unknown-flag error; use
-  `--always-review-path` instead.
-- `--gate-verify-command <shell command>` (renamed from `--verify-cmd`, old
-  flag still accepted as a deprecated alias; default: none — runs nothing,
-  matching argus's prior behavior) — closes the gap where the gate's
-  tests/diff/path checks all pass but the target repo's own pre-commit hooks
-  (lint, build, fieldalignment, ...) fail at `ship`'s `git commit`. Once a
-  worker reaches a terminal phase, the gate re-runs this command in its
-  worktree (one retry on failure, to absorb shared-machine flakiness); a
-  non-zero exit is an unwaivable escalation, the same treatment a
-  reproduced test-claim mismatch gets. Can also be set once via this repo's
-  `.argus/config.yml` `gate_verify_command` key instead of repeating the
-  flag — an explicitly passed flag still wins.
+- `--review-concurrency <n>` — max concurrent `--review` calls on multi-worker escalation (default 4).
+- `--worker-placement <workspace|tab>` (default `workspace`) — `tab` nests each worker's pane as a tab in the current herdr workspace; needs `HERDR_WORKSPACE_ID` set (running from inside a herdr pane).
+- `--forge <gitlab|gitea>` — self-hosted API shape for the `--issues` forge fetch; `.argus/config.yml` `forge` key sets a default.
+- Gate tuning:
+  - `--max-diff-lines` (default 400, `0` disables) — insertions+deletions from the *measured* git diff; over the limit escalates regardless of test results. Pure size proxy, independent of the other checks. (Real diffs of 1178/1527/461 lines have all correctly escalated past 400.)
+  - `--proof-required-path` — change needs real-world proof.
+  - `--always-review-path` — behavior-critical, always escalates.
+  - Both match a whole path segment/word, or a path substring if the value contains `/` — not shell wildcards (`*`/`?` have no special meaning).
+  - All three settable once via `.argus/config.yml` (`max_diff_lines`, `proof_required_paths`, `always_review_paths`); explicit flag wins.
+  - --shared-glob is gone, not renamed — folded into `--always-review-path` (identical behavior); an old invocation now fails with an unknown-flag error.
+- `--gate-verify-command <shell command>` (renamed from `--verify-cmd`, old flag still accepted as deprecated alias; default: none) — closes the gap where the gate's checks pass but the repo's own pre-commit hooks (lint, build, fieldalignment, ...) fail at `ship`'s `git commit`. Runs once a worker reaches a terminal phase, in its worktree, one retry on failure; non-zero exit is an unwaivable escalation. Settable via `.argus/config.yml` `gate_verify_command`; explicit flag wins.
 
-`--gate-verify-command`/`gate_verify_command` (both renamed — from
-`--verify-cmd`/`verify_command` respectively, old names still accepted) is
-also the closest thing argus has to a custom-rule plugin
-point: ReviewPolicy's own checks (`--max-diff-lines`, `--proof-required-path`,
-`--always-review-path`) are a fixed, closed set argus itself knows how to run
-— there's no way to add a new one without a code change. Any other mechanical
-rule a repo wants enforced (a custom lint, a forbidden-import check, a
-required-file check) can be expressed as a script that exits non-zero on
-violation and set here instead; its failure becomes the same unwaivable hard
-reason a reproduced test-claim mismatch gets. The one limitation: it only
-runs once, at the gate, after a worker claims to be done — it can't catch a
-violation live during planning/working, only at review time.
+`--gate-verify-command`/`gate_verify_command` is the closest thing to a
+custom-rule plugin point: `ReviewPolicy`'s built-in checks (`--max-diff-lines`,
+`--proof-required-path`, `--always-review-path`) are a fixed set — no
+code-free way to add a new one. Any other mechanical rule (custom lint,
+forbidden-import check, required-file check) can be a script that exits
+non-zero on violation, set here — its failure becomes the same unwaivable
+hard reason. Limitation: runs once, at the gate, after a worker claims done —
+can't catch a live violation during planning/working.
 
 ## 2. React to escalations
 
-The gate is the cheap path: it auto-approves only when the worker is `awaiting_review`,
-every reported test passed, the diff is within `--max-diff-lines`, no always-review
-path was touched, any proof-required-path change carries real-world proof, and (as of v0.1.0-rc.20)
-the worker's transcript shows genuine plan evidence — see "What argus guarantees
-today" above for exactly which of these are hard, unfakeable checks vs. softer
-content-based triggers.
+Gate auto-approves only when: worker is `awaiting_review`, every reported test
+passed, diff is within `--max-diff-lines`, no always-review path touched, any
+proof-required-path change carries real-world proof, and (rc.20+) the
+worker's transcript shows genuine plan evidence.
 
-Argus always measures the diff from git rather than trusting `status.json` — an
-unmeasurable diff, a material under-report, or zero files changed despite a claimed
-terminal phase always escalates, and `--review` cannot approve past any of the
-three: a "approve" verdict on a hard reason is still recorded as
-not-approved.
+Diff is always measured from git, never trusted from `status.json`: an
+unmeasurable diff, a material under-report, or zero files changed despite a
+claimed terminal phase always escalates — `--review` cannot approve past any
+of the three (an "approve" verdict on a hard reason is still recorded
+not-approved).
 
-**Verify once — read only the diffs argus surfaces for a human.** The supervise
-report labels every worker with the source that cleared it, on an `approval:` line:
+**Verify once — read only the diffs argus surfaces for a human.** The
+supervise report labels every worker with the source that cleared it:
 
-- `gate-auto-approved` — the deterministic gate cleared it on plain facts (right
-  phase, tests passed, diff within the ceiling, no always-review/proof-required
-  path, plan evidence present). Zero LLM cost, already verified. **Do not re-read it.**
-- `reviewer-approved` — the gate escalated and the `--review` pass approved it.
-  Already verified twice. **Do not re-read it.**
-- `surfaced-awaiting-human` — no approving verdict: the gate escalated with no
-  reviewer, the reviewer returned request-changes, an unwaivable hard reason fired,
-  or the worker is `blocked`. **This is the only kind you hand-read.**
-
-Re-reading an already-approved diff is the largest avoidable cost in a supervise
-run — one full extra diff read per issue, scaling with issue count — and it
-re-verifies exactly what the gate (and `--review`) already cleared. So hand-read
-only `surfaced-awaiting-human` and `blocked` workers:
+- `gate-auto-approved` — deterministic gate cleared it on plain facts. Zero LLM cost. **Do not re-read.**
+- `reviewer-approved` — gate escalated, `--review` approved. Already verified twice. **Do not re-read.**
+- `surfaced-awaiting-human` — no approving verdict (gate escalated with no reviewer, reviewer returned request-changes, an unwaivable hard reason fired, or the worker is `blocked`). **This is the only kind you hand-read.**
 
 ```bash
 git -C <worktree> diff origin/main
 ```
 
-For those, approve read-only/build/test/own-worktree changes. Hold and ask the user
-for anything touching shared or production state, force-pushes to shared branches, or
-deletes outside a tempdir. For OS-integration changes (systemd, launchd, install
-scripts), demand real-world proof, not mocked unit tests plus a dry-run.
+Approve read-only/build/test/own-worktree changes. Hold and ask the user for
+anything touching shared or production state, force-pushes to shared
+branches, or deletes outside a tempdir. For OS-integration changes (systemd,
+launchd, install scripts), demand real-world proof, not mocked unit tests
+plus a dry-run.
 
-The one exception to "don't re-read an approved diff": after `argus rework` reports
-approved, a re-review is a fresh holistic pass and does **not** confirm a *specific*
-prior finding was fixed (see the gap above). If a prior verdict named a precise
-defect, spot-check that exact location — not the whole diff — once `rework` clears.
+Exception: after `argus rework` reports approved, that pass is fresh and
+holistic — it does not confirm a *specific* prior finding was fixed. Spot-check
+that exact location, not the whole diff.
 
-You can run a one-shot review of any worktree on demand — but treat it as read-only
-eyeballing, not a shippable verdict (see the gap above: it does not persist):
+One-shot review of any worktree — read-only eyeballing, not a shippable
+verdict (does not persist):
 
 ```bash
 argus review --worktree <path> --base origin/main --task "issue 142" --reasons "touches sink dispatch"
 ```
 
-If the verdict was request-changes, address it and get a fresh, persisted verdict with
-`argus rework` (see section 4) instead of messaging the worker's pane by hand.
+Request-changes verdict → get a fresh, persisted verdict with `argus rework`
+(section 4), not manual pane messaging.
 
 ## 3. Ship
 
-`ship` refuses without an approving verdict from a prior gate or review — that is the
-point, so a request-changes actually blocks the PR. It opens the PR via the detected
-forge's API (GitHub/GitLab/Codeberg/Gitea — any self-hosted instance needs `--forge
-gitlab`/`--forge gitea`, see the known-gaps note above) and unstages argus's own
-control-plane files (`.claude/argus`, scoped permission files) so they never reach
-the PR.
+`ship` refuses without an approving verdict from a prior gate or review. Opens
+the PR via the detected forge's API (GitHub/GitLab/Codeberg/Gitea; self-hosted
+needs `--forge gitlab`/`--forge gitea`) and unstages argus's own
+control-plane files (`.claude/argus`, scoped permission files) so they never
+reach the PR.
 
 ```bash
 argus ship --worktree <path> --issue 42 --dry-run   # confirm first
 argus ship --worktree <path> --issue 42
 ```
 
-`--dry-run` is also the fastest verdict-presence diagnostic you have: the same
-approval check runs before the dry-run branch, so an unapproved worktree fails
-identically to a real ship — a clean `--dry-run` print is itself proof a verdict
-exists, faster than inspecting `status.json` or run logs by hand.
+`--dry-run` is also the fastest verdict-presence check: the same approval
+check runs before the dry-run branch, so a clean dry-run print is itself proof
+a verdict exists.
 
-Optional post-ship Jira hook (transitions/assigns/comments the linked issue once the
-PR is open) — the other end of this lifecycle from `supervise`'s pre-spawn
-`--jira-assign-on-spawn`/`--jira-transition-on-spawn` above:
+Optional post-ship Jira hook (transitions/assigns/comments the linked issue
+once the PR is open):
 
 ```bash
 argus ship --worktree <path> --issue 42 \
   --jira-issue PROJ-123 --jira-transition "In Review" --jira-assignee <accountId>
 ```
 
-Only use `--force` (skip the gate) when the user explicitly authorizes shipping an
-unverified change.
+Only use `--force` (skips the gate) when the user explicitly authorizes it.
 
-Once a PR is open, whether it merges automatically depends on the repo's own forge
-settings, not on argus — check before assuming either way:
+Whether a PR merges automatically depends on the repo's own forge settings,
+not on argus:
 
 ```bash
 gh pr view <N> --json state,mergedAt
 ```
 
-## 4. Getting a verdict `ship` will actually see, after rework
-
-After a request-changes verdict, `argus rework` is the first-class continuation:
+## 4. Getting a verdict `ship` will see, after rework
 
 ```bash
 argus rework --worktree <path> --base origin/main
 ```
 
-This one command does everything the old manual loop required by hand:
+1. Reads the worktree's last recorded verdict (`.claude/argus/verdict.json`)
+   for its findings. If findings only exist from a standalone `argus review`
+   call (never persisted), pass explicitly: `--findings "finding one"
+   --findings "finding two"` (repeat per finding, verbatim), or
+   `--findings-file path` (one per line, appended after any `--findings`) for
+   longer briefs.
+2. Re-dispatches the worktree's own worker in place (reuses its live herdr
+   pane, same as `argus rebase`) with those findings as its next brief.
+3. Blocks and polls for the next report.
+4. Re-runs the gate and, on escalation, the reviewer — then **persists** the
+   resulting verdict, same as `supervise --attach --review`, so `ship` sees it.
+5. Loops on further request-changes up to `--max-rounds` (default 3). Stops
+   immediately — no more rounds — if the worker reports `blocked` or the
+   reviewer returns `needs-human`. Stops and prints an escalation once the
+   round cap is exhausted.
 
-1. Reads the worktree's last recorded verdict (`.claude/argus/verdict.json`) for its
-   findings — no need to re-paste them. If you only have findings from a standalone
-   `argus review` call (which never persists — see the gap above), pass them
-   explicitly instead: `--findings "finding one" --findings "finding two"` (repeat the
-   flag per finding — each value is verbatim, so commas and quotes inside a finding are
-   safe). For a longer, multi-sentence brief, put one finding per line in a file and pass
-   `--findings-file path` instead (appended after any `--findings`).
-2. Re-dispatches the worktree's own worker in place (reusing its live herdr pane the
-   same way `argus rebase` does — no `herdr pane run` by hand) with those findings as
-   its next brief.
-3. Blocks and polls for the worker's next report itself — no manual wait/reminder.
-4. Re-runs the gate and, on escalation, the reviewer — then **persists** the resulting
-   verdict, exactly the same as `supervise --attach --review` does, so `ship` sees it.
-5. On a further request-changes, loops back into another round automatically, up to
-   `--max-rounds` (default 3). It stops immediately — no more rounds — if the worker
-   reports `blocked`, or the reviewer comes back `needs-human`; either means a human
-   decision is needed, not another automatic retry. After the round cap is exhausted
-   it also stops and prints an escalation rather than looping forever.
+`--max-rounds` bounds one `rework` invocation's own loop. `--max-rework-budget`
+(default `supervisor.DefaultMaxReworkBudget`) is a persisted, cross-invocation
+restart budget for the worktree itself — total rework rounds it may ever be
+dispatched for, across every separate `rework` call. `0` disables it. Without
+the flag: `.argus/config.yml` `rework_budget` key, then the built-in default.
+Exhausted budget → `rework` refuses regardless of `--max-rounds`.
 
-`--max-rounds` only bounds one `rework` invocation's own loop. Separately,
-`--max-rework-budget` (default `supervisor.DefaultMaxReworkBudget`) is a persisted,
-cross-invocation restart budget for the worktree itself — total rework rounds it
-may ever be dispatched for, across every separate `rework` call you make against
-it, not just this one. `0` disables it. Without the flag, this repo's
-`.argus/config.yml` `rework_budget` key wins, then the built-in default. Once the
-budget is exhausted, `rework` refuses rather than dispatching another round,
-regardless of `--max-rounds`.
+Sanity-check with `argus ship --worktree <path> --issue <N> --dry-run` before
+shipping for real. An approve doesn't mean every prior finding was fixed —
+each round is a fresh holistic pass, not a checklist. Spot-check any
+specifically-named prior defect yourself.
 
-Sanity-check the result with `argus ship --worktree <path> --issue <N> --dry-run`
-before shipping for real. And don't assume an approve means every prior finding was
-fixed — each round's review is a fresh holistic pass, not a checklist against what was
-previously flagged (see the gap above). If a prior verdict named a specific defect,
-spot-check that exact location in the diff yourself before shipping.
-
-`supervise --attach --review` (the previous workaround) still works and is useful when you want
-a fresh persisted verdict *without* first re-dispatching the worker — e.g. the worker
-already pushed a fix on its own and you just need argus to record a verdict for it:
+`supervise --attach --review` (the previous workaround) still works — useful
+for a fresh persisted verdict *without* re-dispatching the worker (e.g. it
+already pushed a fix on its own):
 
 ```bash
 argus supervise --repo <path> --attach --worktrees <path> --base origin/main --review
@@ -589,21 +472,15 @@ argus supervise --repo <path> --attach --worktrees <path> --base origin/main --r
 
 ## 5. Post-merge conflict handoff
 
-When a sibling PR merges first and leaves another worktree conflicting, dispatch that
-worktree's own worker to rebase — it already has full context. This is scoped
-specifically to this merge-conflict case, not general rework (use section 4 for that):
-
 ```bash
 argus rebase --worktree <path> --base main
 ```
 
-## 6. Post-ship cleanup
+Dispatches the worktree's own worker (full context) to rebase. Scoped
+specifically to sibling-PR-merge-conflict handoff, not general rework (use
+section 4 for that).
 
-Once a PR merges, the worktree that produced it is dead weight. Prune checks
-deterministically (no LLM) whether each worktree's PR has merged and whether it's
-otherwise safe to remove (no uncommitted changes, no unpushed commits, no stash) —
-safe worktrees are cleaned automatically (a recoverable relocation, never a raw rm),
-anything else is reported with the reason and left alone:
+## 6. Post-ship cleanup
 
 ```bash
 argus worktree prune --branch <name> --dry-run   # confirm first
@@ -612,31 +489,32 @@ argus worktree prune --branch <name>
 argus worktree prune --merged                    # sweep every worktree under the repo
 ```
 
-Prune also closes the herdr pane it spawned for that worktree — and the workspace
-too, if that pane was the only one left in it — so a cleaned worktree doesn't leave
-an orphaned empty pane/workspace behind. Best-effort: a herdr-side failure here is
-printed as a warning, not a reason to leave the worktree itself uncleaned.
+Prune checks deterministically (no LLM) whether each worktree's PR has merged
+and whether it's otherwise safe to remove (no uncommitted changes, no
+unpushed commits, no stash). Safe worktrees are cleaned automatically (a
+recoverable relocation, never a raw `rm`); anything else is reported with the
+reason and left alone. Also closes the herdr pane it spawned for that
+worktree — and the workspace too, if that pane was the only one left in it.
+Best-effort: a herdr-side failure is printed as a warning, not a reason to
+leave the worktree uncleaned.
 
 ## 7. Post-ship CI polling
-
-Once `ship` opens a PR, `tend` polls its head commit's checks to a terminal state
-instead of you watching the forge UI — re-stamping the worktree's ownership lease
-heartbeat on every tick the same way `supervise`'s own watch loop does:
 
 ```bash
 argus tend --worktree <path> --dry-run   # confirm the resolved PR and poll plan first
 argus tend --worktree <path>
 ```
 
-It reports merge-ready (every check passed), failed (naming the first check that
-didn't), or an error if `--timeout` elapses or it's interrupted first. **GitHub
-only for now** — GitLab and Gitea/Forgejo refuse with a clear error rather than a
-silent no-op. It does no dispatch of any kind: fixing a failing check is still on you.
+Polls the PR's head commit checks to a terminal state, re-stamping the
+worktree's ownership lease heartbeat every tick (same as `supervise`'s watch
+loop). Reports merge-ready, failed (naming the first failing check), or error
+on `--timeout`/interrupt. **GitHub only** — GitLab and Gitea/Forgejo refuse
+with a clear error, not a silent no-op. Does no dispatch of any kind — fixing
+a failing check is on you.
 
-It reads GitHub's Checks API (check-runs) only — a PR whose only CI posts through
-the legacy Commit Status API instead never shows up here, so it can look
-falsely idle. Confirm the repo's CI actually reports via check-runs (GitHub
-Actions and most modern integrations do) before trusting a `tend` result.
+Reads GitHub's Checks API (check-runs) only — a PR whose only CI posts
+through the legacy Commit Status API never shows up here (looks falsely
+idle). Confirm the repo's CI reports via check-runs before trusting a result.
 
 ## Inspect / update the binary
 
@@ -647,38 +525,22 @@ argus system version         # confirm the installed version
 argus system update [--pre]  # pull the latest (or latest pre-release) and self-replace
 ```
 
-Remember: `~/.argus/runs` only records events for runs where a worker actually
-spawned. A `supervise` call that errors out beforehand (e.g. worktree-already-exists)
-leaves nothing here — track those failures yourself.
+`~/.argus/runs` only records events for runs where a worker actually spawned
+— a `supervise` call that errors out beforehand (e.g.
+worktree-already-exists) leaves nothing here; track those failures yourself.
 
-`system update` verifies both the release's `sha256sums.txt` and a detached ECDSA
-signature over it before replacing the running binary, refusing outright on a
-mismatch. A release with no `sha256sums.txt.sig` (only possible on `--pre`, since a
-normal release always has one) is a warning, not a refusal — checksum verification
-still runs regardless.
+`system update` verifies both the release's `sha256sums.txt` and a detached
+ECDSA signature over it before replacing the running binary, refusing
+outright on a mismatch. A release with no `sha256sums.txt.sig` (only possible
+on `--pre`) is a warning, not a refusal — checksum verification still runs.
 
 ## What NOT to do
 
-- Don't hand-run the herdr pane loop when argus is on PATH — that reintroduces the
-  token cost argus exists to remove. [[supervise-agents]] is the no-argus fallback only.
-- Don't run `supervise`'s spawn mode outside a real herdr pane — a headless spawn has
-  been observed to leak a stale, unrelated session's state into a fresh worktree and
-  get auto-approved. The zero-files-changed gate check catches this
-  symptom, but the spawn-side root cause isn't fixed — verify with `git diff`
-  yourself if you ever must run headless.
-- Don't approve a ship off a worker's summary — argus gates on the measured diff; you
-  read it too. A hard reason (unmeasurable diff, material under-report, zero files
-  changed) can no longer be waived by `--review`, but that doesn't
-  make the reviewer's judgment on the code itself infallible, and a rework
-  re-review still doesn't re-check prior findings specifically.
-- Don't treat a standalone `argus review` verdict as something `ship` will see — it
-  isn't persisted. Use `supervise --attach --review` instead, then confirm with
-  `ship --dry-run`.
+- Don't hand-run the herdr pane loop when argus is on PATH — reintroduces the token cost argus exists to remove. [[supervise-agents]] is the no-argus fallback only.
+- Don't run `supervise`'s spawn mode outside a real herdr pane — a headless spawn has been observed to leak a stale, unrelated session's state into a fresh worktree and get auto-approved. The zero-files-changed gate check catches this symptom, not the spawn-side root cause — verify with `git diff` yourself if you must run headless.
+- Don't approve a ship off a worker's summary — argus gates on the measured diff; read it yourself too. A hard reason can no longer be waived by `--review`, but that doesn't make the reviewer's judgment infallible, and a rework re-review still doesn't re-check prior findings specifically.
+- Don't treat a standalone `argus review` verdict as something `ship` will see — it isn't persisted. Use `supervise --attach --review`, then confirm with `ship --dry-run`.
 - Don't reach for `--force` on `ship` unless the user explicitly authorized it.
 - Don't `--dry-run`-skip on a first real run against an unfamiliar repo.
-- Don't assume a supervise error before spawn is recorded anywhere — if it errors
-  before a worker starts, note the retry yourself immediately.
-- Don't assume any self-hosted forge (GitLab, Gitea, or Forgejo) works without
-  `--forge` — `ship`, `supervise`, and `worktree prune` all refuse any host
-  outside github.com/gitlab.com/codeberg.org without it (or this repo's
-  `.argus/config.yml` `forge` key).
+- Don't assume a supervise error before spawn is recorded anywhere — note the retry yourself immediately.
+- Don't assume any self-hosted forge (GitLab, Gitea, or Forgejo) works without `--forge` — `ship`, `supervise`, and `worktree prune` all refuse any host outside github.com/gitlab.com/codeberg.org without it (or `.argus/config.yml` `forge` key).
