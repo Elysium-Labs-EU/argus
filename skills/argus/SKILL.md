@@ -135,7 +135,7 @@ These are enforced in code, not conventions the worker is merely asked to follow
   gate — no wasted worker turns on a config typo.
 - **A worker cannot commit/push before it has reported a plan, and cannot
   invoke argus's own supervisor commands on itself, ever — enforced live, not
-  by settings.json (not yet released as of this writing, still on a branch).**
+  by settings.json (shipped in rc.2, not merely a documented intent).**
   `settings.json`/`settings.local.json` are read once at Claude Code session
   launch, so a phase-conditional rule can't live there — a `PreToolUse` hook
   (`argus worker check-tool`, wired via `internal/supervisor/agentadapter.go`'s
