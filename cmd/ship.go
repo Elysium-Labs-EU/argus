@@ -267,7 +267,10 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	logger, closeLog := openRunLog(cmd, "ship")
 	defer closeLog()
 
-	if gerr := enforceShipGate(ctx, out, a.worktree, a.shipVerifyCmdExplicit, a.shipVerifyCmd); gerr != nil {
+	gerr := ui.WithSpinner("running ship gate...", func() error {
+		return enforceShipGate(ctx, out, a.worktree, a.shipVerifyCmdExplicit, a.shipVerifyCmd)
+	})
+	if gerr != nil {
 		logger.Fail("ship_gate", target.branch, gerr)
 		return gerr
 	}
@@ -276,7 +279,9 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 		logger.Fail("commit", target.branch, cerr)
 		return cerr
 	}
-	if perr := supervisor.Push(ctx, a.worktree, target.branch); perr != nil {
+	if perr := ui.WithSpinner("pushing branch...", func() error {
+		return supervisor.Push(ctx, a.worktree, target.branch)
+	}); perr != nil {
 		logger.Fail("push", target.branch, perr)
 		// A push can just as easily fail for local reasons (a rejected pre-push
 		// hook, a non-fast-forward) as for the host being down, so this is only a
@@ -288,7 +293,13 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	// already up to date), but OpenPR is not idempotent: a retry after this
 	// process was killed between push and OpenPR completing would otherwise
 	// open a second PR for the same branch. FindPR closes that gap.
-	pr, existed, err := f.FindPR(ctx, target.owner, target.name, target.branch)
+	var pr forge.PR
+	var existed bool
+	err := ui.WithSpinner("checking for existing PR...", func() error {
+		var ferr error
+		pr, existed, ferr = f.FindPR(ctx, target.owner, target.name, target.branch)
+		return ferr
+	})
 	if err != nil {
 		logger.Fail("find_pr", target.branch, err)
 		return fmt.Errorf("checking for an existing PR before opening one: %w", err)
@@ -298,10 +309,14 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 		_, _ = fmt.Fprintf(out, "%s reusing existing PR #%d: %s\n", ui.LabelSuccess.Render("✓"), pr.Number, pr.HTMLURL)
 	} else {
 		prBody := buildPRBody(ctx, f, a.worktree, a.base, a.issue, target.owner, target.name)
-		pr, err = f.OpenPR(ctx, &forge.PRRequest{
-			Owner: target.owner, Repo: target.name,
-			Title: target.prTitle, Body: prBody,
-			Head: target.branch, Base: a.base,
+		err = ui.WithSpinner("opening PR...", func() error {
+			var oerr error
+			pr, oerr = f.OpenPR(ctx, &forge.PRRequest{
+				Owner: target.owner, Repo: target.name,
+				Title: target.prTitle, Body: prBody,
+				Head: target.branch, Base: a.base,
+			})
+			return oerr
 		})
 		if err != nil {
 			logger.Fail("open_pr", target.branch, err)
