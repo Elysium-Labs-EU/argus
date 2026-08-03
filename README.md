@@ -70,9 +70,11 @@ To build from source instead, `git clone` the repo and run `make build` (needs G
 * [herdr](https://github.com/ogulcancelik/herdr) and the `claude` CLI on `PATH`.
 * A forge token for `argus ship` (`GITHUB_TOKEN`, `CODEBERG_TOKEN`, `GITLAB_TOKEN`, or `FORGE_TOKEN` for a self hosted Gitea or Forgejo). If none is set, argus falls back to `gh`, `glab`, or `git credential`, the same lookup those tools use for themselves.
 
-**Configure a repo**
+**Set up a repo**
 
-Run `argus init` to scaffold `.argus/config.yml`. It peeks for `Taskfile.yml`, `Makefile`, `package.json`, or `go.mod` (in that order, first match wins) to guess toolchain values; `base_branch` is derived separately, from `refs/remotes/origin/HEAD`. Every key is optional and mirrors a CLI flag, so you can set them once here instead of repeating flags on every run:
+Two steps, run once per repo checkout.
+
+**1. Scaffold the repo config.** Run `argus init` to scaffold `.argus/config.yml`. It peeks for `Taskfile.yml`, `Makefile`, `package.json`, or `go.mod` (in that order, first match wins) to guess toolchain values; `base_branch` is derived separately, from `refs/remotes/origin/HEAD`. Every key is optional and mirrors a CLI flag, so you can set them once here instead of repeating flags on every run:
 
 ```yaml
 base_branch: main                  # branch to diff and PR against
@@ -95,6 +97,21 @@ title_prefix_template: ""          # template for generated PR titles
 owner_stale_after: 30m             # how long a worktree's ownership lease may go quiet before a mismatched caller may proceed
 rework_budget: 0                   # cross-invocation cap on rework rounds per worktree (0 disables it)
 ```
+
+**2. Allow argus's own Bash commands.** Run `argus config check --repo . --write` once in the checkout. It adds the `permissions.allow`/`permissions.deny` entries argus needs to `.claude/settings.json`. Skip it and every `argus` call prompts for manual approval — this is the single highest-value setup step, not an optional one. It is per-clone, not per-repo: `.claude/settings.json` is untracked, so it can't propagate through git and every operator running argus from their own checkout has to run it themselves. Scope it away from `ship` to keep `--force` gated:
+
+```bash
+argus config check --repo . --write --entry "Bash(argus supervise *)"   # allow supervise; ship still prompts
+argus config check                                                      # read-only: report what's missing
+```
+
+**Config files, at a glance.** argus reads and writes three separate config files. They have overlapping names but do not overlap in purpose — this table is the map:
+
+| File | Written by | Format | Holds | When you touch it |
+|---|---|---|---|---|
+| `.argus/config.yml` | `argus init` | YAML | Per-repo defaults: base branch, toolchain, gate/ship keys | Once per repo; committed so the whole team shares it |
+| `.claude/settings.json` | `argus config check --write` | JSON | Bash allow/deny entries argus itself needs | Once per clone; untracked, so every checkout runs it |
+| `~/.argus/config.toml` | `argus config set` | TOML | Credential name → env-var overrides only | Only to redirect a credential; otherwise never |
 
 **Run**
 
