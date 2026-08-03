@@ -96,6 +96,10 @@ func TestAttachWorkersFromWorkspace(t *testing.T) {
 // silently measured/gated/reviewed the diff against the wrong ref. --attach must
 // fail fast unless the operator states the real base explicitly.
 func TestSuperviseAttachRequiresExplicitBase(t *testing.T) {
+	// supervise's RunE now checks its prerequisites (herdr here, for --attach)
+	// are on PATH before reaching the --base validation; stub the lookPath seam
+	// so this test is hermetic on a box without herdr installed.
+	setBinaryLookPath(t, found)
 	wt := attachWorktree(t, "attached")
 	cmd := newSuperviseCmd()
 	var buf bytes.Buffer

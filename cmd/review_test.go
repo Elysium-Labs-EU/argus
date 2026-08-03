@@ -186,6 +186,11 @@ func TestReviewUsesAbsoluteWorktree(t *testing.T) {
 			initReviewGitRepoAt(t, repoDir)
 			t.Chdir(cwd)
 
+			// This drives review's RunE, which now checks claude is on PATH
+			// before doing anything; stub the same lookPath seam prereq_test.go
+			// uses so the test is hermetic on a box without claude installed.
+			setBinaryLookPath(t, found)
+
 			var captured string
 			original := newReviewer
 			newReviewer = func(_, _ string, _ *eventlog.Logger) supervisor.Reviewer {
