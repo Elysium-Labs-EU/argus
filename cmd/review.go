@@ -33,6 +33,11 @@ verdict (approve / request-changes / needs-human). It is the manual counterpart
 to supervise --review: the same scoped, one-shot review argus runs when its
 deterministic gate escalates, pointed at any worktree on demand.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// review shells out to claude for the verdict; fail fast with an
+			// install hint before doing any diffing if it is missing.
+			if err := requireBinaries(binaryLookPath, binClaude); err != nil {
+				return err
+			}
 			logger, closeLog := openRunLog(cmd, "review")
 			defer closeLog()
 

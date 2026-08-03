@@ -101,8 +101,8 @@ func runDoctor(cmd *cobra.Command, a *doctorArgs) error {
 	}
 
 	results := []checkResult{
-		checkBinary(a.lookPath, "herdr", "install herdr and put it on your PATH — it hosts the worker panes argus drives"),
-		checkBinary(a.lookPath, "claude", "install the Claude CLI and put it on your PATH — it is the default worker launcher"),
+		checkBinary(a.lookPath, binHerdr),
+		checkBinary(a.lookPath, binClaude),
 		checkForgeToken(cmd.Context(), a, repoRoot),
 		checkAllowlist(repoRoot),
 		checkRepoConfig(repoRoot),
@@ -121,10 +121,12 @@ func runDoctor(cmd *cobra.Command, a *doctorArgs) error {
 	return nil
 }
 
-// checkBinary reports whether name resolves on PATH. Both binaries doctor
-// checks this way (herdr, claude) are hard prerequisites.
-func checkBinary(lookPath func(string) (string, error), name, hint string) checkResult {
-	r := checkResult{name: name + " on PATH", hard: true, hint: hint}
+// checkBinary reports whether name resolves on PATH, pulling its fix hint from
+// installHints — the same source of truth the commands' own upfront presence
+// checks use. Both binaries doctor checks this way (herdr, claude) are hard
+// prerequisites.
+func checkBinary(lookPath func(string) (string, error), name string) checkResult {
+	r := checkResult{name: name + " on PATH", hard: true, hint: installHints[name]}
 	if path, err := lookPath(name); err == nil {
 		r.ok = true
 		r.detail = path

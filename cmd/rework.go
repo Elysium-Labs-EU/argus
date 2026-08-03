@@ -60,6 +60,15 @@ was never saved anywhere ship could check. On a further request-changes it
 loops back into the same cycle, up to --max-rounds, then stops and surfaces the
 outcome instead of retrying forever.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// rework re-dispatches the worktree's own worker (herdr opens its
+			// pane, claude runs the worker), so fail fast with an install hint
+			// before any of that if either is missing. A dry run dispatches
+			// nothing, so it needs neither.
+			if !dryRun {
+				if err := requireBinaries(binaryLookPath, binHerdr, binClaude); err != nil {
+					return err
+				}
+			}
 			overrides, err := resolveCredentialOverrides(credentialEnv)
 			if err != nil {
 				return err
