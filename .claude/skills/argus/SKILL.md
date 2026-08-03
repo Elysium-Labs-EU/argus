@@ -338,7 +338,7 @@ Useful flags (see `argus supervise --help` for all):
   - `--always-review-path` — behavior-critical, always escalates.
   - Both match a whole path segment/word, or a path substring if the value contains `/` — not shell wildcards (`*`/`?` have no special meaning).
   - All three settable once via `.argus/config.yml` (`max_diff_lines`, `proof_required_paths`, `always_review_paths`); explicit flag wins.
-  - `--shared-glob` is gone, not renamed — folded into `--always-review-path` (identical behavior); an old invocation now fails with an unknown-flag error.
+  - --shared-glob is gone, not renamed — folded into `--always-review-path` (identical behavior); an old invocation now fails with an unknown-flag error.
 - `--gate-verify-command <shell command>` (renamed from `--verify-cmd`, old flag still accepted as deprecated alias; default: none) — closes the gap where the gate's checks pass but the repo's own pre-commit hooks (lint, build, fieldalignment, ...) fail at `ship`'s `git commit`. Runs once a worker reaches a terminal phase, in its worktree, one retry on failure; non-zero exit is an unwaivable escalation. Settable via `.argus/config.yml` `gate_verify_command`; explicit flag wins.
 
 `--gate-verify-command`/`gate_verify_command` is the closest thing to a
