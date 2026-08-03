@@ -11,12 +11,24 @@ import (
 // syntax (chaining, redirection, grouping) — never as plain argument text.
 const shellOperatorChars = "|&;<>(){}"
 
+// shellGlobChars are pathname-expansion metacharacters. Unlike
+// shellOperatorChars they matter no matter where in the word they sit
+// (`file*.txt` expands the same as `*.go`), so tokenNeedsShell checks for
+// them anywhere in tok rather than only at a word edge. Falling back to sh -c
+// whenever one is present is still safe for a token that was never meant as
+// a glob: POSIX leaves a pattern with no filesystem match untouched, so the
+// shell reproduces a direct exec's literal argument byte-for-byte in that
+// case and only diverges (correctly) when the worker's own shell would also
+// have expanded it.
+const shellGlobChars = "*?[]"
+
 // execArgvOrShell builds the *exec.Cmd to replay cmdStr with, preferring a
 // direct argv-style exec — bypassing /bin/sh entirely — over `sh -c cmdStr`
 // whenever cmdStr has no genuine shell-feature dependency (chaining,
-// redirection, grouping, substitution). sh -c has no way to tell a real
-// shell operator apart from a worker's own metacharacter reported as plain
-// argument text — a Go test -run regex alternation like `TestFoo|TestBar`
+// redirection, grouping, substitution, pathname expansion). sh -c has no way
+// to tell a real shell operator apart from a worker's own metacharacter
+// reported as plain argument text — a Go test -run regex alternation like
+// `TestFoo|TestBar`
 // is the observed case: unquoted, sh -c misreads it as a pipeline and splits
 // it into two bogus commands (`go test -run TestFoo` piped into a
 // nonexistent `TestBar ./...`), even though the worker never ran it through
@@ -145,6 +157,9 @@ func tokenNeedsShell(tok string) bool {
 		return false
 	}
 	if strings.ContainsRune(tok, '`') || strings.Contains(tok, "$(") || strings.Contains(tok, "${") || hasShellVarRef(tok) {
+		return true
+	}
+	if strings.ContainsAny(tok, shellGlobChars) {
 		return true
 	}
 	first := strings.IndexAny(tok, shellOperatorChars)

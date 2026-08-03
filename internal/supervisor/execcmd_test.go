@@ -56,10 +56,14 @@ func TestTokenNeedsShell(t *testing.T) {
 		{"f()", true},               // trailing paren: function definition
 		{"{", true},
 		{"}", true},
-		{"$HOME", true},   // genuine variable reference
-		{"$(pwd)", true},  // command substitution
-		{"${HOME}", true}, // parameter expansion
-		{"`pwd`", true},   // backtick substitution
+		{"$HOME", true},        // genuine variable reference
+		{"$(pwd)", true},       // command substitution
+		{"${HOME}", true},      // parameter expansion
+		{"`pwd`", true},        // backtick substitution
+		{"*.go", true},         // leading glob: `golangci-lint fmt *.go`
+		{"file*.txt", true},    // glob embedded mid-word, still needs real expansion
+		{"test[0-9].go", true}, // bracket glob
+		{"a?.go", true},        // single-char glob
 	}
 	for _, tc := range cases {
 		if got := tokenNeedsShell(tc.tok); got != tc.want {
