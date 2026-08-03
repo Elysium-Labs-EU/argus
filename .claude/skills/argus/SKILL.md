@@ -48,7 +48,7 @@ If `argus` isn't on PATH, fall back to [[supervise-agents]] and say so.
 suggested `base_branch`/`allow`/`brief_note` — see `docs/repo-config.md`. With no
 such file, argus assumes nothing about a repo's toolchain.
 
-## What argus guarantees today (rc.20)
+## What argus guarantees today
 
 Enforced in code, not conventions the worker is merely asked to follow.
 
@@ -67,7 +67,7 @@ Enforced in code, not conventions the worker is merely asked to follow.
      — does **not** detect/refuse the headless spawn itself. Always spawn from
      inside a real herdr pane; if you ever must run headless, `git diff` every
      resulting worktree yourself before trusting any report.
-- **Plan evidence enforced in two separate places (rc.20+, not a proposal)** —
+- **Plan evidence enforced in two separate places** —
   the global Stop hook can't catch "never wrote a plan" on its own, since it
   only tracks tasks that were actually created:
   - `argus worker report` (`cmd/worker_report.go`, `runWorkerReport`) rejects the
@@ -111,8 +111,8 @@ Enforced in code, not conventions the worker is merely asked to follow.
   are read once at session launch, so a phase-conditional rule can't live
   there). `argus worker check-tool`, wired via
   `internal/supervisor/agentadapter.go`'s `checkToolHook`, re-checks the
-  worktree's live `status.json` on every matching Bash call — shipped in
-  rc.2, live on every `supervise` spawn since. Two floors, hardcoded in
+  worktree's live `status.json` on every matching Bash call, on every
+  `supervise` spawn. Two floors, hardcoded in
   `internal/protocol.DeniedInPhase`, apply regardless of repo config:
   - `git commit`/`git push` — denied during `planning` (ask-gated in every
     other phase).
@@ -364,7 +364,7 @@ can't catch a live violation during planning/working.
 
 Gate auto-approves only when: worker is `awaiting_review`, every reported test
 passed, diff is within `--max-diff-lines`, no always-review path touched, any
-proof-required-path change carries real-world proof, and (rc.20+) the
+proof-required-path change carries real-world proof, and the
 worker's transcript shows genuine plan evidence.
 
 Diff is always measured from git, never trusted from `status.json`: an
