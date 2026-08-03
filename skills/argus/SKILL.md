@@ -111,9 +111,8 @@ Enforced in code, not conventions the worker is merely asked to follow.
   are read once at session launch, so a phase-conditional rule can't live
   there). `argus worker check-tool`, wired via
   `internal/supervisor/agentadapter.go`'s `checkToolHook`, re-checks the
-  worktree's live `status.json` on every matching Bash call. Note: as of this
-  writing this hook was still on a branch, not yet released — verify current
-  status before relying on it. Two floors, hardcoded in
+  worktree's live `status.json` on every matching Bash call — shipped in
+  rc.2, live on every `supervise` spawn since. Two floors, hardcoded in
   `internal/protocol.DeniedInPhase`, apply regardless of repo config:
   - `git commit`/`git push` — denied during `planning` (ask-gated in every
     other phase).
