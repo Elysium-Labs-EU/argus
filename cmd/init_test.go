@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Elysium-Labs-EU/argus/internal/permission"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 )
 
@@ -402,6 +404,148 @@ func TestRunInitPromptsSetEveryConfigField(t *testing.T) {
 		if v.Field(i).IsZero() {
 			t.Errorf("Config field %q is still zero after every prompt was answered — runInit has no prompt for it", name)
 		}
+	}
+}
+
+func TestRunInitPrintsNextSteps(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker(t, dir, "Makefile")
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	cmd.SetIn(strings.NewReader(""))
+
+	if err := runInit(cmd, &initArgs{repo: dir, yes: true}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{"Next steps", "config check --write", "supervise <task> --dry-run"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output = %q, want it to mention %q", out, want)
+		}
+	}
+}
+
+// TestRunInitYesSkipsConfigCheckOffer pins that the mutating inline offer never
+// fires on the non-interactive --yes path: settings.json stays untouched.
+func TestRunInitYesSkipsConfigCheckOffer(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker(t, dir, "Makefile")
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	cmd.SetIn(strings.NewReader(""))
+
+	if err := runInit(cmd, &initArgs{repo: dir, yes: true}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+	if _, err := os.Stat(permission.SettingsPath(dir)); !os.IsNotExist(err) {
+		t.Errorf("--yes should not touch .claude/settings.json, stat err: %v", err)
+	}
+}
+
+// initPromptAnswers is one bare-Enter answer per interactive prompt (accept the
+// default for all 19), so a test can append its own answer for the trailing
+// config-check confirm.
+const initPromptAnswers = 19
+
+func TestRunInitInlineConfigCheckAcceptedWritesSettings(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker(t, dir, "Makefile")
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	cmd.SetIn(strings.NewReader(strings.Repeat("\n", initPromptAnswers) + "y\n"))
+
+	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	covered, _, err := permission.Check(permission.SettingsPath(dir))
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !covered {
+		t.Error("accepting the inline offer should allowlist argus in .claude/settings.json")
+	}
+}
+
+func TestRunInitInlineConfigCheckDeclinedLeavesSettings(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker(t, dir, "Makefile")
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	cmd.SetIn(strings.NewReader(strings.Repeat("\n", initPromptAnswers) + "n\n"))
+
+	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+	if _, err := os.Stat(permission.SettingsPath(dir)); !os.IsNotExist(err) {
+		t.Errorf("declining the inline offer should not touch .claude/settings.json, stat err: %v", err)
+	}
+}
+
+// TestOfferConfigCheckYesSuccess drives offerConfigCheck's confirm-yes path
+// through a successful runConfigCheck: with no pre-existing settings.json the
+// write succeeds and argus ends up allowlisted.
+func TestOfferConfigCheckYesSuccess(t *testing.T) {
+	dir := t.TempDir()
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	offerConfigCheck(cmd, bufio.NewReader(strings.NewReader("y\n")), &buf, dir)
+
+	covered, _, err := permission.Check(permission.SettingsPath(dir))
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !covered {
+		t.Error("a yes confirmation with a writable repo should allowlist argus")
+	}
+}
+
+// TestOfferConfigCheckYesFailureWarns drives the confirm-yes error branch: a
+// malformed settings.json makes runConfigCheck fail, and offerConfigCheck must
+// warn rather than let init exit non-zero over the optional follow-up.
+func TestOfferConfigCheckYesFailureWarns(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o700); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	// Invalid JSON: permission.Check fails to parse it, so runConfigCheck
+	// returns an error instead of writing.
+	if err := os.WriteFile(permission.SettingsPath(dir), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("seeding malformed settings.json: %v", err)
+	}
+
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	offerConfigCheck(cmd, bufio.NewReader(strings.NewReader("y\n")), &buf, dir)
+
+	if !strings.Contains(buf.String(), "config check:") {
+		t.Errorf("output = %q, want a 'config check:' warning when runConfigCheck fails", buf.String())
 	}
 }
 
