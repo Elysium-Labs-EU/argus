@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -18,6 +19,32 @@ func TestPathUsesEnvOverride(t *testing.T) {
 	}
 }
 
+func TestPathDefaultsToHomeArgusConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(pathEnvVar, "")
+	t.Setenv("HOME", home)
+	got, err := Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".argus", "config.toml")
+	if got != want {
+		t.Errorf("Path = %q, want %q", got, want)
+	}
+}
+
+func TestPathPropagatesUserHomeDirError(t *testing.T) {
+	t.Setenv(pathEnvVar, "")
+	t.Setenv("HOME", "")
+	got, err := Path()
+	if err == nil {
+		t.Fatal("expected an error when $HOME is undefined, got nil")
+	}
+	if got != "" {
+		t.Errorf("Path = %q, want empty string on error", got)
+	}
+}
+
 func TestLoadMissingFileReturnsZeroConfig(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "does-not-exist.toml"))
 	if err != nil {
@@ -25,6 +52,49 @@ func TestLoadMissingFileReturnsZeroConfig(t *testing.T) {
 	}
 	if len(cfg.Credential) != 0 {
 		t.Errorf("expected empty Credential, got %v", cfg.Credential)
+	}
+}
+
+func TestLoadNonNotExistReadErrorPropagates(t *testing.T) {
+	// A directory path fails ReadFile with a non-IsNotExist error, exercising
+	// the branch distinct from the "file just doesn't exist yet" case.
+	dir := t.TempDir()
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("expected an error loading a directory as a config file, got nil")
+	}
+	if os.IsNotExist(err) {
+		t.Errorf("expected a non-IsNotExist error, got %v", err)
+	}
+}
+
+func TestSaveMkdirAllFailureWraps(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// blocker is a regular file, so MkdirAll(blocker/sub) cannot succeed.
+	path := filepath.Join(blocker, "sub", "config.toml")
+	err := Save(path, Config{})
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating config directory") {
+		t.Errorf("error = %q, want it to mention %q", err.Error(), "creating config directory")
+	}
+}
+
+func TestSaveWriteFileFailureWraps(t *testing.T) {
+	// path is itself an existing directory, so its parent's MkdirAll
+	// trivially succeeds but WriteFile(path, ...) cannot.
+	dir := t.TempDir()
+	err := Save(dir, Config{})
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "writing config file") {
+		t.Errorf("error = %q, want it to mention %q", err.Error(), "writing config file")
 	}
 }
 
@@ -43,6 +113,23 @@ func TestSaveThenLoadRoundTrips(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Credential, cfg.Credential) {
 		t.Errorf("round trip = %v, want %v", got.Credential, cfg.Credential)
+	}
+}
+
+func TestEmptyConfigRoundTripsToZero(t *testing.T) {
+	if got := encodeTOML(Config{}); got != "" {
+		t.Errorf("encodeTOML(Config{}) = %q, want empty string", got)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := Save(path, Config{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, Config{}) {
+		t.Errorf("round trip = %+v, want zero Config", got)
 	}
 }
 
@@ -100,5 +187,27 @@ func TestParseTOMLHandlesCommentsAndBlankLines(t *testing.T) {
 	}
 	if cfg.Credential["anthropic"] != "MY_KEY" {
 		t.Errorf("Credential[anthropic] = %q, want MY_KEY", cfg.Credential["anthropic"])
+	}
+}
+
+func TestParseTOMLRejectsBadQuotedValue(t *testing.T) {
+	// \x is an incomplete Go/TOML escape (needs two hex digits), so
+	// strconv.Unquote must fail on it.
+	_, err := parseTOML("[credential]\n" + `anthropic = "\x"` + "\n")
+	if err == nil {
+		t.Fatal("expected an error for a badly-escaped quoted value, got nil")
+	}
+}
+
+func TestParseTOMLDropsKeysBeforeAnySection(t *testing.T) {
+	// A key line before any [section] header has section == "", which
+	// matches neither "credential" nor anything else, so it is silently
+	// ignored rather than erroring — pinning current behavior.
+	cfg, err := parseTOML("anthropic = \"MY_KEY\"\n")
+	if err != nil {
+		t.Fatalf("parseTOML: %v", err)
+	}
+	if len(cfg.Credential) != 0 {
+		t.Errorf("expected a pre-section key to be dropped, got %v", cfg.Credential)
 	}
 }
