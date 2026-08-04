@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,12 @@ func LoadReworkState(worktree string) (ReworkState, error) {
 	}
 	if err != nil {
 		return ReworkState{}, fmt.Errorf("reading rework state: %w", err)
+	}
+	// json.Unmarshal of a literal `null` into a struct pointer is a documented
+	// no-op — it leaves the zero value with a nil error, which would let a
+	// worktree that already burned its rework rounds look un-exhausted again.
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return ReworkState{}, fmt.Errorf("decoding rework state: file contains null, not a valid state")
 	}
 	var s ReworkState
 	if err := json.Unmarshal(data, &s); err != nil {
