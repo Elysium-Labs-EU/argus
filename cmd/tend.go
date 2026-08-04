@@ -129,7 +129,7 @@ func resolveTendTarget(cmd *cobra.Command, opts *tendOpts) (client forge.Forge, 
 		return nil, "", "", "", oerr
 	}
 
-	branch, err = supervisor.CurrentBranch(ctx, opts.worktree)
+	branch, err = currentBranch(ctx, opts.worktree)
 	if err != nil {
 		return nil, "", "", "", err
 	}
