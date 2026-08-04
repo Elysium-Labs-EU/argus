@@ -1001,6 +1001,53 @@ func TestShipChangeSkipsDuplicateJiraNotificationOnRetry(t *testing.T) {
 	}
 }
 
+// TestShipChangeRetriesJiraTransitionAfterCommentNotified covers the gap
+// left by JiraNotified gating the whole post-ship block instead of just the
+// comment: a first ship where Transition fails but Comment succeeds must
+// still retry Transition (idempotent) on the next ship, even though the
+// comment is correctly skipped as a duplicate.
+func TestShipChangeRetriesJiraTransitionAfterCommentNotified(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	w := &fakeJiraWriter{failOn: "transition"}
+	withFakeJiraClient(t, w)
+
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	args := &shipArgs{worktree: wt, base: "main", jiraIssue: "PROJ-1", jiraTransition: "In Review"}
+
+	// First ship: Transition fails, Comment still succeeds, so JiraNotified
+	// persists true even though the transition never landed.
+	first := &fakeForge{}
+	if err := shipChange(cmd, first, args, target); err != nil {
+		t.Fatalf("first shipChange: %v", err)
+	}
+	if len(w.transitions) != 0 {
+		t.Fatalf("after first ship: transitions = %v, want none (Transition failed)", w.transitions)
+	}
+	if len(w.comments) != 1 {
+		t.Fatalf("after first ship: comments = %v, want exactly one", w.comments)
+	}
+
+	// Retry: Transition now succeeds. It must be attempted again despite
+	// JiraNotified already being true, while Comment must not duplicate.
+	w.failOn = ""
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	retry := &fakeForge{
+		findPR:      forge.PR{Number: 99, HTMLURL: "https://fake/pull/99", State: "open"},
+		findPRFound: true,
+	}
+	if err := shipChange(cmd, retry, args, target); err != nil {
+		t.Fatalf("retry shipChange: %v", err)
+	}
+	if len(w.transitions) != 1 || w.transitions[0] != "In Review" {
+		t.Errorf("after retry: transitions = %v, want [In Review] (retried)", w.transitions)
+	}
+	if len(w.comments) != 1 {
+		t.Errorf("after retry: comments = %v, want still exactly one (no duplicate)", w.comments)
+	}
+}
+
 // TestShipChangeFailsWhenShipVerifyCommandFails covers the .argus/config.yml
 // ship_lint gate: a failing command must stop shipChange before anything is
 // committed or pushed, not just get reported alongside a PR that already
