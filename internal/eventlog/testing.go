@@ -12,6 +12,9 @@ func OpenForTest(t *testing.T) (logger *Logger, path string, closer func() error
 	t.Helper()
 	l, p, closeFn, err := Open(t.TempDir(), "test", nil)
 	if err != nil {
+		// t.TempDir() always returns a fresh, writable directory, so Open's
+		// MkdirAll/OpenFile calls cannot fail here — this branch is a permanent
+		// coverage gap, not a missing test.
 		t.Fatalf("eventlog.OpenForTest: %v", err)
 	}
 	t.Cleanup(func() { _ = closeFn() })
