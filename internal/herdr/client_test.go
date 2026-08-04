@@ -370,3 +370,125 @@ func TestPaneSplitReturnsNewID(t *testing.T) {
 		t.Errorf("got %q want wZ:p2", id)
 	}
 }
+
+func TestPaneSplitPropagatesRunnerError(t *testing.T) {
+	sentinel := errors.New("herdr: no such pane")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	if _, err := c.PaneSplit(context.Background(), "wZ:p1", SplitRight); !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped runner error, got %v", err)
+	}
+}
+
+func TestPaneSplitSurfacesErrorEnvelope(t *testing.T) {
+	reply := `{"id":"cli:pane:split","error":{"message":"no such pane"}}`
+	c := NewWithRunner(fakeRunner(reply, nil))
+	if _, err := c.PaneSplit(context.Background(), "wZ:p1", SplitRight); err == nil {
+		t.Fatal("want error from error envelope, got nil")
+	}
+}
+
+func TestPaneMovePropagatesRunnerError(t *testing.T) {
+	sentinel := errors.New("herdr: no such pane")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	if _, err := c.PaneMove(context.Background(), "wAP:p1", "w3X"); !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped runner error, got %v", err)
+	}
+}
+
+func TestPaneMoveSurfacesErrorEnvelope(t *testing.T) {
+	reply := `{"id":"cli:pane:move","error":{"message":"no such workspace"}}`
+	c := NewWithRunner(fakeRunner(reply, nil))
+	if _, err := c.PaneMove(context.Background(), "wAP:p1", "w3X"); err == nil {
+		t.Fatal("want error from error envelope, got nil")
+	}
+}
+
+// TestAgentGetSurfacesDecodeError covers the branch distinct from
+// TestAgentGetReportsNoAgentWithoutError: here the runner succeeds (no
+// agent_not_found) but the reply itself is malformed, which must surface as
+// a real error rather than the "no live agent" ok=false,nil-err outcome.
+func TestAgentGetSurfacesDecodeError(t *testing.T) {
+	c := NewWithRunner(fakeRunner("not json", nil))
+	_, ok, err := c.AgentGet(context.Background(), "w1:p1")
+	if err == nil {
+		t.Fatal("want error for undecodable reply")
+	}
+	if ok {
+		t.Error("want ok=false on decode error")
+	}
+}
+
+func TestAgentWaitSurfacesDecodeError(t *testing.T) {
+	c := NewWithRunner(fakeRunner("not json", nil))
+	if _, err := c.AgentWait(context.Background(), "w1:p1", []string{"idle"}, 0); err == nil {
+		t.Fatal("want error for undecodable reply")
+	}
+}
+
+// TestWorktreeCreateSendsLabel pins down that spec.Label, when set, is
+// forwarded as --label — TestWorktreeCreateAlwaysSendsCwd deliberately
+// leaves Label unset and so never exercises this branch.
+func TestWorktreeCreateSendsLabel(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"},"worktree":{"path":"/tmp/wt"}}}`), nil
+	})
+	if _, err := c.WorktreeCreate(context.Background(), &WorktreeSpec{
+		Cwd: "/repo", Branch: "argus-x", Base: "main", Path: "/tmp/wt", Label: "argus-x",
+	}); err != nil {
+		t.Fatalf("WorktreeCreate: %v", err)
+	}
+	if !strings.Contains(strings.Join(gotArgs, " "), "--label argus-x") {
+		t.Errorf("args = %v, want --label argus-x present", gotArgs)
+	}
+}
+
+func TestWorktreeCreateFallsBackToRequestedPath(t *testing.T) {
+	// herdr omitted the worktree path; the client falls back to the one asked for.
+	reply := `{"result":{"root_pane":{"pane_id":"w1:p1"}}}`
+	c := NewWithRunner(fakeRunner(reply, nil))
+	wt, err := c.WorktreeCreate(context.Background(), &WorktreeSpec{
+		Cwd: "/repo", Branch: "argus-x", Base: "main", Path: "/asked/path",
+	})
+	if err != nil {
+		t.Fatalf("WorktreeCreate: %v", err)
+	}
+	if wt.Path != "/asked/path" {
+		t.Errorf("path fallback failed: %+v", wt)
+	}
+}
+
+func TestWorktreeCreatePropagatesRunnerError(t *testing.T) {
+	sentinel := errors.New("herdr: worktree exists")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	if _, err := c.WorktreeCreate(context.Background(), &WorktreeSpec{
+		Cwd: "/repo", Branch: "argus-x", Base: "main", Path: "/tmp/wt",
+	}); !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped runner error, got %v", err)
+	}
+}
+
+func TestWorktreeCreateSurfacesDecodeError(t *testing.T) {
+	c := NewWithRunner(fakeRunner("not json", nil))
+	if _, err := c.WorktreeCreate(context.Background(), &WorktreeSpec{
+		Cwd: "/repo", Branch: "argus-x", Base: "main", Path: "/tmp/wt",
+	}); err == nil {
+		t.Fatal("want error for undecodable reply")
+	}
+}
+
+func TestWorktreeOpenPropagatesRunnerError(t *testing.T) {
+	sentinel := errors.New("herdr: not_git_worktree")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	if _, err := c.WorktreeOpen(context.Background(), "/repo", "/tmp/wt"); !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped runner error, got %v", err)
+	}
+}
+
+func TestWorktreeOpenSurfacesDecodeError(t *testing.T) {
+	c := NewWithRunner(fakeRunner("not json", nil))
+	if _, err := c.WorktreeOpen(context.Background(), "/repo", "/tmp/wt"); err == nil {
+		t.Fatal("want error for undecodable reply")
+	}
+}

@@ -185,3 +185,75 @@ func TestExecRunnerPreservesOtherErrorCodes(t *testing.T) {
 		t.Errorf("want the original error code surfaced, got %v", err)
 	}
 }
+
+// fakeHerdrBinarySuccess drops an executable named "herdr" that prints reply
+// to stdout and exits 0 — every other execRunner test in this file drives the
+// ExitError/stderr branch via fakeHerdrBinary, none exercise the plain
+// success return.
+func fakeHerdrBinarySuccess(t *testing.T, reply string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "herdr")
+	body := "#!/bin/sh\nprintf '%s' " + shellSingleQuote(reply) + "\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("writing fake herdr binary: %v", err)
+	}
+	return dir
+}
+
+// TestExecRunnerReturnsStdoutOnSuccess exercises execRunner's success path
+// (no other test here does: they all drive a failing subprocess to reach the
+// ExitError/stderr branch).
+func TestExecRunnerReturnsStdoutOnSuccess(t *testing.T) {
+	dir := fakeHerdrBinarySuccess(t, `{"result":{"panes":[]}}`)
+	t.Setenv("PATH", dir)
+
+	c := New()
+	panes, err := c.PaneList(context.Background())
+	if err != nil {
+		t.Fatalf("PaneList: %v", err)
+	}
+	if len(panes) != 0 {
+		t.Errorf("want no panes, got %d", len(panes))
+	}
+}
+
+// TestErrorCode covers errorCode's two "" outcomes directly: stderr that
+// isn't JSON at all, and stderr that is valid JSON but not an error envelope
+// (no "error" field) — distinct branches of the same `||` condition.
+func TestErrorCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   string
+	}{
+		{"not JSON", "boom: segfault", ""},
+		{"valid JSON, no error field", `{"result":{"panes":[]}}`, ""},
+		{"valid error envelope", `{"error":{"code":"timeout","message":"x"}}`, "timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := errorCode([]byte(tt.stderr)); got != tt.want {
+				t.Errorf("errorCode(%q) = %q, want %q", tt.stderr, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDecodeEnvelope covers decodeEnvelope's two error returns directly:
+// top-level stdout that isn't JSON at all, and a result payload that doesn't
+// unmarshal into the caller's expected shape — distinct from the
+// already-covered env.Error-populated path (see TestPaneListSurfacesErrorEnvelope).
+func TestDecodeEnvelope(t *testing.T) {
+	var out struct {
+		Panes []Pane `json:"panes"`
+	}
+	if err := decodeEnvelope([]byte("not json"), &out); err == nil {
+		t.Error("want error for non-JSON stdout")
+	}
+
+	// env.Result is a JSON string, but out expects an object — Unmarshal fails.
+	if err := decodeEnvelope([]byte(`{"result":"not-an-object"}`), &out); err == nil {
+		t.Error("want error when result doesn't match out's shape")
+	}
+}
