@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,7 @@ func TestParseOwnerRepo(t *testing.T) {
 		{"ssh://git@gitlab.example.com:2222/group/subgroup/project.git", "group/subgroup", "project"},
 		{"https://gitlab.example.com:8443/group/subgroup/project.git", "group/subgroup", "project"},
 		{"git@gitlab.com:group/subgroup/deeper/project.git", "group/subgroup/deeper", "project"},
+		{"https://codeberg.org/Elysium_Labs/eos/", "Elysium_Labs", "eos"},
 	}
 	for _, tc := range cases {
 		owner, repo, err := parseOwnerRepo(tc.url)
@@ -40,6 +42,20 @@ func TestParseOwnerRepo(t *testing.T) {
 func TestParseOwnerRepoRejectsGarbage(t *testing.T) {
 	if _, _, err := parseOwnerRepo("not-a-url"); err == nil {
 		t.Fatal("want error for unparseable remote")
+	}
+}
+
+// TestParseOwnerRepoRejectsSingleSegment covers a URL that survives scheme
+// normalization but still resolves to only one path segment, so the
+// len(parts) < 2 guard — not the earlier "no slash at all" case above — is
+// what actually rejects it.
+func TestParseOwnerRepoRejectsSingleSegment(t *testing.T) {
+	_, _, err := parseOwnerRepo("https://codeberg.org/onlyrepo")
+	if err == nil {
+		t.Fatal("want error for a URL with no owner segment")
+	}
+	if !strings.Contains(err.Error(), "onlyrepo") {
+		t.Errorf("error %q does not name the unparseable remote", err.Error())
 	}
 }
 
@@ -311,5 +327,219 @@ func TestGitTranslatesAmbiguousRef(t *testing.T) {
 	}
 	if !strings.Contains(uerr.Error(), "nonexistent-base-ref") {
 		t.Errorf("error %q does not name the bad ref", uerr.Error())
+	}
+}
+
+// TestGitTranslatesBadRevision covers the third quotedAfter pattern
+// translateGitFailure recognizes: "fatal: bad revision '<ref>'", the shape
+// git uses for `git log <bad> --` rather than the "ambiguous argument" shape
+// covered above.
+func TestGitTranslatesBadRevision(t *testing.T) {
+	worktree, _ := initGitRepo(t)
+	_, err := git(context.Background(), worktree, "log", "nonexistent-base-ref", "--")
+	if err == nil {
+		t.Fatal("want an error for a bad revision")
+	}
+	var uerr *ui.UserError
+	if !errors.As(err, &uerr) {
+		t.Fatalf("want *ui.UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(uerr.Error(), "nonexistent-base-ref") {
+		t.Errorf("error %q does not name the bad ref", uerr.Error())
+	}
+}
+
+// initPlainRepo builds a minimal, remote-less git repo for tests that only
+// need CommitAll's staging machinery, not a real origin.
+func initPlainRepo(t *testing.T) string {
+	t.Helper()
+	wt := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	return wt
+}
+
+// useFakeGitFailing puts a "git" shim ahead of the real one on PATH for the
+// rest of the test. The shim fails only the single invocation whose
+// arguments (after the leading "-C <dir>" every git() call adds) join into
+// failArgs; every other invocation execs the real git untouched. No real
+// repo state can selectively fail just `git reset` or just `git diff
+// --cached` on demand, so this is the only way to exercise CommitAll's
+// individual error-return branches.
+func useFakeGitFailing(t *testing.T, failArgs string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+dir="$2"
+shift 2
+if [ "$*" = %q ]; then
+  echo "fatal: synthetic test failure" >&2
+  exit 1
+fi
+exec %q -C "$dir" "$@"
+`, failArgs, realGit)
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestCommitAllAddFails(t *testing.T) {
+	wt := initPlainRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	useFakeGitFailing(t, "add -A")
+	if err := CommitAll(context.Background(), wt, "msg"); err == nil {
+		t.Fatal("want error when git add -A fails")
+	}
+}
+
+func TestCommitAllResetControlPlaneFails(t *testing.T) {
+	wt := initPlainRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	useFakeGitFailing(t, "reset -q -- .claude/argus .claude/settings.local.json")
+	if err := CommitAll(context.Background(), wt, "msg"); err == nil {
+		t.Fatal("want error when unstaging the control plane fails")
+	}
+}
+
+func TestCommitAllDiffCachedFails(t *testing.T) {
+	wt := initPlainRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	useFakeGitFailing(t, "diff --cached --name-only")
+	if err := CommitAll(context.Background(), wt, "msg"); err == nil {
+		t.Fatal("want error when checking staged files fails")
+	}
+}
+
+func TestCommitAllCommitFails(t *testing.T) {
+	wt := initPlainRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	useFakeGitFailing(t, "commit -m msg")
+	err := CommitAll(context.Background(), wt, "msg")
+	if err == nil {
+		t.Fatal("want error when the final commit fails")
+	}
+	if errors.Is(err, ErrNothingToCommit) {
+		t.Fatalf("want the underlying commit error, not ErrNothingToCommit: %v", err)
+	}
+}
+
+func TestRepoRootNonGitDirectoryErrors(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := RepoRoot(context.Background(), dir); err == nil {
+		t.Fatal("want error for a non-git directory")
+	}
+}
+
+// newLinkedWorktree builds a main repo plus a real linked worktree off it,
+// for tests that need VerifyLinkedWorktree's --is-inside-work-tree check to
+// pass so a later rev-parse call can be selectively broken.
+func newLinkedWorktree(t *testing.T) string {
+	t.Helper()
+	main := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", main}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	run("commit", "-q", "--allow-empty", "-m", "seed")
+	run("branch", "feat-x")
+
+	linked := filepath.Join(t.TempDir(), "feat-x")
+	run("worktree", "add", "-q", linked, "feat-x")
+	return linked
+}
+
+func TestVerifyLinkedWorktreeWrapsGitDirError(t *testing.T) {
+	linked := newLinkedWorktree(t)
+	useFakeGitFailing(t, "rev-parse --git-dir")
+	err := VerifyLinkedWorktree(context.Background(), linked)
+	if err == nil {
+		t.Fatal("want error when resolving --git-dir fails")
+	}
+	if !strings.Contains(err.Error(), "resolving git dir for") {
+		t.Errorf("error %q missing the wrap context", err.Error())
+	}
+}
+
+func TestVerifyLinkedWorktreeWrapsGitCommonDirError(t *testing.T) {
+	linked := newLinkedWorktree(t)
+	useFakeGitFailing(t, "rev-parse --git-common-dir")
+	err := VerifyLinkedWorktree(context.Background(), linked)
+	if err == nil {
+		t.Fatal("want error when resolving --git-common-dir fails")
+	}
+	if !strings.Contains(err.Error(), "resolving git common dir for") {
+		t.Errorf("error %q missing the wrap context", err.Error())
+	}
+}
+
+func TestRemoteURLReturnsRawOriginURL(t *testing.T) {
+	worktree, _ := initGitRepo(t)
+	want, err := exec.Command("git", "-C", worktree, "config", "--get", "remote.origin.url").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config: %v\n%s", err, want)
+	}
+	got, err := RemoteURL(context.Background(), worktree)
+	if err != nil {
+		t.Fatalf("RemoteURL: %v", err)
+	}
+	if got != strings.TrimSpace(string(want)) {
+		t.Errorf("RemoteURL = %q, want %q", got, strings.TrimSpace(string(want)))
+	}
+}
+
+func TestRemoteURLNoOriginErrors(t *testing.T) {
+	wt := initPlainRepo(t)
+	if _, err := RemoteURL(context.Background(), wt); err == nil {
+		t.Fatal("want error when no origin remote is configured")
+	}
+}
+
+func TestRemoteOwnerRepoNoOriginErrors(t *testing.T) {
+	wt := initPlainRepo(t)
+	if _, _, err := RemoteOwnerRepo(context.Background(), wt); err == nil {
+		t.Fatal("want error when no origin remote is configured")
+	}
+}
+
+func TestRemoteOwnerRepoParsesOrigin(t *testing.T) {
+	worktree, _ := initGitRepo(t)
+	// Point origin at a recognizable owner/repo URL so parseOwnerRepo's success
+	// path is exercised end-to-end through the real git remote, not just unit-tested.
+	if out, err := exec.Command("git", "-C", worktree, "remote", "set-url", "origin",
+		"git@codeberg.org:Elysium_Labs/argus.git").CombinedOutput(); err != nil {
+		t.Fatalf("git remote set-url: %v\n%s", err, out)
+	}
+	owner, repo, err := RemoteOwnerRepo(context.Background(), worktree)
+	if err != nil {
+		t.Fatalf("RemoteOwnerRepo: %v", err)
+	}
+	if owner != "Elysium_Labs" || repo != "argus" {
+		t.Errorf("RemoteOwnerRepo = %s/%s, want Elysium_Labs/argus", owner, repo)
 	}
 }
