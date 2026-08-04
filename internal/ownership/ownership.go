@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
@@ -161,7 +162,7 @@ func ResolveOwnerID(flagValue string) string {
 	if v := os.Getenv("ARGUS_OWNER_ID"); v != "" {
 		return v
 	}
-	if v := os.Getenv("HERDR_WORKSPACE_ID"); v != "" {
+	if v := herdr.CurrentLocation().WorkspaceID; v != "" {
 		return v
 	}
 	return newID()

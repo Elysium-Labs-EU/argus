@@ -282,7 +282,7 @@ const (
 // flag existed, and changing that default's behavior out from under existing
 // callers is out of scope here.
 func parentWorkspace(placement string, repoExplicit bool) (string, error) {
-	ws := os.Getenv("HERDR_WORKSPACE_ID")
+	ws := herdr.CurrentLocation().WorkspaceID
 	switch placement {
 	case workerPlacementTab:
 		if ws == "" {
