@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -110,6 +112,57 @@ func TestLoadMalformedJSON(t *testing.T) {
 	}
 }
 
+// TestLoadNullJSON pins that a status file containing the JSON literal null
+// (not an object) decodes to a zero Status rather than an error — json.
+// Unmarshal treats null as a no-op on the target, so this is Go stdlib
+// behavior, not a special case in Load.
+func TestLoadNullJSON(t *testing.T) {
+	path := StatusPath(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("null"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, Status{}) {
+		t.Errorf("Load(null) = %+v, want zero Status", got)
+	}
+	if got.Phase != "" {
+		t.Errorf("Phase = %q, want empty", got.Phase)
+	}
+}
+
+// TestLoadUnknownPhaseNotValidated pins that Load performs no phase
+// validation: legality of a phase value is enforced by the transition layer,
+// not by decoding. A worker (or a hand-edited file) reporting a phase Load
+// has never heard of must still load cleanly.
+func TestLoadUnknownPhaseNotValidated(t *testing.T) {
+	path := StatusPath(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	body := `{"task":"x","phase":"frobnicate"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Phase != Phase("frobnicate") {
+		t.Errorf("Phase = %q, want %q", got.Phase, "frobnicate")
+	}
+	if IsTerminal(got.Phase) {
+		t.Errorf("IsTerminal(%q) = true, want false for an unrecognized phase", got.Phase)
+	}
+}
+
 func TestWriteUnwritableDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o500); err != nil {
@@ -120,6 +173,67 @@ func TestWriteUnwritableDir(t *testing.T) {
 	path := filepath.Join(dir, "sub", "status.json")
 	if err := Write(path, &Status{Task: "x", Phase: PhaseWorking}); err == nil {
 		t.Fatal("want error writing status under a read-only parent, got nil")
+	}
+}
+
+// TestWriteEncodeFails exercises the json.MarshalIndent error path via
+// time.Time's own MarshalJSON, which errors for years outside [0,9999] — the
+// one Status field value that can make encoding fail through Write's public
+// API, without any fault-injection seam.
+func TestWriteEncodeFails(t *testing.T) {
+	path := StatusPath(t.TempDir())
+	s := Status{Task: "x", UpdatedAt: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}
+	err := Write(path, &s)
+	if err == nil {
+		t.Fatal("want error encoding a status with an out-of-range year, got nil")
+	}
+	if !strings.Contains(err.Error(), "encoding status") {
+		t.Errorf("error = %q, want it to mention encoding status", err)
+	}
+}
+
+func TestWriteCreateTempFails(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // let t.TempDir's own cleanup remove it
+
+	// dir already exists, so MkdirAll no-ops and the failure must come from
+	// os.CreateTemp itself refusing to create a file in a read-only dir.
+	path := filepath.Join(dir, "status.json")
+	err := Write(path, &Status{Task: "x", Phase: PhaseWorking})
+	if err == nil {
+		t.Fatal("want error creating temp file in a read-only dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating temp status file") {
+		t.Errorf("error = %q, want it to mention creating temp status file", err)
+	}
+}
+
+func TestWriteRenameFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "target")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	err := Write(path, &Status{Task: "x", Phase: PhaseWorking})
+	if err == nil {
+		t.Fatal("want error renaming onto an existing directory, got nil")
+	}
+	if !strings.Contains(err.Error(), "renaming status file into place") {
+		t.Errorf("error = %q, want it to mention renaming status file into place", err)
+	}
+
+	entries, rdErr := os.ReadDir(dir)
+	if rdErr != nil {
+		t.Fatalf("ReadDir: %v", rdErr)
+	}
+	for _, e := range entries {
+		if e.Name() != "target" {
+			t.Errorf("deferred temp cleanup left a stray file after failed rename: %s", e.Name())
+		}
 	}
 }
 
