@@ -146,10 +146,11 @@ Enforced in code, not conventions the worker is merely asked to follow.
     verdict-required gate (previously an unlisted command hit Claude Code's
     default ask-prompt, which hangs a headless worker instead of blocking it).
   - A repo's `.argus/config.yml` can *add* denied commands per phase
-    (`phase.<name>.deny`) and `phase.<name>.skip` to drop its own addition —
+    (`phases.<name>.deny`) and `phases.<name>.skip` to drop its own addition —
     never the hardcoded floor, resolved from the repo's main checkout (a
-    worker editing its own worktree's copy has no effect). Full shape:
-    `schemas/config.schema.json` `phase.*` keys.
+    worker editing its own worktree's copy has no effect). The older dotted
+    form (`phase.<name>.deny`) still works as a deprecated alias. Full shape:
+    `schemas/config.schema.json` `phases.*` blocks.
   - Gaps: no cross-repo config tier, no per-phase scripts-on-entry, matching is
     plain string-prefix (not hardened against shell-level evasion).
 
@@ -377,11 +378,11 @@ Useful flags (see `argus supervise --help` for all):
   - `--proof-required-path` — change needs real-world proof.
   - `--always-review-path` — behavior-critical, always escalates.
   - Both match a whole path segment/word, or a path substring if the value contains `/` — not shell wildcards (`*`/`?` have no special meaning).
-  - All three settable once via `.argus/config.yml` (`max_diff_lines`, `proof_required_paths`, `always_review_paths`); explicit flag wins.
+  - All three settable once via `.argus/config.yml` `phases.awaiting_review.{max_diff_lines,proof_required_paths,always_review_paths}` (the old flat top-level names still work as deprecated aliases); explicit flag wins.
   - --shared-glob is gone, not renamed — folded into `--always-review-path` (identical behavior); an old invocation now fails with an unknown-flag error.
-- `--gate-verify-command <shell command>` (renamed from `--verify-cmd`, old flag still accepted as deprecated alias; default: none) — closes the gap where the gate's checks pass but the repo's own pre-commit hooks (lint, build, fieldalignment, ...) fail at `ship`'s `git commit`. Runs once a worker reaches a terminal phase, in its worktree, one retry on failure; non-zero exit is an unwaivable escalation. Settable via `.argus/config.yml` `gate_verify_command`; explicit flag wins.
+- `--gate-verify-command <shell command>` (renamed from `--verify-cmd`, old flag still accepted as deprecated alias; default: none) — closes the gap where the gate's checks pass but the repo's own pre-commit hooks (lint, build, fieldalignment, ...) fail at `ship`'s `git commit`. Runs once a worker reaches a terminal phase, in its worktree, one retry on failure; non-zero exit is an unwaivable escalation. Settable via `.argus/config.yml` `phases.awaiting_review.gate_verify_command` (the old flat top-level `gate_verify_command`/`verify_command` still work as deprecated aliases); explicit flag wins.
 
-`--gate-verify-command`/`gate_verify_command` is the closest thing to a
+`--gate-verify-command`/`phases.awaiting_review.gate_verify_command` is the closest thing to a
 custom-rule plugin point: `ReviewPolicy`'s built-in checks (`--max-diff-lines`,
 `--proof-required-path`, `--always-review-path`) are a fixed set — no
 code-free way to add a new one. Any other mechanical rule (custom lint,
