@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -220,6 +221,98 @@ func TestRunWorkerSteerDeliveryNonStalledPromptErrorPropagates(t *testing.T) {
 	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now()))
 	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
 		t.Fatalf("want the AgentPrompt error propagated, got %v", err)
+	}
+}
+
+func TestRunWorkerSteerRejectsEmptyWorktree(t *testing.T) {
+	client := fakeSteerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), "", "note", ownerFlags{}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error with no worktree given, got nil")
+	}
+	if !strings.Contains(err.Error(), "no worktree given") {
+		t.Errorf("error = %q, want it to mention no worktree given", err.Error())
+	}
+}
+
+// TestRunWorkerSteerRepoRootErrorAfterRecording pins that a steer already
+// appended to status.json survives even when the follow-up RepoRoot lookup
+// (needed only to deliver it into the pane) fails — the durable trace is not
+// rolled back just because delivery couldn't proceed. Using a plain temp dir
+// (no git init) is what makes the second, unguarded RepoRoot call fail: unlike
+// enforceOwnership's best-effort RepoRoot lookup, this one propagates.
+func TestRunWorkerSteerRepoRootErrorAfterRecording(t *testing.T) {
+	wt := t.TempDir()
+	seedWorkingStatus(t, wt, nil)
+	client := fakeSteerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error resolving repo root outside any git repo, got nil")
+	}
+	if !strings.Contains(err.Error(), "steer recorded, but resolving repo root") {
+		t.Errorf("error = %q, want it to mention the steer was recorded despite the resolve failure", err.Error())
+	}
+
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if len(got.Steers) != 1 || got.Steers[0].Text != "note" {
+		t.Fatalf("Steers = %+v, want it recorded despite the repo-root failure", got.Steers)
+	}
+}
+
+// TestRunWorkerSteerEmptyRootPaneIDAfterRecording pins the other
+// recorded-but-undeliverable case: herdr opens the worktree but reports no
+// root pane at all (as opposed to WorktreeOpen erroring outright).
+func TestRunWorkerSteerEmptyRootPaneIDAfterRecording(t *testing.T) {
+	wt := initGitDir(t)
+	seedWorkingStatus(t, wt, nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "worktree" {
+			return []byte(`{"result":{"root_pane":{"pane_id":""}}}`), nil
+		}
+		return []byte(`{"result":{}}`), nil
+	})
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error when herdr opens no root pane, got nil")
+	}
+	if !strings.Contains(err.Error(), "herdr opened no pane") {
+		t.Errorf("error = %q, want it to mention herdr opened no pane", err.Error())
+	}
+
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if len(got.Steers) != 1 || got.Steers[0].Text != "note" {
+		t.Fatalf("Steers = %+v, want it recorded despite the missing pane", got.Steers)
+	}
+}
+
+// TestNewWorkerSteerCmdRunEEndToEnd drives newWorkerSteerCmd's RunE closure
+// itself (flag wiring, openRunLog, herdr.New()) rather than just its
+// extracted runWorkerSteer body — an empty worktree arg fails before the real
+// herdr.New() client is ever dialed, so this needs no herdr binary on PATH.
+func TestNewWorkerSteerCmdRunEEndToEnd(t *testing.T) {
+	cmd := newWorkerSteerCmd()
+	cmd.SetArgs([]string{"", "some note"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want an error with an empty worktree argument, got nil")
+	}
+	if !strings.Contains(err.Error(), "no worktree given") {
+		t.Errorf("error = %q, want it to mention no worktree given", err.Error())
 	}
 }
 
