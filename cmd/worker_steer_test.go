@@ -56,7 +56,7 @@ func TestRunWorkerSteerRejectsMissingStatus(t *testing.T) {
 	client := fakeSteerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "double-check the timeout unit", fixedNow(time.Now()))
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "double-check the timeout unit", ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error steering a worktree with no status report, got nil")
 	}
@@ -71,7 +71,7 @@ func TestRunWorkerSteerRejectsNonWorkingWorker(t *testing.T) {
 	client := fakeSteerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", fixedNow(time.Now()))
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error steering a non-working worker, got nil")
 	}
@@ -86,7 +86,7 @@ func TestRunWorkerSteerRejectsEmptyText(t *testing.T) {
 	client := fakeSteerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "", fixedNow(time.Now()))
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "", ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error with no follow-up text, got nil")
 	}
@@ -102,7 +102,7 @@ func TestRunWorkerSteerRejectsAtCap(t *testing.T) {
 	client := fakeSteerClient(true, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "one more", fixedNow(time.Now()))
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "one more", ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error steering a worker already at its cap, got nil")
 	}
@@ -126,7 +126,7 @@ func TestRunWorkerSteerRecordsAndDelivers(t *testing.T) {
 	testCmdCtx, _ := testCmd()
 
 	now := time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
-	if err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "the retry cap is 30s not 30ms", fixedNow(now)); err != nil {
+	if err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "the retry cap is 30s not 30ms", ownerFlags{}, fixedNow(now)); err != nil {
 		t.Fatalf("runWorkerSteer: %v", err)
 	}
 
@@ -156,7 +156,7 @@ func TestRunWorkerSteerNoLiveAgentStillRecords(t *testing.T) {
 	client := fakeSteerClient(false, nil)
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", fixedNow(time.Now()))
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error when the worker's pane has no live agent, got nil")
 	}
@@ -200,7 +200,7 @@ func TestRunWorkerSteerDeliveryStalledFallsBackToPaneRun(t *testing.T) {
 	})
 	testCmdCtx, _ := testCmd()
 
-	if err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", fixedNow(time.Now())); err != nil {
+	if err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now())); err != nil {
 		t.Fatalf("runWorkerSteer: want the pane-run fallback to succeed, got %v", err)
 	}
 	if paneRunText == "" {
@@ -217,7 +217,7 @@ func TestRunWorkerSteerDeliveryNonStalledPromptErrorPropagates(t *testing.T) {
 	client := fakeSteerClient(true, errors.New("herdr: socket unavailable"))
 	testCmdCtx, _ := testCmd()
 
-	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", fixedNow(time.Now()))
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now()))
 	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
 		t.Fatalf("want the AgentPrompt error propagated, got %v", err)
 	}
@@ -236,5 +236,14 @@ func TestNewWorkerSteerCmdArgValidation(t *testing.T) {
 	}
 	if err := cmd.Args(cmd, []string{"wt", "text"}); err != nil {
 		t.Errorf("want exactly 2 positional args accepted, got %v", err)
+	}
+	if f := cmd.Flags().Lookup("owner"); f == nil {
+		t.Error("want an --owner flag registered")
+	}
+	if f := cmd.Flags().Lookup("force-foreign-owner"); f == nil {
+		t.Error("want a --force-foreign-owner flag registered")
+	}
+	if f := cmd.Flags().Lookup("owner-stale-after"); f == nil {
+		t.Error("want an --owner-stale-after flag registered")
 	}
 }

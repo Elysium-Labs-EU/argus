@@ -466,3 +466,59 @@ func TestRunWorkerAnswerOwnershipStaleLeaseDoesNotRefuse(t *testing.T) {
 		t.Fatalf("runWorkerAnswer against a stale lease: %v", err)
 	}
 }
+
+// --- worker steer ---
+
+func TestRunWorkerSteerOwnershipMismatchRefuses(t *testing.T) {
+	wt := initGitDir(t)
+	seedOwnerLease(t, wt, time.Now())
+	client := fakeSteerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note",
+		ownerFlags{owner: "sess-2", ownerStaleAfter: 30 * time.Minute}, fixedNow(time.Now()))
+	if _, ok := errors.AsType[*ui.UserError](err); !ok {
+		t.Fatalf("want a *ui.UserError for a mismatched owner, got %v", err)
+	}
+}
+
+func TestRunWorkerSteerOwnershipSameOwnerProceeds(t *testing.T) {
+	wt := initGitDir(t)
+	seedOwnerLease(t, wt, time.Now())
+	seedWorkingStatus(t, wt, nil)
+	client := fakeSteerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{owner: "sess-1"}, fixedNow(time.Now()))
+	if err != nil {
+		t.Fatalf("runWorkerSteer: %v", err)
+	}
+}
+
+func TestRunWorkerSteerOwnershipMismatchWithForceProceeds(t *testing.T) {
+	wt := initGitDir(t)
+	seedOwnerLease(t, wt, time.Now())
+	seedWorkingStatus(t, wt, nil)
+	client := fakeSteerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note",
+		ownerFlags{owner: "sess-2", forceForeignOwner: true}, fixedNow(time.Now()))
+	if err != nil {
+		t.Fatalf("runWorkerSteer with --force-foreign-owner: %v", err)
+	}
+}
+
+func TestRunWorkerSteerOwnershipStaleLeaseDoesNotRefuse(t *testing.T) {
+	wt := initGitDir(t)
+	seedOwnerLease(t, wt, time.Now().Add(-time.Hour))
+	seedWorkingStatus(t, wt, nil)
+	client := fakeSteerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note",
+		ownerFlags{owner: "sess-2", ownerStaleAfter: 30 * time.Minute}, fixedNow(time.Now()))
+	if err != nil {
+		t.Fatalf("runWorkerSteer against a stale lease: %v", err)
+	}
+}
