@@ -78,34 +78,47 @@ func CoversShipForce(entry string) bool {
 
 // entryPrefix returns the literal command prefix a Bash(...) permission
 // entry matches against, stripping the trailing wildcard ("*" or ":*") the
-// glob syntax allows. ok is false if entry isn't Bash(...)-shaped at all.
-func entryPrefix(entry string) (prefix string, ok bool) {
+// glob syntax allows, and whether that wildcard was actually present.
+// wildcarded matters to callers: Claude Code matches a wildcard-less
+// "Bash(x)" rule only against the exact argument-less command "x", never
+// against "x <anything>" — so a bare entry is not a license to treat it as
+// covering every longer command sharing its prefix. ok is false if entry
+// isn't Bash(...)-shaped at all.
+func entryPrefix(entry string) (prefix string, wildcarded bool, ok bool) {
 	inner, ok := strings.CutPrefix(entry, "Bash(")
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 	inner, ok = strings.CutSuffix(inner, ")")
 	if !ok {
-		return "", false
+		return "", false, false
 	}
-	inner = strings.TrimSuffix(inner, ":*")
-	inner = strings.TrimSuffix(inner, "*")
-	return strings.TrimRight(inner, " "), true
+	trimmed := strings.TrimSuffix(inner, ":*")
+	if trimmed == inner {
+		trimmed = strings.TrimSuffix(inner, "*")
+	}
+	wildcarded = trimmed != inner
+	return strings.TrimRight(trimmed, " "), wildcarded, true
 }
 
 // denyEntryCovers reports whether entry (one string from permissions.deny)
 // already denies the raw herdr invocation "herdr <target>" — either that
-// exact subcommand (with its own wildcard, or bare), or a broader prefix of
-// it, e.g. "Bash(herdr pane *)" or "Bash(herdr *)" both already deny "herdr
-// pane send-text". Word-boundary aware, same as coverageRe, so "herdr pane
-// send" doesn't false-positive against "herdr pane send-text".
+// exact subcommand (with its own wildcard, or bare), or a strictly broader
+// prefix of it, e.g. "Bash(herdr pane *)" or "Bash(herdr *)" both already
+// deny "herdr pane send-text". A strictly broader prefix only covers when it
+// was wildcarded — a bare "Bash(herdr)" matches solely the exact command
+// "herdr", not "herdr pane run". Word-boundary aware, same as coverageRe, so
+// "herdr pane send" doesn't false-positive against "herdr pane send-text".
 func denyEntryCovers(entry, target string) bool {
-	prefix, ok := entryPrefix(entry)
+	prefix, wildcarded, ok := entryPrefix(entry)
 	if !ok {
 		return false
 	}
 	want := "herdr " + target
-	return want == prefix || strings.HasPrefix(want, prefix+" ")
+	if want == prefix {
+		return true
+	}
+	return wildcarded && strings.HasPrefix(want, prefix+" ")
 }
 
 // SettingsPath is where Claude Code reads a project's committed permission
