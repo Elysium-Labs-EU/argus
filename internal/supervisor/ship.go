@@ -236,5 +236,7 @@ func parseOwnerRepo(url string) (owner, repo string, err error) {
 	if len(parts) < 2 {
 		return "", "", fmt.Errorf("cannot parse owner/repo from remote %q", url)
 	}
-	return parts[len(parts)-2], parts[len(parts)-1], nil
+	// GitLab/Gitea nest repos under arbitrarily deep subgroups; only the final
+	// segment is ever the repo, so everything before it is the owner.
+	return strings.Join(parts[:len(parts)-1], "/"), parts[len(parts)-1], nil
 }

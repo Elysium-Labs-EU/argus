@@ -393,7 +393,9 @@ func TestDetect(t *testing.T) {
 		{"https://github.com/acme/widget", "github.com", "acme", "widget"},
 		{"git@codeberg.org:Elysium_Labs/argus.git", "codeberg.org", "Elysium_Labs", "argus"},
 		{"ssh://git@codeberg.org/Elysium_Labs/argus.git", "codeberg.org", "Elysium_Labs", "argus"},
-		{"https://gitea.example.com:3000/grp/sub/proj.git", "gitea.example.com", "sub", "proj"},
+		{"https://gitea.example.com:3000/grp/sub/proj.git", "gitea.example.com", "grp/sub", "proj"},
+		{"ssh://git@gitlab.example.com:2222/group/subgroup/project.git", "gitlab.example.com", "group/subgroup", "project"},
+		{"https://gitlab.com:8443/group/subgroup/deeper/project.git", "gitlab.com", "group/subgroup/deeper", "project"},
 	}
 	for _, c := range cases {
 		host, owner, repo, err := Detect(c.url)
