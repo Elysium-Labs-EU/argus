@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -269,6 +270,90 @@ func TestRunWorkerAnswerDeliveryNonStalledPromptErrorPropagates(t *testing.T) {
 	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, ownerFlags{}, fixedNow(time.Now()))
 	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
 		t.Fatalf("want the AgentPrompt error propagated, got %v", err)
+	}
+}
+
+func TestRunWorkerAnswerRejectsEmptyWorktree(t *testing.T) {
+	client := fakeAnswerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), "", "go ahead", 0, ownerFlags{}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error with an empty worktree, got nil")
+	}
+	if !strings.Contains(err.Error(), "no worktree given") {
+		t.Errorf("error = %q, want it to mention no worktree given", err.Error())
+	}
+}
+
+// TestRunWorkerAnswerRepoRootErrorAfterRecording pins the "answer recorded,
+// but ..." contract past the status write: a worktree that is a plain
+// directory (no .git) lets protocol.Load/Write succeed but fails
+// supervisor.RepoRoot, so the answer must already be durably persisted by
+// the time that error surfaces.
+func TestRunWorkerAnswerRepoRootErrorAfterRecording(t *testing.T) {
+	wt := t.TempDir()
+	seedBlockedStatus(t, wt, nil)
+	client := fakeAnswerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, ownerFlags{}, fixedNow(time.Now()))
+	if err == nil || !strings.Contains(err.Error(), "answer recorded, but resolving repo root") {
+		t.Fatalf("err = %v, want it to mention \"answer recorded, but resolving repo root\"", err)
+	}
+
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if got.Answer == nil || got.Answer.Text != "go ahead" {
+		t.Fatalf("Answer = %+v, want it recorded despite the RepoRoot failure", got.Answer)
+	}
+}
+
+// TestRunWorkerAnswerEmptyRootPaneIDAfterRecording pins the sibling
+// "answer recorded, but ..." branch: herdr opening the worktree without
+// error but reporting no root pane must still surface as a delivery
+// failure, with the answer already persisted.
+func TestRunWorkerAnswerEmptyRootPaneIDAfterRecording(t *testing.T) {
+	wt := initGitDir(t)
+	seedBlockedStatus(t, wt, nil)
+	client := herdr.NewWithRunner(func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte(`{"result":{}}`), nil
+	})
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, ownerFlags{}, fixedNow(time.Now()))
+	if err == nil || !strings.Contains(err.Error(), "answer recorded, but herdr opened no pane") {
+		t.Fatalf("err = %v, want it to mention \"answer recorded, but herdr opened no pane\"", err)
+	}
+
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if got.Answer == nil || got.Answer.Text != "go ahead" {
+		t.Fatalf("Answer = %+v, want it recorded despite the empty root pane", got.Answer)
+	}
+}
+
+// TestNewWorkerAnswerCmdRunEEndToEnd drives newWorkerAnswerCmd's RunE closure
+// itself (flag wiring, openRunLog, herdr.New()) rather than just its
+// extracted runWorkerAnswer body — an empty worktree arg fails before the
+// real herdr.New() client is ever dialed, so this needs no herdr binary on
+// PATH.
+func TestNewWorkerAnswerCmdRunEEndToEnd(t *testing.T) {
+	cmd := newWorkerAnswerCmd()
+	cmd.SetArgs([]string{"", "go ahead"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want an error with an empty worktree argument, got nil")
+	}
+	if !strings.Contains(err.Error(), "no worktree given") {
+		t.Errorf("error = %q, want it to mention no worktree given", err.Error())
 	}
 }
 
