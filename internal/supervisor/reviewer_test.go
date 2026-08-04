@@ -212,12 +212,69 @@ func TestReviewLeavesArgsUnchangedWhenEffortUnset(t *testing.T) {
 	}
 }
 
-func TestExtractJSONObjectBalances(t *testing.T) {
+func TestExtractJSONObjectsBalances(t *testing.T) {
 	in := `noise {"a":{"b":"}"},"c":1} trailing`
-	got := extractJSONObject(in)
-	want := `{"a":{"b":"}"},"c":1}`
-	if got != want {
+	got := extractJSONObjects(in)
+	want := []string{`{"a":{"b":"}"},"c":1}`}
+	if len(got) != 1 || got[0] != want[0] {
 		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+func TestExtractJSONObjectsFindsEachTopLevelObject(t *testing.T) {
+	in := `first {"a":1} middle {"b":2} last`
+	got := extractJSONObjects(in)
+	want := []string{`{"a":1}`, `{"b":2}`}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+func TestParseReviewOutputUsesLastObjectWithDecision(t *testing.T) {
+	out := []byte(`I first considered {"decision":"approve","summary":"lgtm"} but no.
+Final verdict: {"decision":"request-changes","summary":"missing nil check","findings":["x"]}`)
+	res, err := parseReviewOutput(out)
+	if err != nil {
+		t.Fatalf("parseReviewOutput: %v", err)
+	}
+	if res.Decision != "request-changes" {
+		t.Errorf("Decision = %q, want %q (preamble verdict must not win over the final one)", res.Decision, "request-changes")
+	}
+	if res.Summary != "missing nil check" {
+		t.Errorf("Summary = %q, want %q", res.Summary, "missing nil check")
+	}
+}
+
+func TestParseReviewOutputSingleObject(t *testing.T) {
+	out := []byte(`{"decision":"approve","summary":"ok","findings":[]}`)
+	res, err := parseReviewOutput(out)
+	if err != nil {
+		t.Fatalf("parseReviewOutput: %v", err)
+	}
+	if res.Decision != "approve" {
+		t.Errorf("Decision = %q, want %q", res.Decision, "approve")
+	}
+}
+
+func TestParseReviewOutputNoObjectErrors(t *testing.T) {
+	out := []byte(`I could not form a verdict.`)
+	if _, err := parseReviewOutput(out); err == nil {
+		t.Fatal("want error for output with no JSON object")
+	}
+}
+
+func TestParseReviewOutputEscapedBracesAndQuotesInLastObject(t *testing.T) {
+	out := []byte(`{"decision":"approve","summary":"stray"} then reconsidered:
+{"decision":"request-changes","summary":"has a brace \"}\" and a quote \\\" in a string","findings":["uses literal { and } inside strings"]}`)
+	res, err := parseReviewOutput(out)
+	if err != nil {
+		t.Fatalf("parseReviewOutput: %v", err)
+	}
+	if res.Decision != "request-changes" {
+		t.Errorf("Decision = %q, want %q", res.Decision, "request-changes")
+	}
+	if res.Findings[0] != "uses literal { and } inside strings" {
+		t.Errorf("Findings = %v, escaped braces inside the string broke balancing", res.Findings)
 	}
 }
 
