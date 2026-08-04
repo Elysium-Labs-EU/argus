@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
@@ -227,27 +228,50 @@ func parseReviewOutput(out []byte) (ReviewResult, error) {
 		text = env.Result
 	}
 
-	obj := extractJSONObject(text)
-	if obj == "" {
+	objs := extractJSONObjects(text)
+	if len(objs) == 0 {
 		return ReviewResult{}, fmt.Errorf("reviewer output had no JSON verdict: %.200s", text)
 	}
-	var res ReviewResult
-	if err := json.Unmarshal([]byte(obj), &res); err != nil {
-		return ReviewResult{}, fmt.Errorf("decoding reviewer verdict: %w", err)
+	// Walk back-to-front: a model that reasons out loud before committing may embed
+	// an earlier, discarded decision in its preamble — only the last object that
+	// actually carries a decision is the verdict, not the first balanced brace.
+	var lastErr error
+	for _, obj := range slices.Backward(objs) {
+		var res ReviewResult
+		if err := json.Unmarshal([]byte(obj), &res); err != nil {
+			lastErr = err
+			continue
+		}
+		if res.Decision == "" {
+			lastErr = fmt.Errorf("reviewer verdict missing decision")
+			continue
+		}
+		return res, nil
 	}
-	if res.Decision == "" {
-		return ReviewResult{}, fmt.Errorf("reviewer verdict missing decision")
-	}
-	return res, nil
+	return ReviewResult{}, fmt.Errorf("decoding reviewer verdict: %w", lastErr)
 }
 
-// extractJSONObject returns the first balanced {...} run in s, so a verdict still
-// parses even if the model wraps it in stray prose or a code fence.
-func extractJSONObject(s string) string {
-	start := strings.IndexByte(s, '{')
-	if start < 0 {
-		return ""
+// extractJSONObjects returns every balanced top-level {...} run in s, in order, so
+// a verdict still parses even if the model wraps it in stray prose or a code fence.
+func extractJSONObjects(s string) []string {
+	var objs []string
+	for i := 0; i < len(s); i++ {
+		if s[i] != '{' {
+			continue
+		}
+		end := balancedObjectEnd(s, i)
+		if end < 0 {
+			continue
+		}
+		objs = append(objs, s[i:end])
+		i = end - 1 // resume scanning right after this object
 	}
+	return objs
+}
+
+// balancedObjectEnd returns the exclusive end index of the balanced {...} run
+// starting at start, or -1 if s[start:] never closes.
+func balancedObjectEnd(s string, start int) int {
 	depth := 0
 	inStr := false
 	esc := false
@@ -267,9 +291,9 @@ func extractJSONObject(s string) string {
 		case c == '}':
 			depth--
 			if depth == 0 {
-				return s[start : i+1]
+				return i + 1
 			}
 		}
 	}
-	return ""
+	return -1
 }
