@@ -544,6 +544,137 @@ func TestWorkerReportCmdRejectsMainRepoCheckout(t *testing.T) {
 	}
 }
 
+// TestReadReportBodyFileSuccess pins the --file success path: the file's
+// exact bytes are returned unchanged, with no stdin fallback.
+func TestReadReportBodyFileSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	want := `{"task":"t"}`
+	if err := os.WriteFile(path, []byte(want), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	got, err := readReportBody(&cobra.Command{}, path)
+	if err != nil {
+		t.Fatalf("readReportBody: %v", err)
+	}
+	if string(got) != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestReadReportBodyFileReadError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.json")
+	_, err := readReportBody(&cobra.Command{}, path)
+	if err == nil {
+		t.Fatal("want error for a nonexistent --file, got nil")
+	}
+	if !strings.Contains(err.Error(), "reading status body") {
+		t.Errorf("error = %q, want it to mention \"reading status body\"", err.Error())
+	}
+}
+
+// TestReadReportBodyRejectsEmptyStdin matches TestReadReportBodyRejectsEmptyFile
+// onto the stdin branch: piping nothing must fail with the same clear hint
+// instead of surfacing json.Unmarshal's opaque error downstream.
+func TestReadReportBodyRejectsEmptyStdin(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(nil))
+	_, err := readReportBody(cmd, "")
+	if err == nil {
+		t.Fatal("want error for empty stdin, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty status body") {
+		t.Errorf("error = %q, want it to mention \"empty status body\"", err.Error())
+	}
+}
+
+// TestWorkerReportCmdRejectsMalformedJSON pins the decode-error branch in
+// RunE: a body that reads fine but doesn't unmarshal as protocol.Status must
+// fail clearly and must not write status.json.
+func TestWorkerReportCmdRejectsMalformedJSON(t *testing.T) {
+	wt := gitLinkedWorktree(t)
+	cmd := newWorkerReportCmd()
+	cmd.SetArgs([]string{"planning", "--worktree", wt})
+	cmd.SetIn(bytes.NewReader([]byte("{not valid json")))
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want error for malformed JSON body, got nil")
+	}
+	if !strings.Contains(err.Error(), "decoding status body") {
+		t.Errorf("error = %q, want it to mention \"decoding status body\"", err.Error())
+	}
+	if _, loadErr := protocol.Load(protocol.StatusPath(wt)); loadErr == nil {
+		t.Error("status.json should not have been created for a malformed body")
+	}
+}
+
+// TestWorkerReportCmdPropagatesFileReadError pins RunE's error path when
+// readReportBody itself fails, distinct from the unit test of readReportBody
+// alone: the CLI must surface the same wrapped error, not swallow it.
+func TestWorkerReportCmdPropagatesFileReadError(t *testing.T) {
+	wt := gitLinkedWorktree(t)
+	cmd := newWorkerReportCmd()
+	cmd.SetArgs([]string{"planning", "--worktree", wt, "--file", filepath.Join(t.TempDir(), "missing.json")})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want error for a nonexistent --file, got nil")
+	}
+	if !strings.Contains(err.Error(), "reading status body") {
+		t.Errorf("error = %q, want it to mention \"reading status body\"", err.Error())
+	}
+}
+
+// TestWorkerReportCmdPropagatesTransitionError pins RunE's error path when
+// runWorkerReport itself rejects the transition, distinct from the direct
+// unit tests of runWorkerReport: the CLI must surface the same error.
+func TestWorkerReportCmdPropagatesTransitionError(t *testing.T) {
+	wt := gitLinkedWorktree(t)
+	cmd := newWorkerReportCmd()
+	cmd.SetArgs([]string{"awaiting_review", "--worktree", wt})
+	cmd.SetIn(bytes.NewReader([]byte(`{"task":"t","branch":"b"}`)))
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want error for an illegal first transition via the CLI, got nil")
+	}
+	if !strings.Contains(err.Error(), "illegal status transition") {
+		t.Errorf("error = %q, want it to mention the illegal transition", err.Error())
+	}
+}
+
+// TestWorkerReportCmdUsesGetwdWhenWorktreeFlagEmpty exercises the actual
+// os.Getwd fallback (not just the flag wiring TestWorkerReportCmdWorktreeFlagDefaultsEmpty
+// pins): no test in this package uses t.Parallel, so a chdir for the
+// duration of this test cannot race another test's cwd-relative work.
+func TestWorkerReportCmdUsesGetwdWhenWorktreeFlagEmpty(t *testing.T) {
+	wt := gitLinkedWorktree(t)
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if chdirErr := os.Chdir(wt); chdirErr != nil {
+		t.Fatalf("Chdir: %v", chdirErr)
+	}
+	defer func() {
+		if chdirErr := os.Chdir(origWd); chdirErr != nil {
+			t.Fatalf("Chdir back to %s: %v", origWd, chdirErr)
+		}
+	}()
+
+	cmd := newWorkerReportCmd()
+	cmd.SetArgs([]string{"planning"})
+	cmd.SetIn(bytes.NewReader([]byte(`{"task":"t","branch":"b","plan":["x"]}`)))
+	if execErr := cmd.Execute(); execErr != nil {
+		t.Fatalf("cmd.Execute: %v", execErr)
+	}
+
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Phase != protocol.PhasePlanning {
+		t.Errorf("Phase = %q, want planning", got.Phase)
+	}
+}
+
 func TestWorkerReportCmdWorktreeFlagDefaultsEmpty(t *testing.T) {
 	// An empty default means RunE falls back to os.Getwd() (see
 	// newWorkerReportCmd) — a worker running `argus worker report <phase>`
