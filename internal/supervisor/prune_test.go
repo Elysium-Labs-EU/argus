@@ -676,3 +676,280 @@ func mergedNow() *time.Time {
 	now := time.Now()
 	return &now
 }
+
+func TestListLinkedWorktreesGitErrorPropagates(t *testing.T) {
+	if _, err := ListLinkedWorktrees(context.Background(), t.TempDir()); err == nil {
+		t.Error("want an error listing worktrees for a directory that isn't a git repo")
+	}
+}
+
+func TestEvaluateCandidateLoadPaneRegistryErrorPropagates(t *testing.T) {
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-bad-registry")
+	if err := os.MkdirAll(filepath.Dir(protocol.PaneRegistryPath(repoRoot)), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(protocol.PaneRegistryPath(repoRoot), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakePruneForge{found: true, pr: forge.PR{MergedAt: mergedNow()}}
+
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-bad-registry", false, false)
+	if err == nil {
+		t.Error("want a corrupt pane registry to surface as an error, not a silently safe candidate")
+	}
+	if c != nil {
+		t.Errorf("want a nil candidate on error, got %+v", c)
+	}
+}
+
+// TestEvaluateCandidateHasUncommittedChangesErrorPropagates guards that a
+// git failure evaluating the working tree is surfaced to the caller rather
+// than swallowed into a false "safe to clean" verdict.
+func TestEvaluateCandidateHasUncommittedChangesErrorPropagates(t *testing.T) {
+	repoRoot, _ := initGitRepo(t)
+	notARepo := t.TempDir()
+	f := &fakePruneForge{found: true, pr: forge.PR{MergedAt: mergedNow()}}
+
+	if _, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, notARepo, "feat-not-a-repo", false, false); err == nil {
+		t.Error("want the git status failure to propagate, not be treated as clean")
+	}
+}
+
+func TestEvaluateCandidateStashPresentIsUnsafe(t *testing.T) {
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-stash-reason")
+	if err := os.WriteFile(filepath.Join(worktree, "f.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, worktree, "stash", "-q")
+	f := &fakePruneForge{found: true, pr: forge.PR{MergedAt: mergedNow()}}
+
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-stash-reason", false, false)
+	if err != nil {
+		t.Fatalf("EvaluateCandidate: %v", err)
+	}
+	if c.SafeToClean {
+		t.Error("a worktree with a stash entry should never be safe to clean")
+	}
+	found := false
+	for _, r := range c.Reasons {
+		if r == "stash entries present" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want a %q reason, got %v", "stash entries present", c.Reasons)
+	}
+}
+
+func TestEvaluateCandidateUnpushedCommitsIsUnsafe(t *testing.T) {
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-unpushed-reason")
+	gitDo(t, worktree, "commit", "-q", "--allow-empty", "-m", "local only")
+	f := &fakePruneForge{found: true, pr: forge.PR{MergedAt: mergedNow()}}
+
+	c, err := EvaluateCandidate(context.Background(), f, "o", "r", repoRoot, worktree, "feat-unpushed-reason", false, false)
+	if err != nil {
+		t.Fatalf("EvaluateCandidate: %v", err)
+	}
+	if c.SafeToClean {
+		t.Error("a worktree ahead of its upstream should never be safe to clean")
+	}
+	found := false
+	for _, r := range c.Reasons {
+		if r == "unpushed commits" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want an %q reason, got %v", "unpushed commits", c.Reasons)
+	}
+}
+
+func TestResolveMergeStateLoadLifecycleErrorPropagates(t *testing.T) {
+	_, worktree := initRepoWithWorktree(t, "feat-bad-lifecycle")
+	if err := os.MkdirAll(filepath.Dir(protocol.LifecyclePath(worktree)), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(protocol.LifecyclePath(worktree), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakePruneForge{found: true, pr: forge.PR{MergedAt: mergedNow()}}
+
+	if _, _, _, _, err := resolveMergeState(context.Background(), f, "o", "r", worktree, "feat-bad-lifecycle", false, false); err == nil {
+		t.Error("want a corrupt lifecycle.json to surface as an error")
+	}
+}
+
+// TestResolveMergeStateWriteLifecycleFailurePropagates forces the confirmed
+// merge -> WriteLifecycle path to fail: an existing shipped record is still
+// readable, but its directory is made read-only so the new file cannot be
+// written, standing in for a disk/permissions failure at ship time.
+func TestResolveMergeStateWriteLifecycleFailurePropagates(t *testing.T) {
+	_, worktree := initRepoWithWorktree(t, "feat-write-fails")
+	if err := protocol.WriteLifecycle(worktree, &protocol.Lifecycle{
+		State: protocol.LifecycleShipped, Host: "fake", Owner: "o", Repo: "r", Branch: "feat-write-fails",
+		PRURL: "https://fake/pr/30", PRNumber: 30,
+	}); err != nil {
+		t.Fatalf("WriteLifecycle: %v", err)
+	}
+	lifecycleDir := filepath.Dir(protocol.LifecyclePath(worktree))
+	if err := os.Chmod(lifecycleDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lifecycleDir, 0o750) })
+	f := &fakePruneForge{found: true, pr: forge.PR{HTMLURL: "https://fake/pr/30", Number: 30, MergedAt: mergedNow()}}
+
+	if _, _, _, _, err := resolveMergeState(context.Background(), f, "o", "r", worktree, "feat-write-fails", false, false); err == nil {
+		t.Error("want a WriteLifecycle failure on the confirmed-merge path to propagate")
+	}
+}
+
+func TestHasUncommittedChangesGitErrorPropagates(t *testing.T) {
+	if _, err := hasUncommittedChanges(context.Background(), t.TempDir()); err == nil {
+		t.Error("want a git status failure on a non-repo directory to propagate")
+	}
+}
+
+func TestHasStashGitErrorPropagates(t *testing.T) {
+	if _, err := hasStash(context.Background(), t.TempDir(), "any-branch"); err == nil {
+		t.Error("want a git stash list failure on a non-repo directory to propagate")
+	}
+}
+
+// TestHasUncommittedChangesRenameEntryNotMisclassifiedAsControlPlane guards
+// against a `git status --porcelain` rename line ("R  old -> new", quoted
+// when either side needs it) being matched against controlPlanePaths using
+// anything less than the exact reported path — a real user file rename must
+// always report dirty.
+func TestHasUncommittedChangesRenameEntryNotMisclassifiedAsControlPlane(t *testing.T) {
+	repoRoot, base := initGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repoRoot, "old name.txt"), []byte("line1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, repoRoot, "add", "-A")
+	gitDo(t, repoRoot, "commit", "-q", "-m", "add renameable file")
+	gitDo(t, repoRoot, "push", "-q", "origin", base)
+	gitDo(t, repoRoot, "mv", "old name.txt", "new name.txt")
+
+	dirty, err := hasUncommittedChanges(context.Background(), repoRoot)
+	if err != nil {
+		t.Fatalf("hasUncommittedChanges: %v", err)
+	}
+	if !dirty {
+		t.Error("a real file rename (quoted, with a space) must never be misclassified as control-plane and skipped")
+	}
+}
+
+// TestCleanWorktreeRecoverableRemoveFailureSkipsDeregister guards that a
+// failed relocation short-circuits before the worktree's git registration is
+// touched at all — no half-clean where the directory is gone from disk but
+// still (or vice versa) registered.
+func TestCleanWorktreeRecoverableRemoveFailureSkipsDeregister(t *testing.T) {
+	notARepo := t.TempDir()
+	stray := filepath.Join(t.TempDir(), "stray")
+	if err := os.MkdirAll(stray, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stray, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &PruneCandidate{Path: stray, Branch: "feat-recoverable-fails", SafeToClean: true}
+
+	dest, paneWarning, err := CleanWorktree(context.Background(), notARepo, herdr.Client{}, c)
+	if err == nil {
+		t.Fatal("want an error when the relocation step's repo root isn't a real git repository")
+	}
+	if dest != "" || paneWarning != "" {
+		t.Errorf("want no relocation destination or pane warning on early failure, got dest=%q paneWarning=%q", dest, paneWarning)
+	}
+	if _, statErr := os.Stat(stray); statErr != nil {
+		t.Errorf("the candidate directory must be untouched when relocation fails, stat err: %v", statErr)
+	}
+}
+
+// TestCleanWorktreeDeregisterFailureAfterRelocationReturnsTrashPath covers
+// the case where relocation itself succeeds but the targeted `git worktree
+// remove` fails (e.g. the path was never registered as a linked worktree in
+// the first place) — the content is already safely relocated, so the
+// caller must still learn where to find it even though err is non-nil.
+func TestCleanWorktreeDeregisterFailureAfterRelocationReturnsTrashPath(t *testing.T) {
+	repoRoot, _ := initGitRepo(t)
+	stray := filepath.Join(t.TempDir(), "stray")
+	if err := os.MkdirAll(stray, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stray, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &PruneCandidate{Path: stray, Branch: "feat-never-registered", SafeToClean: true}
+
+	dest, _, err := CleanWorktree(context.Background(), repoRoot, herdr.Client{}, c)
+	if err == nil {
+		t.Fatal("want an error: this path was never registered via `git worktree add`, so deregistering it must fail")
+	}
+	if dest == "" {
+		t.Error("want the relocation destination reported even though deregistering failed, so an operator can still find the content")
+	}
+	if _, statErr := os.Stat(dest); statErr != nil {
+		t.Errorf("relocated content should exist at %s despite the later failure: %v", dest, statErr)
+	}
+}
+
+func TestRecoverableRemoveGitCommonDirErrorPropagates(t *testing.T) {
+	if _, err := recoverableRemove(context.Background(), t.TempDir(), t.TempDir()); err == nil {
+		t.Error("want resolving --git-common-dir against a non-repo root to fail")
+	}
+}
+
+func TestRecoverableRemoveMkdirAllErrorPropagates(t *testing.T) {
+	repoRoot, _ := initGitRepo(t)
+	commonDir, err := git(context.Background(), repoRoot, "rev-parse", "--git-common-dir")
+	if err != nil {
+		t.Fatalf("resolving git common dir: %v", err)
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(repoRoot, commonDir)
+	}
+	// Occupy the holding directory's own path with a regular file so
+	// os.MkdirAll cannot create a directory there.
+	if err := os.WriteFile(filepath.Join(commonDir, "argus-trash"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "victim")
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := recoverableRemove(context.Background(), repoRoot, target); err == nil {
+		t.Error("want a file occupying the holding directory's path to fail MkdirAll")
+	}
+}
+
+func TestRecoverableRemoveRenameErrorPropagates(t *testing.T) {
+	repoRoot, _ := initGitRepo(t)
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+
+	if _, err := recoverableRemove(context.Background(), repoRoot, missing); err == nil {
+		t.Error("want renaming a path that doesn't exist to fail")
+	}
+}
+
+func TestForgetPaneRecordSilentNoOpOnRegistryError(t *testing.T) {
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-forget-bad-registry")
+	if err := os.MkdirAll(filepath.Dir(protocol.PaneRegistryPath(repoRoot)), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := []byte("{not json")
+	if err := os.WriteFile(protocol.PaneRegistryPath(repoRoot), corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	forgetPaneRecord(repoRoot, worktree) // must not panic
+
+	after, err := os.ReadFile(protocol.PaneRegistryPath(repoRoot))
+	if err != nil {
+		t.Fatalf("reading pane registry after: %v", err)
+	}
+	if !bytes.Equal(corrupt, after) {
+		t.Errorf("a LoadPaneRegistry failure must leave the registry file untouched, got %q", after)
+	}
+}
