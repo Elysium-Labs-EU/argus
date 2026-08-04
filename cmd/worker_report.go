@@ -133,6 +133,12 @@ func readReportBody(cmd *cobra.Command, file string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading status body: %w", err)
 		}
+		if len(data) == 0 {
+			return nil, &ui.UserError{
+				Err:  fmt.Errorf("empty status body"),
+				Hint: "--file must contain the status JSON",
+			}
+		}
 		return data, nil
 	}
 	data, err := io.ReadAll(cmd.InOrStdin())

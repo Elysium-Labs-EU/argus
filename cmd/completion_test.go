@@ -142,6 +142,11 @@ func TestWriteCompletionScript_UnsupportedShell(t *testing.T) {
 	if err := writeCompletionScript(rootCmd, "tcsh", path); err == nil {
 		t.Error("expected error for unsupported shell")
 	}
+	// The shell is rejected before any file is opened, so an unsupported
+	// shell must not leave a truncated, empty file on disk.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("os.Stat(%q) = %v, want file not to exist", path, err)
+	}
 }
 
 func TestCompletionZshCmd_PrintsToStdout(t *testing.T) {

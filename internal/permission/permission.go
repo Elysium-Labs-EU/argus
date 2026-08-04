@@ -60,20 +60,29 @@ func Covers(entry string) bool {
 	return coverageRe.MatchString(entry)
 }
 
-// shipForceRe matches an allow entry broad enough to also authorize `argus
-// ship --force` without a prompt: the blanket wildcard, or one scoped to
-// "ship" with a trailing wildcard/colon-glob. An entry with no wildcard
-// ("Bash(argus)", "Bash(argus ship)") only ever matches that exact,
-// argument-less command line, so it can never reach a call carrying
+// shipForceTarget is the literal command CoversShipForce checks entry
+// against — an entry covers it either by exact match or, if wildcarded, by
+// prefix-matching it at a word boundary.
+const shipForceTarget = "argus ship --force"
+
+// CoversShipForce reports whether entry authorizes `argus ship --force` to
+// run without the calling agent's own approval prompt: an exact-literal
+// match, the blanket wildcard, or one scoped to "ship" (with a trailing
+// wildcard/colon-glob, spaced or not before the "*"). An entry with no
+// wildcard that isn't the exact literal command only ever matches that
+// exact, argument-less command line, so it can never reach a call carrying
 // "--force" — Bash allow-glob syntax has no way to match "argus ship
 // <safe-flags>" while excluding one specific flag, so any wildcard scoped to
 // ship (or broader) is unavoidably ship --force too.
-var shipForceRe = regexp.MustCompile(`^Bash\(argus\s+(\*|ship(:\*|\s+.*\*))\)$`)
-
-// CoversShipForce reports whether entry authorizes `argus ship --force` to
-// run without the calling agent's own approval prompt.
 func CoversShipForce(entry string) bool {
-	return shipForceRe.MatchString(entry)
+	prefix, wildcarded, ok := entryPrefix(entry)
+	if !ok {
+		return false
+	}
+	if prefix == shipForceTarget {
+		return true
+	}
+	return wildcarded && strings.HasPrefix(shipForceTarget, prefix+" ")
 }
 
 // entryPrefix returns the literal command prefix a Bash(...) permission

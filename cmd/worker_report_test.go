@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
@@ -430,6 +432,24 @@ func TestParseReportablePhaseRejectsUnknown(t *testing.T) {
 		if p, err := parseReportablePhase(s); err != nil || string(p) != s {
 			t.Errorf("parseReportablePhase(%q) = %q, %v, want %q, nil", s, p, err, s)
 		}
+	}
+}
+
+// TestReadReportBodyRejectsEmptyFile matches the stdin branch's existing
+// "empty status body" guard onto the --file branch, so an empty --file fails
+// with the same clear hint instead of surfacing json.Unmarshal's opaque
+// "unexpected end of JSON input" from the caller downstream.
+func TestReadReportBodyRejectsEmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	_, err := readReportBody(&cobra.Command{}, path)
+	if err == nil {
+		t.Fatal("want error for an empty --file, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty status body") {
+		t.Errorf("error = %q, want it to mention \"empty status body\"", err.Error())
 	}
 }
 

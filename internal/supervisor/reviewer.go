@@ -242,11 +242,14 @@ func parseReviewOutput(out []byte) (ReviewResult, error) {
 			lastErr = err
 			continue
 		}
-		if res.Decision == "" {
+		switch res.Decision {
+		case "approve", "request-changes", "needs-human":
+			return res, nil
+		case "":
 			lastErr = fmt.Errorf("reviewer verdict missing decision")
-			continue
+		default:
+			lastErr = fmt.Errorf("reviewer verdict has unrecognized decision %q", res.Decision)
 		}
-		return res, nil
 	}
 	return ReviewResult{}, fmt.Errorf("decoding reviewer verdict: %w", lastErr)
 }

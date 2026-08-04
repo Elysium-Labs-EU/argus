@@ -31,8 +31,8 @@ func TestCoversShipForce(t *testing.T) {
 		"Bash(argus ship:*)":       true,
 		"Bash(argus)":              false,
 		"Bash(argus ship)":         false,
-		"Bash(argus ship*)":        false, // no space before *: doesn't match \s+.*\*
-		"Bash(argus ship --force)": false, // no wildcard: only matches that exact literal command
+		"Bash(argus ship*)":        true, // wildcard scoped to ship, space or not before *, still covers --force
+		"Bash(argus ship --force)": true, // exact literal match of the command itself
 		"Bash(argus supervise *)":  false,
 		"Bash(argus supervise:*)":  false,
 		"Bash(argus review *)":     false,

@@ -387,7 +387,7 @@ func stripYAMLComment(line string) string {
 	for i := 0; i < len(line); i++ {
 		switch line[i] {
 		case '"':
-			if i == 0 || line[i-1] != '\\' {
+			if !quoteEscaped(line, i) {
 				inQuote = !inQuote
 			}
 		case '#':
@@ -397,4 +397,15 @@ func stripYAMLComment(line string) string {
 		}
 	}
 	return line
+}
+
+// quoteEscaped reports whether the '"' at i is escaped, i.e. preceded by an
+// odd run of backslashes — an even run (e.g. a value ending in "\\") is
+// itself escaped backslashes and leaves the quote a real delimiter.
+func quoteEscaped(line string, i int) bool {
+	n := 0
+	for j := i - 1; j >= 0 && line[j] == '\\'; j-- {
+		n++
+	}
+	return n%2 == 1
 }

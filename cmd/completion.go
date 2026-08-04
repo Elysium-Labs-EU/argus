@@ -68,6 +68,9 @@ func completionTargetPath(shell string) (string, error) {
 }
 
 func writeCompletionScript(root *cobra.Command, shell, path string) error {
+	if shell != "bash" && shell != "zsh" && shell != "fish" {
+		return fmt.Errorf("unsupported shell: %s", shell)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
@@ -83,8 +86,6 @@ func writeCompletionScript(root *cobra.Command, shell, path string) error {
 		genErr = root.GenZshCompletion(f)
 	case "fish":
 		genErr = root.GenFishCompletion(f, true)
-	default:
-		genErr = fmt.Errorf("unsupported shell: %s", shell)
 	}
 	if closeErr := f.Close(); closeErr != nil && genErr == nil {
 		return closeErr

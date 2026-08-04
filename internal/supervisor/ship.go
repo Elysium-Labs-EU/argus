@@ -219,7 +219,9 @@ func RemoteOwnerRepo(ctx context.Context, worktree string) (owner, repo string, 
 }
 
 func parseOwnerRepo(url string) (owner, repo string, err error) {
-	s := strings.TrimSuffix(strings.TrimSpace(url), ".git")
+	// Trim a trailing slash before ".git" so "Repo.git/" strips to "Repo",
+	// not "Repo.git".
+	s := strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(url), "/"), ".git")
 	// Normalize SSH scp-form (git@host:Owner/Repo) and URL forms to a tail path.
 	if i := strings.LastIndex(s, ":"); i >= 0 && !strings.Contains(s[i:], "/") {
 		// no slash after the colon means this colon isn't a scheme separator
