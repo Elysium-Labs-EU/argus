@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -59,13 +60,19 @@ func Detect(remoteURL string) (host, owner, repo string, err error) {
 }
 
 // splitOwnerRepo takes the trailing path of a remote (possibly nested, e.g.
-// group/subgroup/repo) and returns the last two segments as owner and repo.
+// group/subgroup/repo) and returns the last segment as repo and everything
+// before it, joined back together, as owner — GitLab and Gitea nest repos
+// under arbitrarily deep subgroups, so only the final segment is ever the
+// repo.
 func splitOwnerRepo(path string) (owner, repo string, err error) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 2 || parts[len(parts)-1] == "" || parts[len(parts)-2] == "" {
+	if len(parts) < 2 {
 		return "", "", fmt.Errorf("cannot parse owner/repo from %q", path)
 	}
-	return parts[len(parts)-2], parts[len(parts)-1], nil
+	if slices.Contains(parts, "") {
+		return "", "", fmt.Errorf("cannot parse owner/repo from %q", path)
+	}
+	return strings.Join(parts[:len(parts)-1], "/"), parts[len(parts)-1], nil
 }
 
 // TokenForHost returns the API token for a forge host, checking an operator
