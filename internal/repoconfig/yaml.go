@@ -14,24 +14,59 @@ import (
 // for service.yaml — inline validation/autocomplete for free, no custom LSP.
 const configSchemaHeader = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/schemas/config.schema.json\n"
 
-// deprecatedKeyAliases maps a superseded .argus/config.yml key to its
-// current name. parseYAML still accepts every key here, assigning to the
-// same field the current name would, and records the mapping on
-// Config.Deprecated so a caller can warn an operator to migrate — argus is
-// young enough that names are still being corrected, and support for an old
-// name is expected to be temporary, not permanent API surface.
-var deprecatedKeyAliases = map[string]string{
-	"ship_lint":              "ship_verify_command",
-	"verify_command":         "gate_verify_command",
-	"worktree_setup_cmd":     "worktree_bootstrap_command",
-	"worktree_setup_command": "worktree_bootstrap_command",
+// legacyKey names how a superseded flat top-level .argus/config.yml key
+// still parses. assignAs is the key name assignScalarField/listFieldFor
+// dispatch on internally — identical to the map key itself unless the key
+// was also renamed, not just relocated (ship_lint/verify_command, whose
+// current names are ship_verify_command/gate_verify_command). newLoc is the
+// dotted path shown in the deprecation warning: the key's actual location
+// under the new ship:/phases: nesting.
+type legacyKey struct {
+	assignAs string
+	newLoc   string
+}
+
+// legacyFlatKeys maps a superseded top-level .argus/config.yml key to how it
+// still parses. parseYAML accepts every key here, assigning to the same
+// Config field its current nested location would, and records the mapping
+// on Config.Deprecated so a caller can warn an operator to migrate — argus
+// is young enough that key names and locations are still being corrected,
+// and support for an old shape is expected to be temporary, not permanent
+// API surface. worktree_setup_cmd/worktree_setup_command are the one entry
+// pair that only renamed, never relocated: worktree_bootstrap_command was
+// always a top-level (region 1) key, so their newLoc is unchanged from
+// their assignAs.
+var legacyFlatKeys = map[string]legacyKey{
+	"ship_lint":              {"ship_verify_command", "ship.verify_command"},
+	"ship_verify_command":    {"ship_verify_command", "ship.verify_command"},
+	"verify_command":         {"gate_verify_command", "phases.awaiting_review.gate_verify_command"},
+	"gate_verify_command":    {"gate_verify_command", "phases.awaiting_review.gate_verify_command"},
+	"worktree_setup_cmd":     {"worktree_bootstrap_command", "worktree_bootstrap_command"},
+	"worktree_setup_command": {"worktree_bootstrap_command", "worktree_bootstrap_command"},
+	"title_prefix_template":  {"title_prefix_template", "ship.title_prefix_template"},
+	"max_diff_lines":         {"max_diff_lines", "phases.awaiting_review.max_diff_lines"},
+	"proof_required_paths":   {"proof_required_paths", "phases.awaiting_review.proof_required_paths"},
+	"always_review_paths":    {"always_review_paths", "phases.awaiting_review.always_review_paths"},
+	"review_note":            {"review_note", "phases.awaiting_review.review_note"},
+	"review_effort":          {"review_effort", "phases.awaiting_review.review_effort"},
+}
+
+// awaitingReviewOnlyKeys are the gate/review cluster subkeys valid only
+// under phases.awaiting_review: they fire once, on entering the terminal
+// phase, right before a verdict is recorded — unlike allow/deny/skip, which
+// are live on every configurable phase.
+var awaitingReviewOnlyKeys = []string{
+	"gate_verify_command", "max_diff_lines", "proof_required_paths",
+	"always_review_paths", "review_note", "review_effort",
 }
 
 // encodeYAML renders cfg as the minimal YAML document parseYAML can read
-// back: a leading comment, then any of the keys that are actually set, in
-// field order. Like internal/config's TOML encoder, this is deliberately not
-// a general-purpose YAML encoder — the schema is exactly the optional keys
-// listed in Config's doc comment.
+// back: a leading comment, then region 1's top-level scalars/lists actually
+// set, then a `ship:` block and a `phases:` block for whatever's configured
+// there. Like internal/config's TOML encoder, this is deliberately not a
+// general-purpose YAML encoder. It never emits a deprecated flat/dotted key
+// name — only the current nested shape, regardless of which shape the
+// in-memory Config was originally loaded from.
 func encodeYAML(cfg *Config) string {
 	var b strings.Builder
 	b.WriteString(configSchemaHeader)
@@ -54,62 +89,117 @@ func encodeYAML(cfg *Config) string {
 	if cfg.WorktreeDir != "" {
 		fmt.Fprintf(&b, "worktree_dir: %s\n", quoteYAML(cfg.WorktreeDir))
 	}
-	if cfg.ReviewEffort != "" {
-		fmt.Fprintf(&b, "review_effort: %s\n", quoteYAML(cfg.ReviewEffort))
-	}
-	if len(cfg.Allow) > 0 {
-		b.WriteString("allow:\n")
-		for _, a := range cfg.Allow {
-			fmt.Fprintf(&b, "  - %s\n", quoteYAML(a))
-		}
-	}
-	if cfg.BriefNote != "" {
-		fmt.Fprintf(&b, "brief_note: %s\n", quoteYAML(cfg.BriefNote))
-	}
-	if cfg.ReviewNote != "" {
-		fmt.Fprintf(&b, "review_note: %s\n", quoteYAML(cfg.ReviewNote))
-	}
-	if cfg.ShipVerifyCommand != "" {
-		fmt.Fprintf(&b, "ship_verify_command: %s\n", quoteYAML(cfg.ShipVerifyCommand))
-	}
-	if cfg.GateVerifyCommand != "" {
-		fmt.Fprintf(&b, "gate_verify_command: %s\n", quoteYAML(cfg.GateVerifyCommand))
-	}
 	if cfg.WorktreeBootstrapCommand != "" {
 		fmt.Fprintf(&b, "worktree_bootstrap_command: %s\n", quoteYAML(cfg.WorktreeBootstrapCommand))
-	}
-	if cfg.TitlePrefixTemplate != "" {
-		fmt.Fprintf(&b, "title_prefix_template: %s\n", quoteYAML(cfg.TitlePrefixTemplate))
 	}
 	if cfg.OwnerStaleAfter != "" {
 		fmt.Fprintf(&b, "owner_stale_after: %s\n", quoteYAML(cfg.OwnerStaleAfter))
 	}
-	if cfg.MaxDiffLines != nil {
-		fmt.Fprintf(&b, "max_diff_lines: %d\n", *cfg.MaxDiffLines)
-	}
 	if cfg.ReworkBudget != nil {
 		fmt.Fprintf(&b, "rework_budget: %d\n", *cfg.ReworkBudget)
 	}
-	writeYAMLList(&b, "proof_required_paths", cfg.ProofRequiredPaths)
-	writeYAMLList(&b, "always_review_paths", cfg.AlwaysReviewPaths)
-	writePhaseKeys(&b, cfg.Phases)
+	writeYAMLList(&b, "allow", cfg.Allow)
+	if cfg.BriefNote != "" {
+		fmt.Fprintf(&b, "brief_note: %s\n", quoteYAML(cfg.BriefNote))
+	}
+	writeShipBlock(&b, cfg)
+	writePhasesBlock(&b, cfg)
 	return b.String()
 }
 
-// writePhaseKeys writes phase.<name>.skip/.deny for every configured phase,
-// in protocol.ConfigurablePhases order — split out of encodeYAML to keep
-// that function's own complexity down, not for reuse.
-func writePhaseKeys(b *strings.Builder, phases protocol.PhaseConfig) {
+// writeShipBlock appends the `ship:` block — argus-side actions that run
+// after a worker is done, initiated by the operator, so they get their own
+// region instead of living under phases:. Writes nothing if neither field is
+// set.
+func writeShipBlock(b *strings.Builder, cfg *Config) {
+	if cfg.ShipVerifyCommand == "" && cfg.TitlePrefixTemplate == "" {
+		return
+	}
+	b.WriteString("\nship:\n")
+	if cfg.ShipVerifyCommand != "" {
+		fmt.Fprintf(b, "  verify_command: %s\n", quoteYAML(cfg.ShipVerifyCommand))
+	}
+	if cfg.TitlePrefixTemplate != "" {
+		fmt.Fprintf(b, "  title_prefix_template: %s\n", quoteYAML(cfg.TitlePrefixTemplate))
+	}
+}
+
+// writePhasesBlock appends the `phases:` block: one nested entry per
+// protocol.ConfigurablePhases value that has anything configured — its live
+// allow/deny/skip policy, plus (awaiting_review only) the gate/review
+// cluster. A phase with nothing configured is omitted entirely, mirroring
+// every other optional key here.
+func writePhasesBlock(b *strings.Builder, cfg *Config) {
+	bodies := make(map[protocol.Phase][]string, len(protocol.ConfigurablePhases))
 	for _, p := range protocol.ConfigurablePhases {
-		policy, ok := phases[p]
+		var lines []string
+		if policy, ok := cfg.Phases[p]; ok {
+			if policy.Skip {
+				lines = append(lines, "    skip: true")
+			}
+			lines = append(lines, indentedYAMLList("allow", policy.Allow)...)
+			lines = append(lines, indentedYAMLList("deny", policy.Deny)...)
+		}
+		if p == protocol.PhaseAwaitingReview {
+			lines = append(lines, awaitingReviewLines(cfg)...)
+		}
+		if len(lines) > 0 {
+			bodies[p] = lines
+		}
+	}
+	if len(bodies) == 0 {
+		return
+	}
+	b.WriteString("\nphases:\n")
+	for _, p := range protocol.ConfigurablePhases {
+		lines, ok := bodies[p]
 		if !ok {
 			continue
 		}
-		if policy.Skip {
-			fmt.Fprintf(b, "phase.%s.skip: true\n", p)
+		fmt.Fprintf(b, "  %s:\n", p)
+		for _, l := range lines {
+			b.WriteString(l)
+			b.WriteString("\n")
 		}
-		writeYAMLList(b, "phase."+string(p)+".deny", policy.Deny)
 	}
+}
+
+// awaitingReviewLines renders the gate/review cluster's configured fields as
+// already-indented YAML lines, for writePhasesBlock's awaiting_review entry.
+func awaitingReviewLines(cfg *Config) []string {
+	var lines []string
+	if cfg.GateVerifyCommand != "" {
+		lines = append(lines, fmt.Sprintf("    gate_verify_command: %s", quoteYAML(cfg.GateVerifyCommand)))
+	}
+	if cfg.MaxDiffLines != nil {
+		lines = append(lines, fmt.Sprintf("    max_diff_lines: %d", *cfg.MaxDiffLines))
+	}
+	lines = append(lines, indentedYAMLList("proof_required_paths", cfg.ProofRequiredPaths)...)
+	lines = append(lines, indentedYAMLList("always_review_paths", cfg.AlwaysReviewPaths)...)
+	if cfg.ReviewNote != "" {
+		lines = append(lines, fmt.Sprintf("    review_note: %s", quoteYAML(cfg.ReviewNote)))
+	}
+	if cfg.ReviewEffort != "" {
+		lines = append(lines, fmt.Sprintf("    review_effort: %s", quoteYAML(cfg.ReviewEffort)))
+	}
+	return lines
+}
+
+// indentedYAMLList renders a key's "- value" list block at the fixed
+// 4-space indent every phases.<name>.<subkey> line uses, or nothing if
+// items is empty — the nested-block equivalent of writeYAMLList, which only
+// ever writes at zero indentation.
+func indentedYAMLList(key string, items []string) []string {
+	const indent = "    "
+	if len(items) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(items)+1)
+	lines = append(lines, indent+key+":")
+	for _, item := range items {
+		lines = append(lines, indent+"  - "+quoteYAML(item))
+	}
+	return lines
 }
 
 // writeYAMLList writes a key's indented "- value" list block, or nothing if
@@ -141,12 +231,15 @@ func unquoteYAML(s string) (string, error) {
 	return s, nil
 }
 
-// phaseKeyPrefix precedes every per-phase policy key: phase.<name>.<subkey>.
+// phaseKeyPrefix precedes the deprecated dotted per-phase policy key:
+// phase.<name>.<subkey>, superseded by the nested phases.<name>.<subkey>
+// shape (see parsePhasesBlock).
 const phaseKeyPrefix = "phase."
 
-// parsePhaseKey splits a phase.<name>.<subkey> config key into its phase and
-// subkey parts. ok is false for any key not shaped like phase.<name>.<subkey>
-// — such a key falls through to listFieldFor/assignScalarField as usual.
+// parsePhaseKey splits a deprecated dotted phase.<name>.<subkey> config key
+// into its phase and subkey parts. ok is false for any key not shaped like
+// phase.<name>.<subkey> — such a key falls through to legacyFlatKeys/
+// listFieldFor/assignScalarField as usual.
 func parsePhaseKey(key string) (phase protocol.Phase, subkey string, ok bool) {
 	rest, found := strings.CutPrefix(key, phaseKeyPrefix)
 	if !found {
@@ -160,13 +253,16 @@ func parsePhaseKey(key string) (phase protocol.Phase, subkey string, ok bool) {
 }
 
 // assignPhaseKey sets cfg.Phases[phase]'s Skip or Deny field for one
-// phase.<name>.<subkey> config key. Both an unrecognized phase name and an
+// deprecated dotted phase.<name>.<subkey> config key — the current,
+// non-deprecated shape nests the same policy under phases.<name>.<subkey>
+// instead (see parsePhaseSubBlock). Both an unrecognized phase name and an
 // unrecognized subkey are hard errors — unlike a wholly unrelated unknown
 // top-level key, anything under the phase.* namespace belongs to this
 // schema, so a typo here (phase.plannning.deny, phase.planning.frobnicate)
 // should fail loudly rather than silently do nothing. consumed is how many
 // extra lines a list-shaped subkey (deny) read past line, for the caller to
-// skip past, mirroring listFieldFor's own list-consuming callers.
+// skip past, mirroring listFieldFor's own list-consuming callers. allow has
+// no dotted form: it's new in the nested shape, with nothing to deprecate.
 func assignPhaseKey(cfg *Config, phase protocol.Phase, subkey, value string, lines []string, next, line int) (consumed int, err error) {
 	if !slices.Contains(protocol.ConfigurablePhases, phase) {
 		return 0, fmt.Errorf("config: line %d: unrecognized phase %q", line, phase)
@@ -196,12 +292,20 @@ func assignPhaseKey(cfg *Config, phase protocol.Phase, subkey, value string, lin
 		return 0, fmt.Errorf("config: line %d: unrecognized phase policy key %q", line, subkey)
 	}
 	cfg.Phases[phase] = policy
+	cfg.Deprecated = append(cfg.Deprecated, DeprecatedKeyUse{
+		Old: fmt.Sprintf("phase.%s.%s", phase, subkey),
+		New: fmt.Sprintf("phases.%s.%s", phase, subkey),
+	})
 	return consumed, nil
 }
 
 // listFieldFor returns a pointer to cfg's field for key, for the keys whose
 // value is a list block (`allow`, `proof_required_paths`,
-// `always_review_paths`), or nil if key names a scalar or unknown key.
+// `always_review_paths`), or nil if key names a scalar or unknown key. It is
+// used both for these keys' current top-level home (proof_required_paths/
+// always_review_paths are deprecated there, allow is not) and, via
+// assignAwaitingReviewKey, for proof_required_paths/always_review_paths'
+// current nested home under phases.awaiting_review.
 func listFieldFor(cfg *Config, key string) *[]string {
 	switch key {
 	case "allow":
@@ -215,97 +319,363 @@ func listFieldFor(cfg *Config, key string) *[]string {
 	}
 }
 
+// cutKeyValue splits a trimmed "key: value" line into its space-trimmed
+// parts. ok is false when there is no ':' at all — trimmed isn't shaped like
+// a key line (blank and list-item lines are filtered by callers before this
+// runs).
+func cutKeyValue(trimmed string) (key, value string, ok bool) {
+	k, v, found := strings.Cut(trimmed, ":")
+	if !found {
+		return "", "", false
+	}
+	return strings.TrimSpace(k), strings.TrimSpace(v), true
+}
+
+// indentOf counts line's leading space characters — parseYAML's nested
+// blocks (ship:, phases:, and phases:'s own per-phase sub-blocks) are
+// indentation-scoped: a block's content is every contiguous line indented
+// past its header, blank/comment lines skipped over without ending it.
+// Tabs aren't recognized as indentation; encodeYAML never emits them.
+func indentOf(line string) int {
+	n := 0
+	for _, r := range line {
+		if r != ' ' {
+			break
+		}
+		n++
+	}
+	return n
+}
+
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
-// (# to end of line, outside quotes), blank lines, top-level `key: value`
-// scalars (base_branch, worker_placement, launcher, forge, status_page,
-// worktree_dir, brief_note, review_note, ship_verify_command,
-// gate_verify_command, worktree_bootstrap_command, title_prefix_template,
-// owner_stale_after, review_effort, max_diff_lines, rework_budget; value
-// optionally quoted, plus
-// deprecatedKeyAliases' old names), a top-level list key (`allow`, `proof_required_paths`,
-// `always_review_paths`) followed by indented `- value` list items, and a
-// dotted `phase.<name>.skip`/`phase.<name>.deny` key per protocol.
-// ConfigurablePhases (see parsePhaseKey/assignPhaseKey) — an unrecognized
-// phase name or subkey under that namespace is a hard error, unlike an
-// unrelated unknown top-level key, which is ignored (along with any
-// indented block under it),
-// so a future config key this version doesn't know about doesn't break
-// parsing — the same forward-compatibility internal/config's TOML parser
-// gives unknown sections.
+// (# to end of line, outside quotes), blank lines, region 1's top-level
+// `key: value` scalars (base_branch, worker_placement, launcher, forge,
+// status_page, worktree_dir, brief_note, worktree_bootstrap_command,
+// owner_stale_after, rework_budget; value optionally quoted) and its one
+// top-level list key (`allow`); a top-level `ship:` block (see
+// parseShipBlock) and a top-level `phases:` block (see parsePhasesBlock,
+// parsePhaseSubBlock); legacyFlatKeys' deprecated flat top-level keys and
+// the deprecated dotted `phase.<name>.skip`/`phase.<name>.deny` key (see
+// parsePhaseKey/assignPhaseKey) — both still parse into their current
+// field/location, recording the mapping on Config.Deprecated. An unknown or
+// malformed key at any level is a hard error naming a line number, never
+// silently skipped — a config key argus doesn't recognize is far more often
+// a typo or a stale name than a forward-compatible key a future version will
+// understand, and a silent skip gives an operator no signal either way. The
+// actual per-key dispatch lives in assignTopLevelKey — split out so this
+// loop stays a small, easily-read driver instead of one large per-line
+// switch.
 func parseYAML(data string) (Config, error) {
 	var cfg Config
 	lines := strings.Split(data, "\n")
 	for i := 0; i < len(lines); i++ {
-		trimmed := strings.TrimSpace(stripYAMLComment(lines[i]))
+		raw := lines[i]
+		trimmed := strings.TrimSpace(stripYAMLComment(raw))
 		if trimmed == "" {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "- ") || trimmed == "-" {
 			return Config{}, fmt.Errorf("config: line %d: list item %q outside of a recognized key", i+1, trimmed)
 		}
-		key, rest, ok := strings.Cut(trimmed, ":")
+		if indentOf(raw) != 0 {
+			return Config{}, fmt.Errorf("config: line %d: unexpected indentation", i+1)
+		}
+		key, rest, ok := cutKeyValue(trimmed)
 		if !ok {
 			return Config{}, fmt.Errorf("config: line %d: expected key: value, got %q", i+1, trimmed)
 		}
-		key = strings.TrimSpace(key)
-		rest = strings.TrimSpace(rest)
-
-		if newKey, ok := deprecatedKeyAliases[key]; ok {
-			cfg.Deprecated = append(cfg.Deprecated, DeprecatedKeyUse{Old: key, New: newKey})
-			key = newKey
-		}
-
-		if dst := listFieldFor(&cfg, key); dst != nil {
-			if rest != "" {
-				return Config{}, fmt.Errorf("config: line %d: %q expects a list on following indented lines, not an inline value", i+1, key)
-			}
-			items, consumed, err := parseYAMLList(lines, i+1)
-			if err != nil {
-				return Config{}, err
-			}
-			*dst = items
-			i += consumed
-			continue
-		}
-
-		value, err := unquoteYAML(rest)
-		if err != nil {
-			return Config{}, fmt.Errorf("config: line %d: bad value %q: %w", i+1, rest, err)
-		}
-
-		if phase, subkey, ok := parsePhaseKey(key); ok {
-			consumed, perr := assignPhaseKey(&cfg, phase, subkey, value, lines, i+1, i+1)
-			if perr != nil {
-				return Config{}, perr
-			}
-			i += consumed
-			continue
-		}
-
-		handled, err := assignScalarField(&cfg, key, value, i+1)
+		consumed, err := assignTopLevelKey(&cfg, lines, i, key, rest)
 		if err != nil {
 			return Config{}, err
 		}
-		if !handled && rest == "" {
-			// Unknown key: if it introduces its own indented list block, skip
-			// past it too so the next iteration doesn't trip the "list item
-			// outside of a recognized key" check above.
-			_, consumed, _ := parseYAMLList(lines, i+1)
-			i += consumed
-		}
+		i += consumed
 	}
 	return cfg, nil
+}
+
+// assignTopLevelKey dispatches one top-level "key: value"/"key:" line
+// (already split into key/rest by parseYAML) to whichever region it names:
+// a ship:/phases: block header (parseRegionBlock), a deprecated dotted
+// phase.<name>.<subkey> key (parseDottedPhaseKey), or an ordinary flat
+// scalar/list key, current or deprecated (assignFlatKey). Splitting these
+// three families into their own functions — rather than one large switch —
+// keeps each one's own cyclomatic complexity (and so its CRAP score) low
+// individually, even though the total behavior is unchanged. i is the
+// line's zero-based index in lines, needed by the block-header/dotted-key
+// cases to locate their own following content; line is i+1, the 1-based
+// line number every error message here uses.
+func assignTopLevelKey(cfg *Config, lines []string, i int, key, rest string) (consumed int, err error) {
+	line := i + 1
+	switch key {
+	case "ship":
+		return parseRegionBlock(cfg, lines, i, key, rest, line)
+	case "phases":
+		return parseRegionBlock(cfg, lines, i, key, rest, line)
+	}
+	if phase, subkey, ok := parsePhaseKey(key); ok {
+		return parseDottedPhaseKey(cfg, lines, i, phase, subkey, rest, line)
+	}
+	return assignFlatKey(cfg, lines, i+1, key, rest, line)
+}
+
+// parseRegionBlock handles a top-level "ship:"/"phases:" block-header line:
+// it must carry no inline value (the block's content is its indented body —
+// see parseShipBlock/parsePhasesBlock), and dispatches to the matching
+// block parser.
+func parseRegionBlock(cfg *Config, lines []string, i int, key, rest string, line int) (consumed int, err error) {
+	if rest != "" {
+		return 0, fmt.Errorf("config: line %d: %q expects a nested block, not an inline value", line, key)
+	}
+	if key == "ship" {
+		return parseShipBlock(cfg, lines, i+1, 0)
+	}
+	return parsePhasesBlock(cfg, lines, i+1, 0)
+}
+
+// parseDottedPhaseKey handles a deprecated dotted phase.<name>.<subkey>
+// top-level key (see parsePhaseKey/assignPhaseKey) — split out of
+// assignTopLevelKey purely to keep that dispatcher's own branching minimal.
+func parseDottedPhaseKey(cfg *Config, lines []string, i int, phase protocol.Phase, subkey, rest string, line int) (consumed int, err error) {
+	value, uerr := unquoteYAML(rest)
+	if uerr != nil {
+		return 0, fmt.Errorf("config: line %d: bad value %q: %w", line, rest, uerr)
+	}
+	return assignPhaseKey(cfg, phase, subkey, value, lines, i+1, line)
+}
+
+// assignFlatKey handles a top-level key that is neither a ship:/phases:
+// block header nor a dotted phase.<name>.<subkey> key: a region 1 scalar/
+// list key, or one of legacyFlatKeys' deprecated flat forms (which still
+// assigns the same field, recording a Deprecated entry first). An
+// unrecognized key is a hard error naming a line number, never silently
+// skipped. next is lines' index right after this key's own line, for the
+// list-shaped keys (allow, proof_required_paths, always_review_paths) that
+// read their items from following indented lines.
+func assignFlatKey(cfg *Config, lines []string, next int, key, rest string, line int) (consumed int, err error) {
+	if lk, ok := legacyFlatKeys[key]; ok {
+		cfg.Deprecated = append(cfg.Deprecated, DeprecatedKeyUse{Old: key, New: lk.newLoc})
+		key = lk.assignAs
+	}
+
+	if dst := listFieldFor(cfg, key); dst != nil {
+		if rest != "" {
+			return 0, fmt.Errorf("config: line %d: %q expects a list on following indented lines, not an inline value", line, key)
+		}
+		items, listConsumed, lerr := parseYAMLList(lines, next)
+		if lerr != nil {
+			return 0, lerr
+		}
+		*dst = items
+		return listConsumed, nil
+	}
+
+	value, verr := unquoteYAML(rest)
+	if verr != nil {
+		return 0, fmt.Errorf("config: line %d: bad value %q: %w", line, rest, verr)
+	}
+	handled, herr := assignScalarField(cfg, key, value, line)
+	if herr != nil {
+		return 0, herr
+	}
+	if !handled {
+		return 0, fmt.Errorf("config: line %d: unrecognized key %q", line, key)
+	}
+	return 0, nil
+}
+
+// parseShipBlock parses the indented body of a top-level `ship:` key — the
+// argus-side actions that run after a worker is done, initiated by the
+// operator, so they get their own region instead of living under phases:.
+// start is the line after "ship:"; headerIndent is ship:'s own indentation
+// (always 0 — parseYAML only ever calls this for a top-level ship: line).
+// An unrecognized subkey is a hard error, the same treatment every other
+// namespace here gives a typo. Returns how many lines belong to the block,
+// for the caller to skip past.
+func parseShipBlock(cfg *Config, lines []string, start, headerIndent int) (consumed int, err error) {
+	i := start
+	for ; i < len(lines); i++ {
+		raw := lines[i]
+		trimmed := strings.TrimSpace(stripYAMLComment(raw))
+		if trimmed == "" {
+			continue
+		}
+		if indentOf(raw) <= headerIndent {
+			break
+		}
+		key, rest, ok := cutKeyValue(trimmed)
+		if !ok {
+			return 0, fmt.Errorf("config: line %d: expected key: value, got %q", i+1, trimmed)
+		}
+		value, uerr := unquoteYAML(rest)
+		if uerr != nil {
+			return 0, fmt.Errorf("config: line %d: bad value %q: %w", i+1, rest, uerr)
+		}
+		switch key {
+		case "verify_command":
+			cfg.ShipVerifyCommand = value
+		case "title_prefix_template":
+			cfg.TitlePrefixTemplate = value
+		default:
+			return 0, fmt.Errorf("config: line %d: unrecognized ship key %q", i+1, key)
+		}
+	}
+	return i - start, nil
+}
+
+// parsePhasesBlock parses the indented body of a top-level `phases:` key:
+// one nested block per worker-lifecycle phase name (protocol.
+// ConfigurablePhases), each holding that phase's own live allow/deny/skip
+// rules plus, only for the terminal awaiting_review phase, the gate/review
+// cluster (see parsePhaseSubBlock). start is the line after "phases:";
+// headerIndent is phases:'s own indentation. An unrecognized phase name is a
+// hard error, the same treatment the deprecated dotted form
+// (assignPhaseKey) already gives it.
+func parsePhasesBlock(cfg *Config, lines []string, start, headerIndent int) (consumed int, err error) {
+	i := start
+	for ; i < len(lines); i++ {
+		raw := lines[i]
+		trimmed := strings.TrimSpace(stripYAMLComment(raw))
+		if trimmed == "" {
+			continue
+		}
+		phaseIndent := indentOf(raw)
+		if phaseIndent <= headerIndent {
+			break
+		}
+		key, rest, ok := cutKeyValue(trimmed)
+		if !ok {
+			return 0, fmt.Errorf("config: line %d: expected key: value, got %q", i+1, trimmed)
+		}
+		if rest != "" {
+			return 0, fmt.Errorf("config: line %d: phases.%s expects a nested block, not an inline value", i+1, key)
+		}
+		phase := protocol.Phase(key)
+		if !slices.Contains(protocol.ConfigurablePhases, phase) {
+			return 0, fmt.Errorf("config: line %d: unrecognized phase %q", i+1, phase)
+		}
+		sub, serr := parsePhaseSubBlock(cfg, phase, lines, i+1, phaseIndent)
+		if serr != nil {
+			return 0, serr
+		}
+		i += sub
+	}
+	return i - start, nil
+}
+
+// parsePhaseSubBlock parses one phase's nested body inside `phases:`:
+// allow/deny/skip, live on every configurable phase, plus (only under
+// awaiting_review) the gate/review cluster named in awaitingReviewOnlyKeys —
+// a gate/review key under any other phase is a hard error naming the phase
+// it actually belongs to, so the config can never misrepresent when
+// something fires. start is the line after "<phase>:"; headerIndent is the
+// phase key's own indentation. cfg.Phases only gains an entry for phase if
+// allow/deny/skip actually appeared — a phase configured with only gate/
+// review keys leaves the phase policy map untouched, since those keys are
+// plain Config fields, not part of a phase's policy.
+func parsePhaseSubBlock(cfg *Config, phase protocol.Phase, lines []string, start, headerIndent int) (consumed int, err error) {
+	policy := cfg.Phases[phase]
+	touchedPolicy := false
+	i := start
+	for ; i < len(lines); i++ {
+		raw := lines[i]
+		trimmed := strings.TrimSpace(stripYAMLComment(raw))
+		if trimmed == "" {
+			continue
+		}
+		if indentOf(raw) <= headerIndent {
+			break
+		}
+		key, rest, ok := cutKeyValue(trimmed)
+		if !ok {
+			return 0, fmt.Errorf("config: line %d: expected key: value, got %q", i+1, trimmed)
+		}
+		line := i + 1
+		switch key {
+		case "skip":
+			b, perr := strconv.ParseBool(rest)
+			if perr != nil {
+				return 0, fmt.Errorf("config: line %d: phases.%s.skip: %w", line, phase, perr)
+			}
+			policy.Skip = b
+			touchedPolicy = true
+		case "deny", "allow":
+			if rest != "" {
+				return 0, fmt.Errorf("config: line %d: phases.%s.%s expects a list on following indented lines, not an inline value", line, phase, key)
+			}
+			items, lc, lerr := parseYAMLList(lines, i+1)
+			if lerr != nil {
+				return 0, lerr
+			}
+			if key == "deny" {
+				policy.Deny = items
+			} else {
+				policy.Allow = items
+			}
+			touchedPolicy = true
+			i += lc
+		default:
+			if !slices.Contains(awaitingReviewOnlyKeys, key) {
+				return 0, fmt.Errorf("config: line %d: unrecognized phase key %q", line, key)
+			}
+			if phase != protocol.PhaseAwaitingReview {
+				return 0, fmt.Errorf("config: line %d: %q is only valid under phases.awaiting_review (the gate/review cluster fires once, entering the terminal phase), not phases.%s", line, key, phase)
+			}
+			extra, aerr := assignAwaitingReviewKey(cfg, key, rest, lines, i+1, line)
+			if aerr != nil {
+				return 0, aerr
+			}
+			i += extra
+		}
+	}
+	if touchedPolicy {
+		if cfg.Phases == nil {
+			cfg.Phases = protocol.PhaseConfig{}
+		}
+		cfg.Phases[phase] = policy
+	}
+	return i - start, nil
+}
+
+// assignAwaitingReviewKey sets one gate/review cluster field
+// (awaitingReviewOnlyKeys) from inside phases.awaiting_review, reusing
+// listFieldFor/assignScalarField's own field dispatch — the same functions
+// that handle these keys' deprecated flat top-level form — so there is
+// exactly one place that knows how to parse each value, however it arrives.
+// consumed is how many extra lines a list-shaped key (proof_required_paths/
+// always_review_paths) read past line, for the caller to skip past.
+func assignAwaitingReviewKey(cfg *Config, key, value string, lines []string, next, line int) (consumed int, err error) {
+	if dst := listFieldFor(cfg, key); dst != nil {
+		if value != "" {
+			return 0, fmt.Errorf("config: line %d: %q expects a list on following indented lines, not an inline value", line, key)
+		}
+		items, lc, lerr := parseYAMLList(lines, next)
+		if lerr != nil {
+			return 0, lerr
+		}
+		*dst = items
+		return lc, nil
+	}
+	unquoted, uerr := unquoteYAML(value)
+	if uerr != nil {
+		return 0, fmt.Errorf("config: line %d: bad value %q: %w", line, value, uerr)
+	}
+	if _, serr := assignScalarField(cfg, key, unquoted, line); serr != nil {
+		return 0, serr
+	}
+	return 0, nil
 }
 
 // assignScalarField sets cfg's field for one of parseYAML's scalar keys
 // (base_branch, worker_placement, launcher, forge, status_page, worktree_dir,
 // brief_note, review_note, ship_verify_command, gate_verify_command,
 // worktree_bootstrap_command, title_prefix_template, owner_stale_after,
-// review_effort, max_diff_lines, rework_budget — key is already the canonical name by the
-// time it reaches here, deprecatedKeyAliases having been applied by the
-// caller), reporting whether key was recognized so parseYAML can still skip
-// an unrecognized key's indented block. line is the 1-based source line,
-// for error messages.
+// review_effort, max_diff_lines, rework_budget — key is already the
+// canonical field name by the time it reaches here, legacyFlatKeys having
+// been applied by the caller for a deprecated flat key, and this same switch
+// being reused directly by assignAwaitingReviewKey for these keys' current
+// nested location), reporting whether key was recognized so parseYAML can
+// error on an unrecognized top-level key instead of silently ignoring it.
+// line is the 1-based source line, for error messages.
 func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 	switch key {
 	case "base_branch":

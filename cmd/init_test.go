@@ -18,7 +18,7 @@ import (
 // prompt for, with the reason it's fine to stay hand-edit-only (see
 // schemas/config.schema.json).
 var initPromptExemptFields = map[string]string{
-	"Phases": "a per-phase policy map (skip/deny per protocol.ConfigurablePhases entry), not a single scalar or flat list runInit's interactive prompts can represent — hand-edit .argus/config.yml's phase.<name>.<subkey> keys directly, with schemas/config.schema.json's patternProperties giving editor validation/autocomplete.",
+	"Phases": "a per-phase policy map (allow/deny/skip per protocol.ConfigurablePhases entry), not a single scalar or flat list runInit's interactive prompts can represent — hand-edit .argus/config.yml's nested phases.<name>.<subkey> blocks directly, with schemas/config.schema.json's per-phase definitions giving editor validation/autocomplete.",
 }
 
 const wantConfigFieldCount = 21 // repoconfig.Config's current field count
@@ -403,6 +403,50 @@ func TestRunInitPromptsSetEveryConfigField(t *testing.T) {
 		}
 		if v.Field(i).IsZero() {
 			t.Errorf("Config field %q is still zero after every prompt was answered — runInit has no prompt for it", name)
+		}
+	}
+}
+
+// TestRunInitWritesNestedShipAndPhasesShape confirms runInit's Save call
+// emits the current nested ship:/phases: regions end to end — not just that
+// repoconfig.Load can read the fields back (TestRunInitPromptsSetEveryConfigField
+// already covers that), but that the raw file on disk uses the new shape
+// (schemas/config.schema.json) rather than the deprecated flat keys runInit
+// used to write before the region restructure.
+func TestRunInitWritesNestedShipAndPhasesShape(t *testing.T) {
+	dir := t.TempDir()
+	writeMarker(t, dir, "Makefile")
+	cmd := newInitCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	answers := []string{
+		"develop", "Bash(task *)", "custom brief", "250", "6", "terraform", "auth",
+		"tab", "make lint", "make ci", "cp ../.env .env", "high",
+		"codex --full-auto", "..", "45m", "TICKET-{issue}: ", "pay attention", "gitlab",
+		"https://status.example.com",
+	}
+	cmd.SetIn(strings.NewReader(strings.Join(answers, "\n") + "\n"))
+	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	raw, err := os.ReadFile(repoconfig.Path(dir))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	content := string(raw)
+	for _, want := range []string{"\nship:\n", "  verify_command: ", "  title_prefix_template: ", "\nphases:\n", "  awaiting_review:\n", "    gate_verify_command: ", "    max_diff_lines: ", "    review_note: ", "    review_effort: "} {
+		if !strings.Contains(content, want) {
+			t.Errorf("saved config = %q, want it to contain %q", content, want)
+		}
+	}
+	for line := range strings.SplitSeq(content, "\n") {
+		for _, old := range []string{"ship_verify_command:", "gate_verify_command:", "max_diff_lines:", "proof_required_paths:", "always_review_paths:", "review_note:", "review_effort:", "title_prefix_template:"} {
+			if strings.HasPrefix(line, old) {
+				t.Errorf("saved config line %q starts with deprecated flat key %q, want only the nested shape", line, old)
+			}
 		}
 	}
 }

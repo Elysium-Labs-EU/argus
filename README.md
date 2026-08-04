@@ -76,26 +76,37 @@ Two steps, run once per repo checkout.
 
 **1. Scaffold the repo config.** Run `argus init` to scaffold `.argus/config.yml`. It peeks for `Taskfile.yml`, `Makefile`, `package.json`, or `go.mod` (in that order, first match wins) to guess toolchain values; `base_branch` is derived separately, from `refs/remotes/origin/HEAD`. Every key is optional and mirrors a CLI flag, so you can set them once here instead of repeating flags on every run:
 
+Keys are grouped into three regions by *when they actually run*: top-level
+(phase-independent), `ship:` (argus-side, after a verdict), and `phases:`
+(per-worker-lifecycle-phase — live `allow`/`deny`/`skip` on every phase, the
+gate/review cluster only on the terminal `awaiting_review` phase). See
+[`docs/repo-config.md`](docs/repo-config.md) for the full breakdown.
+
 ```yaml
 base_branch: main                  # branch to diff and PR against
 allow: []                          # extra Bash permission entries for every worker
 brief_note: ""                     # text appended to every generated worker brief
-max_diff_lines: 0                  # gate: diffs larger than this escalate (0 disables the ceiling)
-proof_required_paths: []           # gate: paths needing real world proof before auto approval
-always_review_paths: []            # gate: behavior critical paths that always escalate
-gate_verify_command: ""            # gate: shell command re-run in the worktree before approval (e.g. "make lint"); non-zero exit always escalates
-ship_verify_command: ""            # ship: shell command re-run before opening the PR; non-zero exit refuses the ship
 worktree_bootstrap_command: ""     # bootstrap: shell command run once in a freshly created worktree, before the worker is spawned (e.g. copying in gitignored local config); non-zero exit fails worktree creation
 worktree_dir: ""                   # where new worktrees are created (default: sibling of the repo)
 worker_placement: workspace        # "workspace" (new herdr workspace) or "tab" (nested in the current one)
 launcher: claude                   # agent CLI to spawn in each worker pane
 forge: ""                          # "gitlab" or "gitea", for a self-hosted host auto-detect can't identify by hostname alone
 status_page: ""                    # status-page URL to hint at on a self-hosted forge's request/push failure
-review_note: ""                    # text appended to every review prompt
-review_effort: ""                  # reasoning effort passed to the review model
-title_prefix_template: ""          # template for generated PR titles
 owner_stale_after: 30m             # how long a worktree's ownership lease may go quiet before a mismatched caller may proceed
 rework_budget: 0                   # cross-invocation cap on rework rounds per worktree (0 disables it)
+
+ship:
+  verify_command: ""               # shell command re-run before opening the PR; non-zero exit refuses the ship
+  title_prefix_template: ""        # template for generated PR titles
+
+phases:
+  awaiting_review:
+    gate_verify_command: ""        # gate: shell command re-run in the worktree before approval (e.g. "make lint"); non-zero exit always escalates
+    max_diff_lines: 0              # gate: diffs larger than this escalate (0 disables the ceiling)
+    proof_required_paths: []       # gate: paths needing real world proof before auto approval
+    always_review_paths: []        # gate: behavior critical paths that always escalate
+    review_note: ""                # text appended to every review prompt
+    review_effort: ""              # reasoning effort passed to the review model
 ```
 
 **2. Allow argus's own Bash commands.** Run `argus config check --repo . --write` once in the checkout. It adds the `permissions.allow`/`permissions.deny` entries argus needs to `.claude/settings.json`. Skip it and every `argus` call prompts for manual approval — this is the single highest-value setup step, not an optional one. It is per-clone, not per-repo: `.claude/settings.json` is untracked, so it can't propagate through git and every operator running argus from their own checkout has to run it themselves. Scope it away from `ship` to keep `--force` gated:

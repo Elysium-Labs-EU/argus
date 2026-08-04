@@ -12,11 +12,16 @@ var ConfigurablePhases = []Phase{PhasePlanning, PhaseWorking, PhaseSelfTest, Pha
 
 // PhasePolicy is one repo's configured additions for a single phase: Deny
 // adds Bash prefixes on top of DeniedInPhase's floor; Skip drops this
-// policy's own Deny (never the floor). Deny is ordered first for struct
+// policy's own Deny (never the floor). Allow is parsed and schema-validated
+// per phase but has no resolver of its own yet — it is groundwork for the
+// follow-up worker-permissions minimal-rights work (switching workers to
+// dontAsk with a curated per-phase allow set), which needs the per-phase
+// structure to already exist. Deny/Allow are ordered before Skip for struct
 // alignment (fieldalignment-enforced), not logical order.
 type PhasePolicy struct {
-	Deny []string
-	Skip bool
+	Deny  []string
+	Allow []string
+	Skip  bool
 }
 
 // PhaseConfig is a repo's full per-phase policy, keyed by ConfigurablePhases

@@ -26,6 +26,47 @@ brief_note: "Add a focused test and keep task frontend:ci green. Follow the repo
 
 All keys are optional; a missing file is equivalent to an empty one.
 
+## Shape: three regions
+
+Every key lives in one of three regions, grouped by *when it actually runs*,
+and the schema (`schemas/config.schema.json`) enforces per-region/per-phase
+validity at load — a key in the wrong place is a load-time error naming
+where it belongs, not a silent no-op.
+
+- **Top-level** — static repo facts and spawn-time keys that don't vary by
+  worker phase: `base_branch`, `worker_placement`, `forge`, `status_page`,
+  `worktree_dir`, `owner_stale_after`, `rework_budget`,
+  `worktree_bootstrap_command`, `launcher`, `allow`, `brief_note`.
+- **`ship:`** — argus-side actions that run after a worker is `done` and a
+  verdict is recorded, initiated by the operator, not a worker phase:
+  `verify_command`, `title_prefix_template`.
+- **`phases:`** — per-worker-lifecycle-phase keys, one nested block per
+  phase name (`planning`, `working`, `self_test`, `awaiting_review`,
+  `blocked`). `allow`/`deny`/`skip` are live rules checked continuously
+  while a worker reports that phase, valid on every phase; the gate/review
+  cluster (`gate_verify_command`, `max_diff_lines`, `proof_required_paths`,
+  `always_review_paths`, `review_note`, `review_effort`) fires once, on
+  entering the terminal `awaiting_review` phase, and is valid only there.
+
+```yaml
+ship:
+  verify_command: "make ci"          # was ship_verify_command
+
+phases:
+  working:
+    deny: ["docker push"]
+  awaiting_review:
+    gate_verify_command: "make ci"   # was the top-level gate_verify_command
+    max_diff_lines: 800
+    review_note: "Pay extra attention to internal/supervisor changes."
+    review_effort: high
+```
+
+The flat/dotted forms these keys used before this shape existed
+(`ship_verify_command`, `gate_verify_command`, `phase.<name>.deny`, the flat
+review-policy keys) keep parsing for one transition — each emits a one-line
+deprecation warning pointing at its new nested location, never a hard break.
+
 ## Keys
 
 - **`base_branch`** — the branch new worktrees fork from and PRs target.
@@ -77,17 +118,20 @@ All keys are optional; a missing file is equivalent to an empty one.
   diff-counting guidance that mirrors `MeasureDiff`'s own untracked-file
   handling) always follow it — those are argus's own pipeline invariants, not
   something a repo can opt out of.
-- **`gate_verify_command`** — a shell command the gate re-runs inside a worker's
-  worktree once it reaches a terminal phase (e.g. `"make lint"`,
-  `"golangci-lint run"`), closing the gap where a diff earns a clean gate
-  verdict and then fails at `ship`'s `git commit` because the repo's own
-  pre-commit hooks ran a check the gate never reproduced. A non-zero exit
-  (after one retry, to absorb shared-machine flakiness — see
-  `RunGateVerifyCommand`) is an unwaivable escalation: no reviewer verdict can
-  approve past it, the same treatment a reproduced test-claim mismatch gets.
-  Precedence: an explicit `--gate-verify-command` flag (`--verify-cmd` still
-  works as a deprecated alias), then this key, then unset (no command runs —
-  today's prior behavior). Unset by default; a repo owner opts in.
+- **`phases.awaiting_review.gate_verify_command`** — a shell command the gate
+  re-runs inside a worker's worktree once it reaches the terminal
+  `awaiting_review` phase (e.g. `"make lint"`, `"golangci-lint run"`),
+  closing the gap where a diff earns a clean gate verdict and then fails at
+  `ship`'s `git commit` because the repo's own pre-commit hooks ran a check
+  the gate never reproduced. A non-zero exit (after one retry, to absorb
+  shared-machine flakiness — see `RunGateVerifyCommand`) is an unwaivable
+  escalation: no reviewer verdict can approve past it, the same treatment a
+  reproduced test-claim mismatch gets. Precedence: an explicit
+  `--gate-verify-command` flag (`--verify-cmd` still works as a deprecated
+  alias), then this key, then unset (no command runs — today's prior
+  behavior). Unset by default; a repo owner opts in. The flat top-level
+  `gate_verify_command` (and its older alias `verify_command`) still parses
+  as a deprecated form of this key.
 - **`worktree_bootstrap_command`** — a shell command run once, synchronously, inside
   a freshly created worktree, right after `git worktree add` succeeds and
   before the worker's agent is spawned (see `RunWorktreeBootstrapCommand`). Use this

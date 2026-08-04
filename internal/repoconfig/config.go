@@ -172,9 +172,10 @@ type Config struct {
 	// can only add restrictions this way, never remove the floor: Skip drops
 	// this repo's own addition for that phase, not the floor itself.
 	Phases protocol.PhaseConfig
-	// Deprecated is populated only by Load/parseYAML reading an old-named key
-	// (see deprecatedKeyAliases) — never set by anything that constructs a
-	// Config directly, such as runInit's own suggested/cfg values.
+	// Deprecated is populated only by Load/parseYAML reading an old-named or
+	// old-located key (see legacyFlatKeys) — never set by anything that
+	// constructs a Config directly, such as runInit's own suggested/cfg
+	// values.
 	Deprecated []DeprecatedKeyUse
 }
 

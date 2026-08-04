@@ -401,19 +401,23 @@ func TestLoadStripsCommentAfterValueEndingInEscapedBackslash(t *testing.T) {
 	}
 }
 
-func TestLoadUnknownKeyIgnored(t *testing.T) {
+// TestLoadUnknownKeyErrors pins the core fix: an unrecognized key at any
+// level is now a hard error naming a line number, never silently skipped —
+// a silent skip is exactly how a malformed double-nested brief_note could
+// once sit in a config unnoticed.
+func TestLoadUnknownKeyErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
 	content := "future_key: \"something argus doesn't know yet\"\nbase_branch: \"main\"\n"
 	if err := writeFile(path, content); err != nil {
 		t.Fatalf("writeFile: %v", err)
 	}
-	got, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(unknown key): want error, got nil")
 	}
-	if got.BaseBranch != "main" {
-		t.Errorf("BaseBranch = %q, want main", got.BaseBranch)
+	if !strings.Contains(err.Error(), "line 1") || !strings.Contains(err.Error(), "future_key") {
+		t.Errorf("Load error = %q, want it to name line 1 and future_key", err.Error())
 	}
 }
 
@@ -451,8 +455,8 @@ func TestLoadDeprecatedKeyUseRecorded(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	want := []DeprecatedKeyUse{
-		{Old: "ship_lint", New: "ship_verify_command"},
-		{Old: "verify_command", New: "gate_verify_command"},
+		{Old: "ship_lint", New: "ship.verify_command"},
+		{Old: "verify_command", New: "phases.awaiting_review.gate_verify_command"},
 		{Old: "worktree_setup_cmd", New: "worktree_bootstrap_command"},
 	}
 	if !reflect.DeepEqual(got.Deprecated, want) {
@@ -487,7 +491,7 @@ func TestLoadIntermediateWorktreeSetupCommandNameStillParses(t *testing.T) {
 func TestLoadDeprecatedEmptyWhenOnlyNewNamesUsed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
-	content := "ship_verify_command: \"make ci\"\ngate_verify_command: \"make lint\"\nworktree_bootstrap_command: \"cp ../.env .env\"\n"
+	content := "worktree_bootstrap_command: \"cp ../.env .env\"\n\nship:\n  verify_command: \"make ci\"\n\nphases:\n  awaiting_review:\n    gate_verify_command: \"make lint\"\n"
 	if err := writeFile(path, content); err != nil {
 		t.Fatalf("writeFile: %v", err)
 	}
@@ -496,7 +500,10 @@ func TestLoadDeprecatedEmptyWhenOnlyNewNamesUsed(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(got.Deprecated) != 0 {
-		t.Errorf("Deprecated = %+v, want empty when only new names are used", got.Deprecated)
+		t.Errorf("Deprecated = %+v, want empty when only new names/locations are used", got.Deprecated)
+	}
+	if got.ShipVerifyCommand != "make ci" || got.GateVerifyCommand != "make lint" || got.WorktreeBootstrapCommand != "cp ../.env .env" {
+		t.Errorf("values = %+v, want the same values under the new nested shape", got)
 	}
 }
 
@@ -590,6 +597,24 @@ func TestLoadMalformedLineErrors(t *testing.T) {
 	}
 }
 
+// TestLoadStrayListItemAtTopLevelErrors covers parseYAML's own
+// list-item-outside-a-recognized-key check: a top-level "- value" line with
+// no preceding list key (allow:, proof_required_paths:, ...) to belong to.
+func TestLoadStrayListItemAtTopLevelErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "- stray\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(stray top-level list item): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "outside of a recognized key") {
+		t.Errorf("Load error = %q, want it to mention outside of a recognized key", err.Error())
+	}
+}
+
 // TestLoadUnreadablePathNonNotExistError covers Load's other os.ReadFile
 // branch: a path whose parent component exists but isn't a directory fails
 // with ENOTDIR, not ENOENT, so os.IsNotExist(err) is false and Load must
@@ -645,24 +670,23 @@ func TestSaveWriteFileErrorWrapped(t *testing.T) {
 	}
 }
 
-// TestLoadUnknownKeyWithOwnListBlockSkipsPastIt covers parseYAML's
-// unknown-key-introduces-a-list-block branch: the unrecognized key's
-// indented "- " lines must be skipped as a unit, not tripped over by the
-// "list item outside of a recognized key" check, and parsing must resume
-// correctly at the next real key.
-func TestLoadUnknownKeyWithOwnListBlockSkipsPastIt(t *testing.T) {
+// TestLoadUnknownKeyWithListBlockErrors covers the same unknown-top-level-key
+// hard error as TestLoadUnknownKeyErrors, but for a key shaped like a list
+// block (its own indented "- " lines) rather than a scalar — the error must
+// fire at the unknown key itself, before any of its own content is read.
+func TestLoadUnknownKeyWithListBlockErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
 	content := "future_list_key:\n  - one\n  - two\nbase_branch: \"main\"\n"
 	if err := writeFile(path, content); err != nil {
 		t.Fatalf("writeFile: %v", err)
 	}
-	got, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(unknown list-shaped key): want error, got nil")
 	}
-	if got.BaseBranch != "main" {
-		t.Errorf("BaseBranch = %q, want %q (parsing must resume past the skipped list block)", got.BaseBranch, "main")
+	if !strings.Contains(err.Error(), "future_list_key") {
+		t.Errorf("Load error = %q, want it to mention future_list_key", err.Error())
 	}
 }
 
@@ -718,6 +742,25 @@ func TestLoadPhaseSkipBadBoolErrors(t *testing.T) {
 	}
 }
 
+// TestLoadDottedPhaseKeyBadQuotedValueErrors covers parseDottedPhaseKey's own
+// unquoteYAML error path — distinct from assignPhaseKey's ParseBool error
+// above, since the bad quoting is caught before the value ever reaches
+// assignPhaseKey.
+func TestLoadDottedPhaseKeyBadQuotedValueErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "phase.planning.skip: \"\\x\"\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(bad quoted dotted phase key value): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "bad value") {
+		t.Errorf("Load error = %q, want it to mention bad value", err.Error())
+	}
+}
+
 // TestLoadPhaseDenyInlineValueErrors covers assignPhaseKey's deny-must-be-a-
 // list-not-an-inline-value error path.
 func TestLoadPhaseDenyInlineValueErrors(t *testing.T) {
@@ -769,26 +812,23 @@ func TestLoadReworkBudgetBadIntErrors(t *testing.T) {
 	}
 }
 
-// TestLoadBarePhaseKeyIgnored pins parsePhaseKey's ok=false case: a
-// phase.<name> key with no ".<subkey>" is not shaped like the schema expects,
-// so it falls through as an ordinary unrecognized top-level key (ignored)
-// rather than the "unrecognized phase policy key" hard error that a
-// phase.<name>.<badsubkey> key gets.
-func TestLoadBarePhaseKeyIgnored(t *testing.T) {
+// TestLoadBarePhaseKeyErrors pins parsePhaseKey's ok=false case: a
+// phase.<name> key with no ".<subkey>" is not shaped like the schema
+// expects, so it falls through as an ordinary unrecognized top-level key —
+// a hard error, same as any other unknown key — rather than the
+// "unrecognized phase policy key" error a phase.<name>.<badsubkey> key gets.
+func TestLoadBarePhaseKeyErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
 	if err := writeFile(path, "phase.planning: true\nbase_branch: \"main\"\n"); err != nil {
 		t.Fatalf("writeFile: %v", err)
 	}
-	got, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load(bare phase.planning key): %v", err)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(bare phase.planning key): want error, got nil")
 	}
-	if got.BaseBranch != "main" {
-		t.Errorf("BaseBranch = %q, want %q", got.BaseBranch, "main")
-	}
-	if len(got.Phases) != 0 {
-		t.Errorf("Phases = %+v, want empty (bare key must not be treated as a phase policy)", got.Phases)
+	if !strings.Contains(err.Error(), "phase.planning") {
+		t.Errorf("Load error = %q, want it to mention phase.planning", err.Error())
 	}
 }
 
