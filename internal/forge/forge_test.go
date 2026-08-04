@@ -146,7 +146,7 @@ func TestOpenPRSurfacesAPIMessage(t *testing.T) {
 // a test drive a client that issues more than one request per method call
 // (PRChecks fetches the PR for its head sha, then the check-runs for that
 // sha). A call past the end of replies repeats the last one.
-func sequencedHTTP(t *testing.T, replies []string, code int) *http.Client {
+func sequencedHTTP(t *testing.T, replies []string) *http.Client {
 	t.Helper()
 	call := 0
 	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -155,7 +155,7 @@ func sequencedHTTP(t *testing.T, replies []string, code int) *http.Client {
 			i = len(replies) - 1
 		}
 		call++
-		return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(replies[i])), Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(replies[i])), Header: make(http.Header)}, nil
 	})}
 }
 
@@ -166,7 +166,7 @@ func TestGitHubPRChecksMergeReadyWhenAllSucceed(t *testing.T) {
 			{"name":"build","status":"completed","conclusion":"success","html_url":"https://github.com/o/r/runs/1"},
 			{"name":"lint","status":"completed","conclusion":"neutral"}
 		]}`,
-	}, 200)
+	})
 	f, err := New("github.com", "ght", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -195,7 +195,7 @@ func TestGitHubPRChecksNamesFailingCheck(t *testing.T) {
 			{"name":"build","status":"completed","conclusion":"success"},
 			{"name":"test","status":"completed","conclusion":"failure","details_url":"https://github.com/o/r/runs/2"}
 		]}`,
-	}, 200)
+	})
 	f, err := New("github.com", "ght", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -222,7 +222,7 @@ func TestGitHubPRChecksInFlightIsNotTerminal(t *testing.T) {
 	hc := sequencedHTTP(t, []string{
 		`{"head":{"sha":"deadbeef"}}`,
 		`{"check_runs":[{"name":"build","status":"in_progress"}]}`,
-	}, 200)
+	})
 	f, err := New("github.com", "ght", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -384,6 +384,181 @@ func TestDoAppendsConfiguredStatusPageForSelfHostedHost(t *testing.T) {
 func TestNewUnknownKindErrors(t *testing.T) {
 	if _, err := New("codeberg.org", "secret", nil, Kind("bogus"), ""); err == nil {
 		t.Error("want an error for an unrecognized forge kind")
+	}
+}
+
+func TestCheckFailed(t *testing.T) {
+	cases := []struct {
+		name       string
+		state      string
+		conclusion string
+		want       bool
+	}{
+		{"not terminal never fails regardless of conclusion", "in_progress", "failure", false},
+		{"terminal success passes", "completed", "success", false},
+		{"terminal neutral passes", "completed", "neutral", false},
+		{"terminal skipped passes", "completed", "skipped", false},
+		{"terminal empty conclusion defaults to failing", "completed", "", true},
+		{"terminal failure fails", "completed", "failure", true},
+		{"terminal timed_out fails", "completed", "timed_out", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			check := Check{State: c.state, Conclusion: c.conclusion}
+			if got := check.Failed(); got != c.want {
+				t.Errorf("Check{State:%q,Conclusion:%q}.Failed() = %v, want %v", c.state, c.conclusion, got, c.want)
+			}
+		})
+	}
+}
+
+func TestOpenPRDecodeErrorOnMalformedJSON(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `not json`, 201)
+	f, err := New("codeberg.org", "secret", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r"})
+	if err == nil || !strings.Contains(err.Error(), "decoding pull request response") {
+		t.Errorf("OpenPR error = %v, want it to mention decoding pull request response", err)
+	}
+}
+
+func TestFindPRDecodeErrorOnNonArrayBody(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"not":"an array"}`, 200)
+	f, err := New("codeberg.org", "secret", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, _, err = f.FindPR(context.Background(), "o", "r", "feat-x")
+	if err == nil || !strings.Contains(err.Error(), "decoding pull request list") {
+		t.Errorf("FindPR error = %v, want it to mention decoding pull request list", err)
+	}
+}
+
+func TestPRChecksNoHeadSHA(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"head":{"sha":""}}`, 200)
+	f, err := New("github.com", "ght", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.PRChecks(context.Background(), "o", "r", 7)
+	if err == nil || !strings.Contains(err.Error(), "pull request 7 has no head sha") {
+		t.Errorf("PRChecks error = %v, want it to mention the missing head sha", err)
+	}
+}
+
+func TestPRChecksPRLookupDecodeError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `not json`, 200)
+	f, err := New("github.com", "ght", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.PRChecks(context.Background(), "o", "r", 7)
+	if err == nil || !strings.Contains(err.Error(), "decoding pull request response") {
+		t.Errorf("PRChecks error = %v, want it to mention decoding pull request response", err)
+	}
+}
+
+func TestPRChecksCheckRunsDecodeError(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head":{"sha":"deadbeef"}}`,
+		`not json`,
+	})
+	f, err := New("github.com", "ght", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.PRChecks(context.Background(), "o", "r", 7)
+	if err == nil || !strings.Contains(err.Error(), "decoding check runs response") {
+		t.Errorf("PRChecks error = %v, want it to mention decoding check runs response", err)
+	}
+}
+
+func TestPRChecksPRLookupNonSuccessPropagatesDoError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"not found"}`, 404)
+	f, err := New("github.com", "ght", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.PRChecks(context.Background(), "o", "r", 7)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("PRChecks error = %v, want the surfaced API message from the failed PR lookup", err)
+	}
+	if strings.Contains(err.Error(), "decoding") {
+		t.Errorf("PRChecks error = %v, want the do() error propagated as-is, not a decode error", err)
+	}
+}
+
+func TestFetchIssueNonSuccessPropagatesDoError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"no such issue"}`, 404)
+	f, err := New("codeberg.org", "secret", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.FetchIssue(context.Background(), "o", "r", 42)
+	if err == nil || !strings.Contains(err.Error(), "no such issue") {
+		t.Errorf("FetchIssue error = %v, want the surfaced API message", err)
+	}
+}
+
+func TestFetchIssueDecodeErrorOnMalformedJSON(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `not json`, 200)
+	f, err := New("codeberg.org", "secret", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.FetchIssue(context.Background(), "o", "r", 42)
+	if err == nil || !strings.Contains(err.Error(), "decoding issue response") {
+		t.Errorf("FetchIssue error = %v, want it to mention decoding issue response", err)
+	}
+}
+
+func TestDoBadMethodWrapsBuildingRequestError(t *testing.T) {
+	r := &rest{http: &http.Client{}, accept: "application/json"}
+	_, err := r.do(context.Background(), "BAD METHOD", "http://example.com", nil)
+	if err == nil || !strings.Contains(err.Error(), "building request") {
+		t.Errorf("do() error = %v, want it to mention building request", err)
+	}
+}
+
+// TestDoOmitsStatusNoteForClientError pins svcstatus.WorthMentioning's own
+// split: a 4xx is the caller's fault (bad request, wrong path), not the
+// host's, so unlike the 5xx case in TestDoAppendsConfiguredStatusPageForSelfHostedHost
+// the error must not point at a status page that can't explain it.
+func TestDoOmitsStatusNoteForClientError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"branch already exists"}`, 404)
+	f, err := New("codeberg.org", "secret", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r"})
+	if err == nil {
+		t.Fatal("want an error for a 404 response")
+	}
+	if strings.Contains(err.Error(), "status.codeberg.org") {
+		t.Errorf("OpenPR error = %q, want no status-page note for a 4xx", err.Error())
+	}
+}
+
+func TestAPIMessage(t *testing.T) {
+	longBody := strings.Repeat("x", 400)
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"json with message field returns the message", `{"message":"custom failure"}`, "custom failure"},
+		{"json without message field falls back to raw body", `{"foo":"bar"}`, `{"foo":"bar"}`},
+		{"non-JSON body falls back to raw body", "not json at all", "not json at all"},
+		{"body over 300 bytes is truncated", longBody, longBody[:300]},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := apiMessage([]byte(c.body)); got != c.want {
+				t.Errorf("apiMessage(%q) = %q, want %q", c.body, got, c.want)
+			}
+		})
 	}
 }
 
