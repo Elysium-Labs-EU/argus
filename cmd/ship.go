@@ -346,9 +346,7 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	}
 
 	if a.jiraIssue != "" {
-		if lc.JiraNotified {
-			_, _ = fmt.Fprintf(out, "%s already notified Jira issue %s for this PR on a prior ship — skipping duplicate post-ship update\n", ui.LabelInfo.Render("i"), a.jiraIssue)
-		} else if postShipJira(ctx, out, logger, a, pr) {
+		if postShipJira(ctx, out, logger, a, pr, lc.JiraNotified) {
 			lc.JiraNotified = true
 			if lerr := protocol.WriteLifecycle(a.worktree, lc); lerr != nil {
 				logger.Fail("record_lifecycle", target.branch, lerr)
@@ -373,22 +371,25 @@ type jiraIssueWriter interface {
 
 // postShipJira closes the loop back to Jira once a PR has actually been
 // opened: optionally moves the issue to a new status, optionally reassigns
-// it, and always leaves a comment linking the PR — so an operator using
+// it, and leaves a comment linking the PR — so an operator using
 // --jira-issues as work input (see cmd/supervise.go) doesn't have to update
-// the ticket by hand afterward. It only runs when --jira-issue is set and
-// not already recorded as notified (see shipChange) and is otherwise
-// entirely best-effort: a failure here is logged and printed as a warning
-// but never undoes the ship, which has already succeeded by the time this
-// runs. It reports whether the comment actually posted, so shipChange can
-// record JiraNotified only once the one non-idempotent step (Jira has no
-// FindPR-equivalent to de-dupe a comment against) has actually landed —
-// transition/assign are naturally idempotent (an absolute state to move to
-// or assign to) and are retried unconditionally alongside it.
-func postShipJira(ctx context.Context, out io.Writer, logger *eventlog.Logger, a *shipArgs, pr forge.PR) bool {
+// the ticket by hand afterward. It only runs when --jira-issue is set and is
+// otherwise entirely best-effort: a failure here is logged and printed as a
+// warning but never undoes the ship, which has already succeeded by the time
+// this runs.
+//
+// alreadyNotified reflects Lifecycle.JiraNotified from a prior ship of this
+// same PR: transition/assign are naturally idempotent (an absolute state to
+// move to or assign to), so they run unconditionally on every retry, but the
+// comment has no FindPR-equivalent to de-dupe against and is skipped once
+// notified. The bool result mirrors alreadyNotified once it's true, so
+// shipChange's write of Lifecycle.JiraNotified stays a no-op rather than an
+// unwind on a retry where the comment step didn't run.
+func postShipJira(ctx context.Context, out io.Writer, logger *eventlog.Logger, a *shipArgs, pr forge.PR, alreadyNotified bool) bool {
 	c, err := newJiraClient()
 	if err != nil {
 		warnJiraPostShip(out, logger, a.jiraIssue, err)
-		return false
+		return alreadyNotified
 	}
 	if a.jiraTransition != "" {
 		if terr := c.Transition(ctx, a.jiraIssue, a.jiraTransition); terr != nil {
@@ -403,6 +404,10 @@ func postShipJira(ctx context.Context, out io.Writer, logger *eventlog.Logger, a
 		} else {
 			logger.Action("jira_assign", a.jiraIssue, "ok", a.jiraAssignee)
 		}
+	}
+	if alreadyNotified {
+		_, _ = fmt.Fprintf(out, "%s already notified Jira issue %s for this PR on a prior ship — skipping duplicate comment\n", ui.LabelInfo.Render("i"), a.jiraIssue)
+		return true
 	}
 	if cerr := c.Comment(ctx, a.jiraIssue, "Opened "+pr.HTMLURL); cerr != nil {
 		warnJiraPostShip(out, logger, a.jiraIssue, cerr)
