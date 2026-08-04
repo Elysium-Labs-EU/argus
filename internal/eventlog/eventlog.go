@@ -80,10 +80,16 @@ func Open(home, command string, debug io.Writer) (logger *Logger, path string, c
 // OS user first since that works even without git configured; $USER covers the
 // rare environment where os/user can't resolve (e.g. no matching /etc/passwd entry).
 func resolveActor() string {
-	if u, err := user.Current(); err == nil && u.Username != "" {
+	return resolveActorWith(user.Current, os.Getenv)
+}
+
+// resolveActorWith takes user.Current and os.Getenv as parameters so tests can
+// force the fallback branch without depending on the real OS user database.
+func resolveActorWith(currentUser func() (*user.User, error), getenv func(string) string) string {
+	if u, err := currentUser(); err == nil && u.Username != "" {
 		return u.Username
 	}
-	return os.Getenv("USER")
+	return getenv("USER")
 }
 
 // Emit records one event. Time, Run, and Command are stamped here so callers only
@@ -122,8 +128,14 @@ func (l *Logger) Fail(action, target string, err error) {
 }
 
 func newRunID() string {
+	return newRunIDWith(rand.Read)
+}
+
+// newRunIDWith takes rand.Read as a parameter so a test can force the
+// exhausted-entropy fallback without actually draining /dev/urandom.
+func newRunIDWith(readRand func([]byte) (int, error)) string {
 	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	if _, err := readRand(b[:]); err != nil {
 		return "run"
 	}
 	return hex.EncodeToString(b[:])
