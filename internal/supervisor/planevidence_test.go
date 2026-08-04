@@ -140,6 +140,117 @@ func TestHasPlanEvidenceChecksEveryTranscriptForTheWorktree(t *testing.T) {
 	}
 }
 
+func TestTranscriptContainsAnyReturnsErrorWhenTranscriptCannotBeOpened(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.jsonl")
+	_, err := transcriptContainsAny(missing, planEvidenceMarkers)
+	if err == nil {
+		t.Fatal("transcriptContainsAny err = nil, want error for a transcript path that doesn't exist")
+	}
+	if !strings.Contains(err.Error(), "opening transcript") {
+		t.Errorf("err = %v, want it to mention opening the transcript", err)
+	}
+}
+
+func TestTranscriptContainsAnyReturnsErrorWhenLineExceedsScannerBuffer(t *testing.T) {
+	// bufio.Scanner caps a single token (one line, no embedded newline) at the
+	// 8MB buffer transcriptContainsAny configures; a longer line must surface
+	// as a scan error rather than being silently skipped like malformed JSON.
+	path := filepath.Join(t.TempDir(), "huge.jsonl")
+	huge := bytes.Repeat([]byte("a"), 9*1024*1024)
+	if err := os.WriteFile(path, huge, 0o600); err != nil {
+		t.Fatalf("write huge transcript: %v", err)
+	}
+	_, err := transcriptContainsAny(path, planEvidenceMarkers)
+	if err == nil {
+		t.Fatal("transcriptContainsAny err = nil, want error for a line exceeding the scanner buffer")
+	}
+	if !strings.Contains(err.Error(), "scanning transcript") {
+		t.Errorf("err = %v, want it to mention scanning the transcript", err)
+	}
+}
+
+func TestHasPlanEvidenceReturnsErrorWithTranscriptCountWhenATranscriptIsUnreadable(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", projectPathReplacer.Replace(planEvidenceTestWorktree))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	// A directory matching the *.jsonl glob opens fine but fails to scan as a
+	// file, forcing HasPlanEvidence down its transcriptContainsAny-error path
+	// instead of the open-error path exercised above.
+	if err := os.Mkdir(filepath.Join(dir, "session-1.jsonl"), 0o755); err != nil {
+		t.Fatalf("mkdir fake transcript: %v", err)
+	}
+	writePlanTranscript(t, home, "session-2",
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{}}]}}`+"\n")
+
+	ok, transcripts, err := HasPlanEvidence(home, planEvidenceTestWorktree)
+	if err == nil {
+		t.Fatal("HasPlanEvidence err = nil, want error when a matched transcript can't be read")
+	}
+	if ok {
+		t.Error("HasPlanEvidence ok = true, want false alongside an error")
+	}
+	if transcripts != 2 {
+		t.Errorf("transcripts checked = %d, want 2 (len(matches) reported even on error)", transcripts)
+	}
+}
+
+func TestHasPlanEvidenceShortCircuitsOnFirstMatchWithoutScanningLaterTranscripts(t *testing.T) {
+	home := t.TempDir()
+	writePlanTranscript(t, home, "session-1",
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{}}]}}`+"\n")
+	dir := filepath.Join(home, ".claude", "projects", projectPathReplacer.Replace(planEvidenceTestWorktree))
+	// session-2 would surface a scan error if HasPlanEvidence ever reached it;
+	// a clean true result here proves the loop returned right after session-1.
+	if err := os.Mkdir(filepath.Join(dir, "session-2.jsonl"), 0o755); err != nil {
+		t.Fatalf("mkdir fake transcript: %v", err)
+	}
+
+	ok, transcripts, err := HasPlanEvidence(home, planEvidenceTestWorktree)
+	if err != nil {
+		t.Fatalf("HasPlanEvidence: %v", err)
+	}
+	if !ok {
+		t.Error("HasPlanEvidence = false, want true for the first-checked transcript's real tool call")
+	}
+	if transcripts != 2 {
+		t.Errorf("transcripts checked = %d, want 2 (both matches, even though only one was scanned)", transcripts)
+	}
+}
+
+func TestHasPlanEvidenceFalseForPrettyPrintedToolUseBlock(t *testing.T) {
+	// transcriptContainsAny parses one JSON object per line; a pretty-printed
+	// (multi-line) tool_use block never round-trips as a single line of valid
+	// JSON, so this pins the compact-JSON assumption rather than treating it
+	// as an accidental gap.
+	home := t.TempDir()
+	pretty := `{
+  "type": "assistant",
+  "message": {
+    "content": [
+      {
+        "type": "tool_use",
+        "name": "TodoWrite"
+      }
+    ]
+  }
+}
+`
+	writePlanTranscript(t, home, "session-1", pretty)
+
+	ok, transcripts, err := HasPlanEvidence(home, planEvidenceTestWorktree)
+	if err != nil {
+		t.Fatalf("HasPlanEvidence: %v", err)
+	}
+	if ok {
+		t.Error("HasPlanEvidence = true, want false for a pretty-printed tool_use block split across lines")
+	}
+	if transcripts != 1 {
+		t.Errorf("transcripts checked = %d, want 1", transcripts)
+	}
+}
+
 func TestGateEscalatesWhenPlanEvidenceMissing(t *testing.T) {
 	st := &workerState{
 		hasFile:         true,
