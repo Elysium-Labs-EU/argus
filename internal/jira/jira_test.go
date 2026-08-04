@@ -601,3 +601,271 @@ func TestNewFromEnv(t *testing.T) {
 		}
 	})
 }
+
+func TestConfigFilePath(t *testing.T) {
+	t.Run("uses JIRA_CONFIG_FILE when set", func(t *testing.T) {
+		t.Setenv(configPathEnvVar, "/custom/path/jira.json")
+		path, err := configFilePath()
+		if err != nil {
+			t.Fatalf("configFilePath: %v", err)
+		}
+		if path != "/custom/path/jira.json" {
+			t.Errorf("path = %q, want /custom/path/jira.json", path)
+		}
+	})
+
+	t.Run("falls back to ~/.argus/jira.json when unset", func(t *testing.T) {
+		t.Setenv(configPathEnvVar, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		path, err := configFilePath()
+		if err != nil {
+			t.Fatalf("configFilePath: %v", err)
+		}
+		want := filepath.Join(home, ".argus", "jira.json")
+		if path != want {
+			t.Errorf("path = %q, want %q", path, want)
+		}
+	})
+}
+
+// TestFetchCloudIDTransportError covers hc.Do failing outright (e.g. a
+// connection refused), as opposed to a non-2xx response the server does
+// manage to send.
+func TestFetchCloudIDTransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := srv.URL
+	srv.Close()
+
+	_, err := fetchCloudID(context.Background(), http.DefaultClient, deadURL)
+	if err == nil || !strings.Contains(err.Error(), "GET") {
+		t.Errorf("want transport error, got %v", err)
+	}
+}
+
+func TestFetchCloudIDBuildRequestError(t *testing.T) {
+	_, err := fetchCloudID(context.Background(), http.DefaultClient, "http://example.com\n")
+	if err == nil || !strings.Contains(err.Error(), "building request") {
+		t.Errorf("want build-request error, got %v", err)
+	}
+}
+
+// TestFetchIssueTransportError covers the issue GET itself failing to
+// connect, after cloudId resolution against a different, live server already
+// succeeded — distinct from a resolution failure.
+func TestFetchIssueTransportError(t *testing.T) {
+	var tenantHits int
+	site := httptest.NewServer(http.HandlerFunc(tenantInfoHandler(&tenantHits)))
+	defer site.Close()
+
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	withMockAtlassianAPI(t, deadURL)
+
+	c := New(site.URL, "dev@example.com", "secret-token", nil)
+	_, err := c.FetchIssue(context.Background(), "PROJ-1")
+	if err == nil || !strings.Contains(err.Error(), "GET") {
+		t.Errorf("want transport error, got %v", err)
+	}
+}
+
+func TestFetchIssueMalformedJSON(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("not json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	_, err := c.FetchIssue(context.Background(), "PROJ-1")
+	if err == nil || !strings.Contains(err.Error(), "decoding issue response") {
+		t.Errorf("want decode error, got %v", err)
+	}
+}
+
+// TestTransitionResolvedBaseError covers Transition returning early when
+// resolvedBase itself fails, before ever calling resolveTransitionID.
+func TestTransitionResolvedBaseError(t *testing.T) {
+	c := New("http://example.com\n", "dev@example.com", "secret-token", nil)
+	err := c.Transition(context.Background(), "PROJ-1", "Done")
+	if err == nil || !strings.Contains(err.Error(), "resolving cloud id") {
+		t.Errorf("want resolvedBase error, got %v", err)
+	}
+}
+
+// TestTransitionSurfacesWriteError covers the POST that applies a resolved
+// transition ID failing with a non-2xx response.
+func TestTransitionSurfacesWriteError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/transitions", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"transitions":[{"id":"21","name":"Done"}]}`))
+		case http.MethodPost:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"errorMessages":["workflow condition failed"]}`))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	err := c.Transition(context.Background(), "PROJ-1", "Done")
+	if err == nil || !strings.Contains(err.Error(), "workflow condition failed") {
+		t.Errorf("want surfaced write error, got %v", err)
+	}
+}
+
+// TestResolveTransitionIDSurfacesReadJSONError covers the GET
+// /transitions lookup itself failing, distinct from a name with no match
+// among a successfully fetched list (see TestTransitionSurfacesUnknownName).
+func TestResolveTransitionIDSurfacesReadJSONError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/issue/PROJ-1/transitions", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"errorMessages":["no such issue"]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	err := c.Transition(context.Background(), "PROJ-1", "Done")
+	if err == nil || !strings.Contains(err.Error(), "no such issue") {
+		t.Errorf("want surfaced readJSON error, got %v", err)
+	}
+}
+
+// TestResolvedBaseErrorPropagates covers Comment, Assign, and Myself all
+// returning early when resolvedBase fails, same as Transition.
+func TestResolvedBaseErrorPropagates(t *testing.T) {
+	c := New("http://example.com\n", "dev@example.com", "secret-token", nil)
+
+	tests := []struct {
+		call func() error
+		name string
+	}{
+		{func() error { return c.Comment(context.Background(), "PROJ-1", "body") }, "Comment"},
+		{func() error { return c.Assign(context.Background(), "PROJ-1", "acc-1") }, "Assign"},
+		{func() error { _, err := c.Myself(context.Background()); return err }, "Myself"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil || !strings.Contains(err.Error(), "resolving cloud id") {
+				t.Errorf("want resolvedBase error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestReadJSONBuildRequestError(t *testing.T) {
+	c := New("https://example.com", "dev@example.com", "secret-token", nil)
+	err := c.readJSON(context.Background(), "http://example.com\n/foo", &struct{}{})
+	if err == nil || !strings.Contains(err.Error(), "building request") {
+		t.Errorf("want build-request error, got %v", err)
+	}
+}
+
+func TestReadJSONTransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := srv.URL
+	srv.Close()
+
+	c := New("https://example.com", "dev@example.com", "secret-token", nil)
+	err := c.readJSON(context.Background(), deadURL, &struct{}{})
+	if err == nil || !strings.Contains(err.Error(), "GET") {
+		t.Errorf("want transport error, got %v", err)
+	}
+}
+
+func TestReadJSONMalformedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	c := New("https://example.com", "dev@example.com", "secret-token", nil)
+	var out struct{ Foo string }
+	if err := c.readJSON(context.Background(), srv.URL, &out); err == nil {
+		t.Error("want unmarshal error for malformed body")
+	}
+}
+
+func TestWriteBuildRequestError(t *testing.T) {
+	c := New("https://example.com", "dev@example.com", "secret-token", nil)
+	err := c.write(context.Background(), http.MethodPost, "http://example.com\n/foo", nil)
+	if err == nil || !strings.Contains(err.Error(), "building request") {
+		t.Errorf("want build-request error, got %v", err)
+	}
+}
+
+func TestWriteTransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := srv.URL
+	srv.Close()
+
+	c := New("https://example.com", "dev@example.com", "secret-token", nil)
+	err := c.write(context.Background(), http.MethodPost, deadURL, nil)
+	if err == nil || !strings.Contains(err.Error(), http.MethodPost) {
+		t.Errorf("want transport error, got %v", err)
+	}
+}
+
+func TestNumberFromKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want int
+	}{
+		{"PROJ-123", 123},
+		{"NODASH", 0},
+		{"PROJ-abc", 0},
+	}
+	for _, tc := range tests {
+		if got := numberFromKey(tc.key); got != tc.want {
+			t.Errorf("numberFromKey(%q) = %d, want %d", tc.key, got, tc.want)
+		}
+	}
+}
+
+func TestAPIMessage(t *testing.T) {
+	t.Run("errorMessages present", func(t *testing.T) {
+		got := apiMessage([]byte(`{"errorMessages":["a","b"]}`))
+		if got != "a; b" {
+			t.Errorf("apiMessage = %q, want %q", got, "a; b")
+		}
+	})
+
+	t.Run("valid JSON without errorMessages falls back to raw body", func(t *testing.T) {
+		body := `{"foo":"bar"}`
+		got := apiMessage([]byte(body))
+		if got != body {
+			t.Errorf("apiMessage = %q, want %q", got, body)
+		}
+	})
+
+	t.Run("non-JSON body falls back to raw body", func(t *testing.T) {
+		got := apiMessage([]byte("plain text error"))
+		if got != "plain text error" {
+			t.Errorf("apiMessage = %q, want %q", got, "plain text error")
+		}
+	})
+
+	t.Run("body over 300 bytes is truncated", func(t *testing.T) {
+		body := strings.Repeat("x", 400)
+		got := apiMessage([]byte(body))
+		if len(got) != 300 || got != body[:300] {
+			t.Errorf("apiMessage len = %d, want 300 (truncated)", len(got))
+		}
+	})
+}
