@@ -345,4 +345,9 @@ func TestBuildPRBodyReport(t *testing.T) {
 			t.Errorf("PR body missing %q:\n%s", want, body)
 		}
 	}
+	// MeasureDiff failed for this base, so the section must be omitted
+	// entirely rather than leaving a "## Change" header with no body under it.
+	if strings.Contains(body, "## Change") {
+		t.Errorf("PR body has a dangling \"## Change\" header despite MeasureDiff failing:\n%s", body)
+	}
 }

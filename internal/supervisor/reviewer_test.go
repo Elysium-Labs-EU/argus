@@ -278,6 +278,13 @@ func TestParseReviewOutputEscapedBracesAndQuotesInLastObject(t *testing.T) {
 	}
 }
 
+func TestParseReviewOutputRejectsUnrecognizedDecision(t *testing.T) {
+	out := []byte(`{"decision":"looks-good-to-me","summary":"ok","findings":[]}`)
+	if _, err := parseReviewOutput(out); err == nil {
+		t.Fatal("want error for a decision outside {approve, request-changes, needs-human}")
+	}
+}
+
 // TestDiffForDistinguishesBadWorktreeFromBadBase is the regression test for
 // issue #393's `review`-specific symptom: a bad --worktree and a bad --base
 // used to both collapse into the identical, undiagnosable "exit status 128"

@@ -190,6 +190,19 @@ func TestParseTOMLHandlesCommentsAndBlankLines(t *testing.T) {
 	}
 }
 
+func TestParseTOMLStripsCommentAfterValueEndingInEscapedBackslash(t *testing.T) {
+	// The trailing \\ is one escaped backslash, not an escaped closing quote,
+	// so the quote right after it still closes the string and the following
+	// " # c" must be recognized as a comment, not kept as part of the value.
+	cfg, err := parseTOML(`[credential]` + "\n" + `anthropic = "a\\" # c` + "\n")
+	if err != nil {
+		t.Fatalf("parseTOML: %v", err)
+	}
+	if cfg.Credential["anthropic"] != `a\` {
+		t.Errorf(`Credential[anthropic] = %q, want "a\\"`, cfg.Credential["anthropic"])
+	}
+}
+
 func TestParseTOMLRejectsBadQuotedValue(t *testing.T) {
 	// \x is an incomplete Go/TOML escape (needs two hex digits), so
 	// strconv.Unquote must fail on it.

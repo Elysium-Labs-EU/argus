@@ -26,6 +26,7 @@ func TestParseOwnerRepo(t *testing.T) {
 		{"https://gitlab.example.com:8443/group/subgroup/project.git", "group/subgroup", "project"},
 		{"git@gitlab.com:group/subgroup/deeper/project.git", "group/subgroup/deeper", "project"},
 		{"https://codeberg.org/Elysium_Labs/eos/", "Elysium_Labs", "eos"},
+		{"git@codeberg.org:Owner/Repo.git/", "Owner", "Repo"},
 	}
 	for _, tc := range cases {
 		owner, repo, err := parseOwnerRepo(tc.url)

@@ -381,6 +381,26 @@ func TestLoadBareUnquotedValues(t *testing.T) {
 	}
 }
 
+func TestLoadStripsCommentAfterValueEndingInEscapedBackslash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	// The trailing \\ is one escaped backslash, not an escaped closing quote,
+	// so the quote right after it still closes the string and the following
+	// " # c" must be recognized as a comment, not kept as part of the value.
+	content := `base_branch: "a\\" # c` + "\n"
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := Config{BaseBranch: `a\`}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Load(escaped backslash) = %+v, want %+v", got, want)
+	}
+}
+
 func TestLoadUnknownKeyIgnored(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")

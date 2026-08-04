@@ -791,11 +791,11 @@ func writePRTargetSection(ctx context.Context, b *strings.Builder, f forge.Forge
 }
 
 func writePRChangeSection(ctx context.Context, b *strings.Builder, worktree, base string) {
-	b.WriteString("## Change\n\n")
 	ds, files, err := supervisor.MeasureDiff(ctx, worktree, "origin/"+base)
 	if err != nil {
 		return
 	}
+	b.WriteString("## Change\n\n")
 	fmt.Fprintf(b, "%d file(s), +%d/-%d\n", ds.Files, ds.Insertions, ds.Deletions)
 	for _, fp := range files {
 		fmt.Fprintf(b, "- `%s`\n", fp)
