@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,33 @@ func TestRunWorkerReportRejectsIllegalTransition(t *testing.T) {
 	}
 	if _, loadErr := protocol.Load(protocol.StatusPath(wt)); loadErr == nil {
 		t.Error("status.json should not have been written for a rejected transition")
+	}
+}
+
+func TestRunWorkerReportRejectsCorruptStatus(t *testing.T) {
+	wt := t.TempDir()
+	path := protocol.StatusPath(wt)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{bad json"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// A worker actually in awaiting_review reports planning; a corrupt
+	// status.json must not be silently treated as "hasn't reported yet"
+	// (cur.Phase == "") and let this through as a legal "" -> planning move.
+	err := runWorkerReport(wt, protocol.PhasePlanning, &protocol.Status{Task: "t"}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error for a corrupt status.json, got nil")
+	}
+
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+	if string(got) != "{bad json" {
+		t.Errorf("status.json was overwritten despite the load error: %q", got)
 	}
 }
 
