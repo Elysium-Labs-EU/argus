@@ -26,16 +26,18 @@ func TestCovers(t *testing.T) {
 
 func TestCoversShipForce(t *testing.T) {
 	cases := map[string]bool{
-		"Bash(argus *)":           true,
-		"Bash(argus ship *)":      true,
-		"Bash(argus ship:*)":      true,
-		"Bash(argus)":             false,
-		"Bash(argus ship)":        false,
-		"Bash(argus supervise *)": false,
-		"Bash(argus supervise:*)": false,
-		"Bash(argus review *)":    false,
-		"Bash(argustest *)":       false,
-		"Bash(git *)":             false,
+		"Bash(argus *)":            true,
+		"Bash(argus ship *)":       true,
+		"Bash(argus ship:*)":       true,
+		"Bash(argus)":              false,
+		"Bash(argus ship)":         false,
+		"Bash(argus ship*)":        false, // no space before *: doesn't match \s+.*\*
+		"Bash(argus ship --force)": false, // no wildcard: only matches that exact literal command
+		"Bash(argus supervise *)":  false,
+		"Bash(argus supervise:*)":  false,
+		"Bash(argus review *)":     false,
+		"Bash(argustest *)":        false,
+		"Bash(git *)":              false,
 	}
 	for entry, want := range cases {
 		if got := CoversShipForce(entry); got != want {
@@ -499,6 +501,227 @@ func TestCheckMalformedAllowList(t *testing.T) {
 	writeSettings(t, path, `{"permissions":{"allow":[1,2,3]}}`)
 	if _, _, err := Check(path); err == nil {
 		t.Fatal("expected an error when permissions.allow isn't a string list")
+	}
+}
+
+func TestEntryPrefix(t *testing.T) {
+	cases := []struct {
+		entry          string
+		wantPrefix     string
+		wantWildcarded bool
+		wantOK         bool
+	}{
+		{"Bash(herdr pane run:*)", "herdr pane run", true, true},
+		{"Bash(herdr pane run *)", "herdr pane run", true, true},
+		{"Bash(herdr pane run)", "herdr pane run", false, true},
+		{"Edit(herdr/**)", "", false, false},      // not Bash(...)-shaped at all
+		{"Bash(herdr pane run", "", false, false}, // missing closing paren
+	}
+	for _, c := range cases {
+		prefix, wildcarded, ok := entryPrefix(c.entry)
+		if prefix != c.wantPrefix || wildcarded != c.wantWildcarded || ok != c.wantOK {
+			t.Errorf("entryPrefix(%q) = (%q, %v, %v), want (%q, %v, %v)",
+				c.entry, prefix, wildcarded, ok, c.wantPrefix, c.wantWildcarded, c.wantOK)
+		}
+	}
+}
+
+func TestLoadReadErrorNotNotExist(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := load(dir); err == nil {
+		t.Fatal("expected an error reading a directory as a settings file")
+	}
+}
+
+func TestEnsureMalformedAllowList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"allow":"not a list"}}`)
+	added, err := Ensure(path, DefaultAllowEntry)
+	if err == nil {
+		t.Fatal("expected an error for malformed permissions.allow")
+	}
+	if added {
+		t.Error("expected added=false on error")
+	}
+}
+
+func TestEnsurePermsBlockNoAllowKeyPreservesDeny(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"deny":["Bash(rm -rf *)"]}}`)
+	added, err := Ensure(path, DefaultAllowEntry)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if !added {
+		t.Fatal("expected added=true")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+	perms, ok := raw["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("permissions block missing or wrong shape: %v", raw["permissions"])
+	}
+	deny, ok := perms["deny"].([]any)
+	if !ok || len(deny) != 1 || deny[0] != "Bash(rm -rf *)" {
+		t.Errorf("deny list was dropped or changed: %v", perms["deny"])
+	}
+	allow, ok := perms["allow"].([]any)
+	if !ok || len(allow) != 1 || allow[0] != DefaultAllowEntry {
+		t.Errorf("allow list = %v, want [%s]", perms["allow"], DefaultAllowEntry)
+	}
+}
+
+func TestCheckDenyLoadError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `not json`)
+	if _, err := CheckDeny(path); err == nil {
+		t.Fatal("expected an error loading malformed settings.json")
+	}
+}
+
+func TestCheckDenyMalformedDenyList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"deny":"not a list"}}`)
+	if _, err := CheckDeny(path); err == nil {
+		t.Fatal("expected an error for malformed permissions.deny")
+	}
+}
+
+func TestCheckDenyPartialMissingReturnsOnlyTheRest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"deny":["Bash(herdr pane send-text:*)"]}}`)
+	missing, err := CheckDeny(path)
+	if err != nil {
+		t.Fatalf("CheckDeny: %v", err)
+	}
+	want := []string{"Bash(herdr pane send-keys:*)", "Bash(herdr pane run:*)"}
+	if len(missing) != len(want) {
+		t.Fatalf("missing = %v, want %v", missing, want)
+	}
+	for i := range want {
+		if missing[i] != want[i] {
+			t.Errorf("missing[%d] = %q, want %q", i, missing[i], want[i])
+		}
+	}
+}
+
+func TestEnsureDenyLoadError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `not json`)
+	added, err := EnsureDeny(path)
+	if err == nil {
+		t.Fatal("expected an error loading malformed settings.json")
+	}
+	if added != nil {
+		t.Error("expected added=nil on error")
+	}
+}
+
+func TestEnsureDenyMalformedDenyList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"deny":"not a list"}}`)
+	added, err := EnsureDeny(path)
+	if err == nil {
+		t.Fatal("expected an error for malformed permissions.deny")
+	}
+	if added != nil {
+		t.Error("expected added=nil on error")
+	}
+}
+
+func TestEnsureDenyWriteError(t *testing.T) {
+	skipIfRoot(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	added, err := EnsureDeny(path)
+	if err == nil {
+		t.Fatal("expected an error writing into a read-only directory")
+	}
+	if added != nil {
+		t.Error("expected added=nil on error")
+	}
+}
+
+func TestEnsureDenyPartialAddsExactlyTwoPreservesPresent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeSettings(t, path, `{"permissions":{"deny":["Bash(herdr pane send-text:*)"]}}`)
+	added, err := EnsureDeny(path)
+	if err != nil {
+		t.Fatalf("EnsureDeny: %v", err)
+	}
+	want := []string{"Bash(herdr pane send-keys:*)", "Bash(herdr pane run:*)"}
+	if len(added) != len(want) {
+		t.Fatalf("added = %v, want %v", added, want)
+	}
+	for i := range want {
+		if added[i] != want[i] {
+			t.Errorf("added[%d] = %q, want %q", i, added[i], want[i])
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+	perms, ok := raw["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("permissions block missing or wrong shape: %v", raw["permissions"])
+	}
+	deny, ok := perms["deny"].([]any)
+	if !ok || len(deny) != 3 {
+		t.Fatalf("deny = %v, want 3 entries (1 preserved + 2 added)", perms["deny"])
+	}
+	if deny[0] != "Bash(herdr pane send-text:*)" {
+		t.Errorf("pre-existing deny entry disturbed: %v", deny)
+	}
+}
+
+func TestWithEntriesNilPermsAndRaw(t *testing.T) {
+	// load/permList never actually hand withEntries nil maps — a missing
+	// file or missing block already returns empty-but-non-nil ones — so
+	// these defensive branches are only reachable by calling it directly.
+	raw, err := withEntries(nil, nil, "allow", nil, "Bash(argus *)")
+	if err != nil {
+		t.Fatalf("withEntries: %v", err)
+	}
+	var perms map[string]any
+	if err := json.Unmarshal(raw["permissions"], &perms); err != nil {
+		t.Fatalf("permissions block is not valid JSON: %v", err)
+	}
+	allow, ok := perms["allow"].([]any)
+	if !ok || len(allow) != 1 || allow[0] != "Bash(argus *)" {
+		t.Errorf("allow = %v, want [Bash(argus *)]", perms["allow"])
+	}
+}
+
+func TestWithEntriesMarshalPermsError(t *testing.T) {
+	perms := map[string]json.RawMessage{"deny": json.RawMessage("not json")}
+	if _, err := withEntries(rawSettings{}, perms, "allow", nil, "Bash(argus *)"); err == nil {
+		t.Fatal("expected an error encoding a permissions block holding invalid raw JSON")
+	}
+}
+
+func TestWriteSettingsFileMarshalError(t *testing.T) {
+	raw := rawSettings{"bad": json.RawMessage("not json")}
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := writeSettingsFile(path, raw); err == nil {
+		t.Fatal("expected an error encoding a settings file holding invalid raw JSON")
 	}
 }
 
