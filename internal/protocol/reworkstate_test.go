@@ -1,8 +1,11 @@
 package protocol
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,5 +80,127 @@ func TestReworkStateSurvivesStatusAndVerdictRemoval(t *testing.T) {
 	}
 	if got.RoundsAttempted != 3 {
 		t.Errorf("RoundsAttempted = %d after status/verdict removal, want 3 (rework state must survive it)", got.RoundsAttempted)
+	}
+}
+
+func TestLoadReworkStateMalformedJSON(t *testing.T) {
+	wt := t.TempDir()
+	path := ReworkStatePath(wt)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{not valid"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	_, err := LoadReworkState(wt)
+	if err == nil {
+		t.Fatal("want error decoding malformed rework state file, got nil")
+	}
+	if !strings.Contains(err.Error(), "decoding rework state") {
+		t.Errorf("err = %q, want it to mention %q", err.Error(), "decoding rework state")
+	}
+}
+
+func TestLoadReworkStateUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-denial tests can't force a read failure")
+	}
+	wt := t.TempDir()
+	if err := WriteReworkState(wt, &ReworkState{RoundsAttempted: 1}); err != nil {
+		t.Fatalf("setup WriteReworkState: %v", err)
+	}
+	path := ReworkStatePath(wt)
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	_, err := LoadReworkState(wt)
+	if err == nil {
+		t.Fatal("want error reading a permission-denied rework state file, got nil")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("err = %v, want a wrapped read error, not ErrNotExist", err)
+	}
+	if !strings.Contains(err.Error(), "reading rework state") {
+		t.Errorf("err = %q, want it to mention %q", err.Error(), "reading rework state")
+	}
+}
+
+func TestWriteReworkStateUnwritableDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-denial tests can't force a mkdir failure")
+	}
+	wt := t.TempDir()
+	if err := os.Chmod(wt, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(wt, 0o700) }) // let t.TempDir's own cleanup remove it
+
+	err := WriteReworkState(wt, &ReworkState{RoundsAttempted: 1})
+	if err == nil {
+		t.Fatal("want error writing rework state under a read-only worktree, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating rework state dir") {
+		t.Errorf("err = %q, want it to mention %q", err.Error(), "creating rework state dir")
+	}
+}
+
+func TestWriteReworkStateUnwritableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-denial tests can't force a write failure")
+	}
+	wt := t.TempDir()
+	// MkdirAll succeeds against an already-existing dir regardless of its
+	// permission bits, so this exercises WriteFile's own failure path rather
+	// than MkdirAll's.
+	dir := filepath.Dir(ReworkStatePath(wt))
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("setup MkdirAll: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o750) })
+
+	err := WriteReworkState(wt, &ReworkState{RoundsAttempted: 1})
+	if err == nil {
+		t.Fatal("want error writing rework state file into a read-only dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "writing rework state") {
+		t.Errorf("err = %q, want it to mention %q", err.Error(), "writing rework state")
+	}
+}
+
+func TestWriteReworkStateRenameOverDir(t *testing.T) {
+	wt := t.TempDir()
+	path := ReworkStatePath(wt)
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatalf("setup MkdirAll: %v", err)
+	}
+
+	err := WriteReworkState(wt, &ReworkState{RoundsAttempted: 1})
+	if err == nil {
+		t.Fatal("want error renaming rework state over an existing directory, got nil")
+	}
+	if !strings.Contains(err.Error(), "renaming rework state into place") {
+		t.Errorf("err = %q, want it to mention %q", err.Error(), "renaming rework state into place")
+	}
+}
+
+func TestWriteReworkStateParentIsFile(t *testing.T) {
+	wt := t.TempDir()
+	// ReworkStatePath descends through .claude/argus; blocking that
+	// intermediate path with a plain file forces MkdirAll itself to fail,
+	// distinct from the permission-denied case above.
+	if err := os.WriteFile(filepath.Join(wt, ".claude"), []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("setup WriteFile: %v", err)
+	}
+	err := WriteReworkState(wt, &ReworkState{RoundsAttempted: 1})
+	if err == nil {
+		t.Fatal("want error when the rework state dir path is blocked by a file, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating rework state dir") {
+		t.Errorf("err = %q, want it to mention %q", err.Error(), "creating rework state dir")
 	}
 }
