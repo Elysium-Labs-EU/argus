@@ -20,6 +20,7 @@ import (
 // PR it was asked to open.
 type fakeForge struct {
 	findPRErr    error
+	openErr      error
 	prChecksErr  error
 	issues       map[int]forge.Issue
 	opened       *forge.PRRequest
@@ -34,6 +35,9 @@ func (f *fakeForge) FetchIssue(_ context.Context, _, _ string, n int) (forge.Iss
 	return f.issues[n], nil
 }
 func (f *fakeForge) OpenPR(_ context.Context, req *forge.PRRequest) (forge.PR, error) {
+	if f.openErr != nil {
+		return forge.PR{}, f.openErr
+	}
 	f.opened = req
 	return forge.PR{Number: 99, HTMLURL: "https://fake/pull/99", State: "open"}, nil
 }
