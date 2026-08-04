@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,6 +30,42 @@ func sequenceReviewRunner(replies ...string) (reviewRunner, *int) {
 		return []byte(replies[i]), nil
 	}
 	return run, &calls
+}
+
+func TestClaudeRunnerRunsInWorkdirWithStdinAndArgs(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncat\necho \"ARGS:$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake claude: %v", err)
+	}
+	fakeBinPATH(t, dir)
+
+	run := claudeRunner()
+	out, err := run(context.Background(), t.TempDir(), "hello reviewer", "-p", "--foo")
+	if err != nil {
+		t.Fatalf("claudeRunner: %v", err)
+	}
+	if !strings.Contains(string(out), "hello reviewer") {
+		t.Errorf("stdin not passed through to the subprocess: %q", out)
+	}
+	if !strings.Contains(string(out), "ARGS:-p --foo") {
+		t.Errorf("args not passed through to the subprocess: %q", out)
+	}
+}
+
+func TestClaudeRunnerErrorsOnCommandFailure(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "claude", 1)
+	fakeBinPATH(t, dir)
+
+	run := claudeRunner()
+	_, err := run(context.Background(), t.TempDir(), "stdin", "-p")
+	if err == nil {
+		t.Fatal("want error when claude exits nonzero")
+	}
+	if !strings.Contains(err.Error(), "running claude reviewer") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
 }
 
 func TestCLIReviewerParsesEnvelopeVerdict(t *testing.T) {
@@ -102,6 +139,38 @@ func TestCLIReviewerErrorsAfterFailedReAsk(t *testing.T) {
 	}
 	if *calls != 2 {
 		t.Errorf("want exactly 2 runs (one re-ask, no more), got %d", *calls)
+	}
+}
+
+func TestReviewErrorsWhenFirstRunFails(t *testing.T) {
+	wantErr := errors.New("boom")
+	run := func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		return nil, wantErr
+	}
+	r := NewReviewerWithRunner(run)
+	if _, err := r.Review(context.Background(), &ReviewRequest{Task: "t", Diff: "x"}); !errors.Is(err, wantErr) {
+		t.Fatalf("Review error = %v, want wrapping %v", err, wantErr)
+	}
+}
+
+func TestReviewErrorsWhenReAskRunFails(t *testing.T) {
+	// First call replies with unparseable text (triggers the re-ask); the
+	// re-ask's own run call then fails outright rather than replying at all.
+	wantErr := errors.New("boom")
+	calls := 0
+	run := func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return []byte(`not json at all`), nil
+		}
+		return nil, wantErr
+	}
+	r := NewReviewerWithRunner(run)
+	if _, err := r.Review(context.Background(), &ReviewRequest{Task: "t", Diff: "x"}); !errors.Is(err, wantErr) {
+		t.Fatalf("Review error = %v, want wrapping %v", err, wantErr)
+	}
+	if calls != 2 {
+		t.Errorf("want exactly 2 runs (initial + one re-ask), got %d", calls)
 	}
 }
 
@@ -230,6 +299,18 @@ func TestExtractJSONObjectsFindsEachTopLevelObject(t *testing.T) {
 	}
 }
 
+func TestExtractJSONObjectsSkipsUnterminatedRunThenFindsNextObject(t *testing.T) {
+	// The first '{' never closes, so balancedObjectEnd runs off the end of s and
+	// reports -1; extractJSONObjects must skip it (not panic or return garbage)
+	// and keep scanning far enough to still find the well-formed object after it.
+	in := `broken {"a":1 forever then ` + `{"b":2}`
+	got := extractJSONObjects(in)
+	want := []string{`{"b":2}`}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("got %v want %v", got, want)
+	}
+}
+
 func TestParseReviewOutputUsesLastObjectWithDecision(t *testing.T) {
 	out := []byte(`I first considered {"decision":"approve","summary":"lgtm"} but no.
 Final verdict: {"decision":"request-changes","summary":"missing nil check","findings":["x"]}`)
@@ -275,6 +356,17 @@ func TestParseReviewOutputEscapedBracesAndQuotesInLastObject(t *testing.T) {
 	}
 	if res.Findings[0] != "uses literal { and } inside strings" {
 		t.Errorf("Findings = %v, escaped braces inside the string broke balancing", res.Findings)
+	}
+}
+
+func TestParseReviewOutputMissingDecisionErrors(t *testing.T) {
+	out := []byte(`{"summary":"forgot the decision field","findings":[]}`)
+	_, err := parseReviewOutput(out)
+	if err == nil {
+		t.Fatal("want error when the only object has no decision field")
+	}
+	if !strings.Contains(err.Error(), "missing decision") {
+		t.Errorf("error should say missing decision, got: %v", err)
 	}
 }
 
