@@ -44,6 +44,7 @@ func init() {
 	rootCmd.AddCommand(tendCmd)
 	rootCmd.AddCommand(worktreeCmd)
 	rootCmd.AddCommand(statsCmd)
+	rootCmd.AddCommand(fleetCmd)
 	rootCmd.AddCommand(systemCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(workerCmd)

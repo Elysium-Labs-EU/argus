@@ -53,6 +53,7 @@ nothing else runs without it. Everything below is the reference for these steps.
 | Hand off a worktree after a sibling PR merged first | `argus rebase --worktree <path> --base main` |
 | Poll a shipped PR's CI checks to a terminal state (GitHub only) | `argus tend --worktree <path> --dry-run` |
 | Clean up a worktree once its PR merged | `argus worktree prune --branch <name> --dry-run` |
+| See phase/owner/lifecycle for every linked worktree, read-only | `argus fleet --json` |
 | See escalation rate / token cost | `argus stats` |
 | Check/fix the Bash allowlist argus itself needs | `argus config check --write` |
 | Set up a repo's own base branch/allow list/brief note (see `docs/repo-config.md`) | `argus init` |

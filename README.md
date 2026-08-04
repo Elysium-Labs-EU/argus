@@ -127,6 +127,7 @@ argus review  --worktree /path/to/project-feat-retry --base origin/main  # revie
 argus rework  --worktree /path/to/project-feat-retry --base origin/main  # re-dispatch on request changes, loop until it clears
 argus ship    --worktree /path/to/project-feat-retry --issue 42          # ship an approved worktree to a PR
 argus tend    --worktree /path/to/project-feat-retry --dry-run           # poll a shipped PR's CI checks
+argus fleet   --repo /path/to/project                                    # phase/owner/lifecycle for every worktree, read-only
 ```
 
 | Command | What it does |
@@ -139,6 +140,7 @@ argus tend    --worktree /path/to/project-feat-retry --dry-run           # poll 
 | `argus rebase` | Dispatch a worktree's worker to resolve a conflict after a merge and force push |
 | `argus tend` | Poll a shipped PR's CI checks to a terminal state (GitHub only) |
 | `argus worktree prune` | Clean up a merged worktree (`--branch <name>`, or `--merged` to sweep the repo) |
+| `argus fleet` | Read-only table of every linked worktree's phase/owner/lifecycle (`--json` for machine consumption) |
 | `argus stats` | Aggregate run logs into escalation rate, review parse fail rate, and tokens per task |
 | `argus config check` | Check (and optionally fix) the Bash allow/deny entries argus itself needs |
 | `argus config set` | Persist a `credential.<name>` override so it doesn't need repeating via `--credential-env` |
