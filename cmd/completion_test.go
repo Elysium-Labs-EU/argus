@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -494,5 +495,223 @@ func TestRefreshInstalledCompletions_WarnsOnExecFailure(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "#compdef old") {
 		t.Errorf("expected old completion content to remain untouched, got: %s", string(data))
+	}
+}
+
+func TestCompletionTargetPath_UserHomeDirError(t *testing.T) {
+	t.Setenv("HOME", "")
+	if _, err := completionTargetPath("zsh"); err == nil {
+		t.Error("expected error when $HOME is unset")
+	}
+}
+
+func TestWriteCompletionScript_MkdirAllFails(t *testing.T) {
+	// A regular file in place of a directory ancestor makes os.MkdirAll
+	// fail with ENOTDIR before any file is opened.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	path := filepath.Join(blocker, "sub", "_argus")
+
+	if err := writeCompletionScript(rootCmd, "zsh", path); err == nil {
+		t.Error("expected error when a parent path component is a regular file")
+	}
+}
+
+func TestWriteCompletionScript_OpenFileFails(t *testing.T) {
+	// An existing directory at the target path makes os.OpenFile fail with
+	// EISDIR; MkdirAll on its own parent still succeeds.
+	path := filepath.Join(t.TempDir(), "_argus")
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if err := writeCompletionScript(rootCmd, "zsh", path); err == nil {
+		t.Error("expected error when target path is a directory")
+	}
+}
+
+func TestRefreshInstalledCompletions_SkipsOnTargetPathError(t *testing.T) {
+	t.Setenv("HOME", "")
+
+	var out bytes.Buffer
+	fakeBinary := writeFakeCompletionBinary(t, t.TempDir(), `echo "NEWSCRIPT"`)
+
+	refreshInstalledCompletions(t.Context(), &out, fakeBinary)
+
+	if out.Len() != 0 {
+		t.Errorf("expected no output when completionTargetPath fails for every shell, got: %s", out.String())
+	}
+}
+
+func TestRefreshInstalledCompletions_WarnsOnWriteFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	zshPath, err := completionTargetPath("zsh")
+	if err != nil {
+		t.Fatalf("resolving zsh target path: %v", err)
+	}
+	// A directory at the target path passes the "already installed" os.Stat
+	// check but makes os.WriteFile fail, exercising the write-failure
+	// branch separately from the exec-failure branch above.
+	if mkdirErr := os.MkdirAll(zshPath, 0o750); mkdirErr != nil {
+		t.Fatalf("seeding zsh completion dir: %v", mkdirErr)
+	}
+
+	var out bytes.Buffer
+	fakeBinary := writeFakeCompletionBinary(t, t.TempDir(), `echo "NEWSCRIPT"`)
+
+	refreshInstalledCompletions(t.Context(), &out, fakeBinary)
+
+	if !strings.Contains(out.String(), "could not write refreshed zsh completion") {
+		t.Errorf("expected write-failure warning, got: %s", out.String())
+	}
+}
+
+func TestCompletionInteractive_TargetPathError(t *testing.T) {
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("HOME", "")
+
+	cmd := newCompletionCmd(rootCmd)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs([]string{})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when completionTargetPath fails")
+	}
+	if !strings.Contains(err.Error(), "HOME") {
+		t.Errorf("expected a $HOME error, got: %v", err)
+	}
+}
+
+func TestCompletionInteractive_WriteScriptError(t *testing.T) {
+	t.Setenv("SHELL", "/bin/bash")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A regular file at the completions directory's own path makes
+	// writeCompletionScript's os.MkdirAll fail, forcing the wrapped
+	// "writing completion script" error out of runInteractiveCompletion.
+	blocker := filepath.Join(home, ".local", "share", "bash-completion", "completions")
+	if err := os.MkdirAll(filepath.Dir(blocker), 0o750); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	cmd := newCompletionCmd(rootCmd)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetIn(strings.NewReader("y\n"))
+	cmd.SetArgs([]string{})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "writing completion script") {
+		t.Fatalf("got error %v, want it to mention 'writing completion script'", err)
+	}
+}
+
+func TestCompletionInteractive_ZshPatchError(t *testing.T) {
+	t.Setenv("SHELL", "/bin/zsh")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A directory at ~/.zshrc makes os.ReadFile fail with a non-IsNotExist
+	// error inside patchZshrc; runInteractiveCompletion must surface that
+	// as a warning rather than aborting the whole install.
+	if err := os.MkdirAll(filepath.Join(home, ".zshrc"), 0o750); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	cmd := newCompletionCmd(rootCmd)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetIn(strings.NewReader("y\n"))
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.String(), "could not patch ~/.zshrc") {
+		t.Errorf("expected patch-failure message, got: %s", out.String())
+	}
+}
+
+func TestCompletionInteractive_ZshAlreadyPatched(t *testing.T) {
+	t.Setenv("SHELL", "/bin/zsh")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	completionDir := filepath.Join(home, ".zsh", "completions")
+	existing := fmt.Sprintf("fpath=(%s $fpath)\nautoload -Uz compinit && compinit\n", completionDir)
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte(existing), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	cmd := newCompletionCmd(rootCmd)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetIn(strings.NewReader("y\n"))
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.String(), "already has fpath entry") {
+		t.Errorf("expected no-change message, got: %s", out.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".zshrc"))
+	if err != nil {
+		t.Fatalf("reading ~/.zshrc: %v", err)
+	}
+	if string(data) != existing {
+		t.Errorf("expected ~/.zshrc to be left untouched, got: %s", string(data))
+	}
+}
+
+func TestPatchZshrc_UserHomeDirError(t *testing.T) {
+	t.Setenv("HOME", "")
+	if _, err := patchZshrc("/home/user/.zsh/completions"); err == nil {
+		t.Error("expected error when $HOME is unset")
+	}
+}
+
+func TestPatchZshrc_ReadFileErrorNotIsNotExist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A directory at ~/.zshrc makes os.ReadFile fail with an error other
+	// than IsNotExist, which must propagate rather than being treated as
+	// "no .zshrc yet".
+	if err := os.MkdirAll(filepath.Join(home, ".zshrc"), 0o750); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if _, err := patchZshrc("/home/user/.zsh/completions"); err == nil {
+		t.Error("expected error when ~/.zshrc is a directory")
+	}
+}
+
+func TestPatchZshrc_OpenFileFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses the permission check this test relies on")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+	if err := os.Chmod(home, 0o555); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if _, err := patchZshrc("/home/user/.zsh/completions"); err == nil {
+		t.Error("expected error when home directory is not writable")
 	}
 }
