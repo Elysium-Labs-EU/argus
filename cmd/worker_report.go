@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -155,7 +156,19 @@ func readReportBody(cmd *cobra.Command, file string) ([]byte, error) {
 // caller's — before persisting. Split out of the RunE closure so it is
 // directly testable without going through cobra flag parsing or stdin.
 func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status, now func() time.Time) error {
-	cur, _ := protocol.Load(protocol.StatusPath(worktree))
+	cur, err := protocol.Load(protocol.StatusPath(worktree))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// A missing file means "hasn't reported yet" (cur stays the zero
+		// Status, so "" -> next is evaluated normally below). Any other
+		// Load error means status.json exists but is corrupt or unreadable —
+		// treating that the same as "hasn't reported yet" would let a worker
+		// in a later phase silently skip the transition guard and wipe the
+		// carried-forward Base/Title/Question/Answer fields.
+		return &ui.UserError{
+			Err:  fmt.Errorf("loading status for %s: %w", worktree, err),
+			Hint: "status.json exists but could not be read; fix or remove it before reporting again",
+		}
+	}
 	if !protocol.IsLegalTransition(cur.Phase, next) {
 		return &ui.UserError{
 			Err:  fmt.Errorf("illegal status transition %q -> %q", cur.Phase, next),
