@@ -112,7 +112,20 @@ func touchedFunctions(ctx context.Context, worktree, from, to string) (map[strin
 
 var (
 	hunkHeaderRe = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ ?(.*)$`)
-	funcNameRe   = regexp.MustCompile(`(\w+)\s*\(`)
+	// funcNameRe is the fallback pattern: the last identifier immediately
+	// before a "(", which covers plain funcs/methods but nothing whose name
+	// isn't glued to an open paren (generics, arrow-fn consts, type decls).
+	funcNameRe = regexp.MustCompile(`(\w+)\s*\(`)
+	// goFuncRe covers Go func decls funcNameRe misses because a generic's
+	// "[T any]" sits between the name and "(": optional receiver, name, then
+	// either "(" (plain) or "[" (generic).
+	goFuncRe = regexp.MustCompile(`\bfunc\s+(?:\([^)]*\)\s+)?(\w+)\s*[\[(]`)
+	// declNameRe covers class/interface/type/struct/enum decls, which carry
+	// no "(" at all in their header line.
+	declNameRe = regexp.MustCompile(`\b(?:class|interface|type|struct|enum)\s+(\w+)`)
+	// arrowFuncRe covers `name = (args) => ` / `name = arg => ` (JS/TS const
+	// or class-field arrow functions), where the name precedes "=", not "(".
+	arrowFuncRe = regexp.MustCompile(`(\w+)\s*(?::[^=]+)?=\s*(?:\([^)]*\)|\w+)\s*=>`)
 )
 
 // parseTouchedFunctions extracts the per-file, per-function touch set out of a
@@ -144,14 +157,29 @@ func parseTouchedFunctions(diff string) map[string]map[string]bool {
 
 // funcNameInContext pulls the likely declaration name out of a hunk header's
 // context text (e.g. "func (s *Supervisor) reconcile(cfg *Config) error {" ->
-// "reconcile"): the last identifier immediately followed by "(", which for a
-// receiver method skips the receiver's own parenthesized group.
+// "reconcile"). Plain funcs/methods fall to funcNameRe's "last identifier
+// before (" rule, but several common declaration shapes don't have their
+// name glued to a "(" at all, so those get their own patterns tried first.
+// A shape none of the patterns recognize still needs a non-empty result:
+// parseTouchedFunctions drops "" as "no declaration found here", so returning
+// it would silently exempt that hunk from the same-function safety net
+// entirely. Falling back to the trimmed context line itself keeps two edits
+// inside the same unrecognized declaration colliding as a conflict — the
+// same conservative bias ConflictsWith already applies to recognized names.
 func funcNameInContext(hunkContext string) string {
-	matches := funcNameRe.FindAllStringSubmatch(hunkContext, -1)
-	if len(matches) == 0 {
+	hunkContext = strings.TrimSpace(hunkContext)
+	if hunkContext == "" {
 		return ""
 	}
-	return matches[len(matches)-1][1]
+	for _, re := range []*regexp.Regexp{goFuncRe, declNameRe, arrowFuncRe} {
+		if m := re.FindStringSubmatch(hunkContext); m != nil {
+			return m[1]
+		}
+	}
+	if matches := funcNameRe.FindAllStringSubmatch(hunkContext, -1); len(matches) > 0 {
+		return matches[len(matches)-1][1]
+	}
+	return hunkContext
 }
 
 // HeadSHA resolves worktree's current HEAD commit.
