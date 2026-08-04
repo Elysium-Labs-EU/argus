@@ -461,7 +461,7 @@ func TestCopyFileAndReplaceBinary(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if err := replaceBinary(context.Background(), src, dst); err != nil {
+	if err := replaceBinary(context.Background(), src, dst, filepath.Join(dir, "no-such-backup")); err != nil {
 		t.Fatalf("replaceBinary: %v", err)
 	}
 
@@ -483,6 +483,74 @@ func TestCopyFileAndReplaceBinary(t *testing.T) {
 
 	if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf("expected the .tmp file to be gone after rename, got err=%v", err)
+	}
+}
+
+// TestReplaceBinaryRollsBackOnResignFailure forces the post-rename resign
+// step to fail and checks replaceBinary restores dstPath from backupPath
+// instead of leaving the new (Gatekeeper-killed, on real darwin) binary in
+// place with no working argus on disk.
+func TestReplaceBinaryRollsBackOnResignFailure(t *testing.T) {
+	orig := resignFunc
+	t.Cleanup(func() { resignFunc = orig })
+	resignErr := fmt.Errorf("codesign: boom")
+	resignFunc = func(context.Context, string, string) error { return resignErr }
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "new-binary")
+	if err := os.WriteFile(src, []byte("new contents"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	dst := filepath.Join(dir, "installed-binary")
+	if err := os.WriteFile(dst, []byte("old contents"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	backup := filepath.Join(dir, "installed-binary.backup")
+	if err := copyFile(dst, backup); err != nil {
+		t.Fatalf("copyFile backup: %v", err)
+	}
+
+	err := replaceBinary(context.Background(), src, dst, backup)
+	if err == nil {
+		t.Fatal("replaceBinary: want error on resign failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "rolled back") {
+		t.Errorf("replaceBinary error = %q, want it to mention a rollback", err)
+	}
+
+	got, readErr := os.ReadFile(dst)
+	if readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+	if string(got) != "old contents" {
+		t.Errorf("dst contents after rollback = %q, want the pre-update %q", got, "old contents")
+	}
+}
+
+// TestReplaceBinaryNoRollbackWithoutBackup checks the no-backup-available
+// error path: when backupPath doesn't exist, replaceBinary must say so
+// rather than attempt (and fail) a rollback.
+func TestReplaceBinaryNoRollbackWithoutBackup(t *testing.T) {
+	orig := resignFunc
+	t.Cleanup(func() { resignFunc = orig })
+	resignFunc = func(context.Context, string, string) error { return fmt.Errorf("codesign: boom") }
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "new-binary")
+	if err := os.WriteFile(src, []byte("new contents"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	dst := filepath.Join(dir, "installed-binary")
+	if err := os.WriteFile(dst, []byte("old contents"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := replaceBinary(context.Background(), src, dst, filepath.Join(dir, "no-such-backup"))
+	if err == nil {
+		t.Fatal("replaceBinary: want error on resign failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "no backup available") {
+		t.Errorf("replaceBinary error = %q, want it to mention no backup available", err)
 	}
 }
 
@@ -549,6 +617,27 @@ func TestRunUpdateAlreadyLatest(t *testing.T) {
 	useHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"tag_name": "v0.1.0", "assets": []}`))
+	})
+
+	exePath := filepath.Join(t.TempDir(), "argus")
+	buf := &bytes.Buffer{}
+
+	if err := runUpdate(context.Background(), buf, exePath, "v0.1.0", false); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	if !strings.Contains(buf.String(), "already on the latest version") {
+		t.Errorf("output = %q, want an already-latest message", buf.String())
+	}
+}
+
+// TestRunUpdateAlreadyLatestUnnormalizedTag guards against comparing a
+// normalized currentVer against a raw tag_name: a v-less tag must still be
+// recognized as equal to "v0.1.0", not silently treated as an invalid semver
+// that skips the already-latest guard and forces a redundant reinstall.
+func TestRunUpdateAlreadyLatestUnnormalizedTag(t *testing.T) {
+	useHTTPTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name": "0.1.0", "assets": []}`))
 	})
 
 	exePath := filepath.Join(t.TempDir(), "argus")

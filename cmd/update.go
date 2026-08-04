@@ -443,6 +443,11 @@ func resignBinary(ctx context.Context, goos, path string) error {
 	return nil
 }
 
+// resignFunc is the resign step replaceBinary calls, as a var (not a direct
+// call to resignBinary) so tests can force the post-rename failure branch
+// without shelling out to the real codesign binary.
+var resignFunc = resignBinary
+
 // replaceBinary installs newPath over dstPath, which may be the currently
 // running executable: it copies to a same-directory temp file, chmods it
 // executable, then renames over dstPath. The rename is atomic on the same
@@ -450,7 +455,15 @@ func resignBinary(ctx context.Context, goos, path string) error {
 // one calling this function) that's already running it. On Darwin it then
 // re-signs dstPath in place, without which the installed binary is
 // Gatekeeper-killed on next launch.
-func replaceBinary(ctx context.Context, newPath, dstPath string) error {
+//
+// The rename is the point of no return: a resign failure after it would
+// otherwise strand dstPath as a Gatekeeper-killed binary with no working
+// argus on disk. backupPath (dstPath's pre-update contents, best-effort
+// copied by the caller) is copied back over dstPath in that case so the
+// install fails closed rather than half-applied; an empty or missing
+// backupPath means the caller's own backup step already failed, so there's
+// nothing to roll back to.
+func replaceBinary(ctx context.Context, newPath, dstPath, backupPath string) error {
 	tmp := dstPath + ".tmp"
 	if err := copyFile(newPath, tmp); err != nil {
 		return err
@@ -463,8 +476,14 @@ func replaceBinary(ctx context.Context, newPath, dstPath string) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("installing %s: %w", dstPath, err)
 	}
-	if err := resignBinary(ctx, runtime.GOOS, dstPath); err != nil {
-		return fmt.Errorf("re-signing %s: %w", dstPath, err)
+	if err := resignFunc(ctx, runtime.GOOS, dstPath); err != nil {
+		if _, statErr := os.Stat(backupPath); statErr != nil {
+			return fmt.Errorf("re-signing %s: %w (no backup available to roll back to)", dstPath, err)
+		}
+		if rollbackErr := copyFile(backupPath, dstPath); rollbackErr != nil {
+			return fmt.Errorf("re-signing %s: %w (rollback also failed: %w)", dstPath, err, rollbackErr)
+		}
+		return fmt.Errorf("re-signing %s: %w (rolled back to previous version)", dstPath, err)
 	}
 	return nil
 }
@@ -528,8 +547,12 @@ func runUpdate(ctx context.Context, out io.Writer, exePath, currentVersion strin
 		return fmt.Errorf("checking for updates: %w", err)
 	}
 
+	// latestVer keeps rel.TagName's raw form for display; comparison uses
+	// latestVerNorm since a v-less tag would otherwise fail semver.IsValid
+	// and silently skip the "already latest" guard below.
 	currentVer, latestVer := normalizeSemver(currentVersion), rel.TagName
-	if semver.IsValid(currentVer) && semver.IsValid(latestVer) && semver.Compare(currentVer, latestVer) >= 0 {
+	latestVerNorm := normalizeSemver(latestVer)
+	if semver.IsValid(currentVer) && semver.IsValid(latestVerNorm) && semver.Compare(currentVer, latestVerNorm) >= 0 {
 		_, _ = fmt.Fprintf(out, "%s already on the latest version (%s)\n", ui.LabelSuccess.Render("✓"), currentVersion)
 		return nil
 	}
@@ -574,7 +597,7 @@ func runUpdate(ctx context.Context, out io.Writer, exePath, currentVersion strin
 		_, _ = fmt.Fprintf(out, "%s backed up current binary to %s\n", ui.TextMuted.Render("i"), backupPath)
 	}
 
-	if replaceErr := replaceBinary(ctx, binTmp, exePath); replaceErr != nil {
+	if replaceErr := replaceBinary(ctx, binTmp, exePath, backupPath); replaceErr != nil {
 		return fmt.Errorf("installing new binary: %w", replaceErr)
 	}
 
