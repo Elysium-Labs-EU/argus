@@ -597,6 +597,24 @@ func TestLoadMalformedLineErrors(t *testing.T) {
 	}
 }
 
+// TestLoadStrayListItemAtTopLevelErrors covers parseYAML's own
+// list-item-outside-a-recognized-key check: a top-level "- value" line with
+// no preceding list key (allow:, proof_required_paths:, ...) to belong to.
+func TestLoadStrayListItemAtTopLevelErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "- stray\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(stray top-level list item): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "outside of a recognized key") {
+		t.Errorf("Load error = %q, want it to mention outside of a recognized key", err.Error())
+	}
+}
+
 // TestLoadUnreadablePathNonNotExistError covers Load's other os.ReadFile
 // branch: a path whose parent component exists but isn't a directory fails
 // with ENOTDIR, not ENOENT, so os.IsNotExist(err) is false and Load must
@@ -721,6 +739,25 @@ func TestLoadPhaseSkipBadBoolErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "phase.planning.skip") {
 		t.Errorf("Load error = %q, want it to mention %q", err.Error(), "phase.planning.skip")
+	}
+}
+
+// TestLoadDottedPhaseKeyBadQuotedValueErrors covers parseDottedPhaseKey's own
+// unquoteYAML error path — distinct from assignPhaseKey's ParseBool error
+// above, since the bad quoting is caught before the value ever reaches
+// assignPhaseKey.
+func TestLoadDottedPhaseKeyBadQuotedValueErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "phase.planning.skip: \"\\x\"\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(bad quoted dotted phase key value): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "bad value") {
+		t.Errorf("Load error = %q, want it to mention bad value", err.Error())
 	}
 }
 

@@ -361,7 +361,10 @@ func indentOf(line string) int {
 // malformed key at any level is a hard error naming a line number, never
 // silently skipped — a config key argus doesn't recognize is far more often
 // a typo or a stale name than a forward-compatible key a future version will
-// understand, and a silent skip gives an operator no signal either way.
+// understand, and a silent skip gives an operator no signal either way. The
+// actual per-key dispatch lives in assignTopLevelKey — split out so this
+// loop stays a small, easily-read driver instead of one large per-line
+// switch.
 func parseYAML(data string) (Config, error) {
 	var cfg Config
 	lines := strings.Split(data, "\n")
@@ -381,75 +384,103 @@ func parseYAML(data string) (Config, error) {
 		if !ok {
 			return Config{}, fmt.Errorf("config: line %d: expected key: value, got %q", i+1, trimmed)
 		}
-		line := i + 1
-
-		switch key {
-		case "ship":
-			if rest != "" {
-				return Config{}, fmt.Errorf("config: line %d: %q expects a nested block, not an inline value", line, key)
-			}
-			consumed, serr := parseShipBlock(&cfg, lines, i+1, 0)
-			if serr != nil {
-				return Config{}, serr
-			}
-			i += consumed
-			continue
-		case "phases":
-			if rest != "" {
-				return Config{}, fmt.Errorf("config: line %d: %q expects a nested block, not an inline value", line, key)
-			}
-			consumed, perr := parsePhasesBlock(&cfg, lines, i+1, 0)
-			if perr != nil {
-				return Config{}, perr
-			}
-			i += consumed
-			continue
+		consumed, err := assignTopLevelKey(&cfg, lines, i, key, rest)
+		if err != nil {
+			return Config{}, err
 		}
-
-		if phase, subkey, ok := parsePhaseKey(key); ok {
-			value, uerr := unquoteYAML(rest)
-			if uerr != nil {
-				return Config{}, fmt.Errorf("config: line %d: bad value %q: %w", line, rest, uerr)
-			}
-			consumed, aerr := assignPhaseKey(&cfg, phase, subkey, value, lines, i+1, line)
-			if aerr != nil {
-				return Config{}, aerr
-			}
-			i += consumed
-			continue
-		}
-
-		if lk, ok := legacyFlatKeys[key]; ok {
-			cfg.Deprecated = append(cfg.Deprecated, DeprecatedKeyUse{Old: key, New: lk.newLoc})
-			key = lk.assignAs
-		}
-
-		if dst := listFieldFor(&cfg, key); dst != nil {
-			if rest != "" {
-				return Config{}, fmt.Errorf("config: line %d: %q expects a list on following indented lines, not an inline value", line, key)
-			}
-			items, consumed, lerr := parseYAMLList(lines, i+1)
-			if lerr != nil {
-				return Config{}, lerr
-			}
-			*dst = items
-			i += consumed
-			continue
-		}
-
-		value, verr := unquoteYAML(rest)
-		if verr != nil {
-			return Config{}, fmt.Errorf("config: line %d: bad value %q: %w", line, rest, verr)
-		}
-		handled, herr := assignScalarField(&cfg, key, value, line)
-		if herr != nil {
-			return Config{}, herr
-		}
-		if !handled {
-			return Config{}, fmt.Errorf("config: line %d: unrecognized key %q", line, key)
-		}
+		i += consumed
 	}
 	return cfg, nil
+}
+
+// assignTopLevelKey dispatches one top-level "key: value"/"key:" line
+// (already split into key/rest by parseYAML) to whichever region it names:
+// a ship:/phases: block header (parseRegionBlock), a deprecated dotted
+// phase.<name>.<subkey> key (parseDottedPhaseKey), or an ordinary flat
+// scalar/list key, current or deprecated (assignFlatKey). Splitting these
+// three families into their own functions — rather than one large switch —
+// keeps each one's own cyclomatic complexity (and so its CRAP score) low
+// individually, even though the total behavior is unchanged. i is the
+// line's zero-based index in lines, needed by the block-header/dotted-key
+// cases to locate their own following content; line is i+1, the 1-based
+// line number every error message here uses.
+func assignTopLevelKey(cfg *Config, lines []string, i int, key, rest string) (consumed int, err error) {
+	line := i + 1
+	switch key {
+	case "ship":
+		return parseRegionBlock(cfg, lines, i, key, rest, line)
+	case "phases":
+		return parseRegionBlock(cfg, lines, i, key, rest, line)
+	}
+	if phase, subkey, ok := parsePhaseKey(key); ok {
+		return parseDottedPhaseKey(cfg, lines, i, phase, subkey, rest, line)
+	}
+	return assignFlatKey(cfg, lines, i+1, key, rest, line)
+}
+
+// parseRegionBlock handles a top-level "ship:"/"phases:" block-header line:
+// it must carry no inline value (the block's content is its indented body —
+// see parseShipBlock/parsePhasesBlock), and dispatches to the matching
+// block parser.
+func parseRegionBlock(cfg *Config, lines []string, i int, key, rest string, line int) (consumed int, err error) {
+	if rest != "" {
+		return 0, fmt.Errorf("config: line %d: %q expects a nested block, not an inline value", line, key)
+	}
+	if key == "ship" {
+		return parseShipBlock(cfg, lines, i+1, 0)
+	}
+	return parsePhasesBlock(cfg, lines, i+1, 0)
+}
+
+// parseDottedPhaseKey handles a deprecated dotted phase.<name>.<subkey>
+// top-level key (see parsePhaseKey/assignPhaseKey) — split out of
+// assignTopLevelKey purely to keep that dispatcher's own branching minimal.
+func parseDottedPhaseKey(cfg *Config, lines []string, i int, phase protocol.Phase, subkey, rest string, line int) (consumed int, err error) {
+	value, uerr := unquoteYAML(rest)
+	if uerr != nil {
+		return 0, fmt.Errorf("config: line %d: bad value %q: %w", line, rest, uerr)
+	}
+	return assignPhaseKey(cfg, phase, subkey, value, lines, i+1, line)
+}
+
+// assignFlatKey handles a top-level key that is neither a ship:/phases:
+// block header nor a dotted phase.<name>.<subkey> key: a region 1 scalar/
+// list key, or one of legacyFlatKeys' deprecated flat forms (which still
+// assigns the same field, recording a Deprecated entry first). An
+// unrecognized key is a hard error naming a line number, never silently
+// skipped. next is lines' index right after this key's own line, for the
+// list-shaped keys (allow, proof_required_paths, always_review_paths) that
+// read their items from following indented lines.
+func assignFlatKey(cfg *Config, lines []string, next int, key, rest string, line int) (consumed int, err error) {
+	if lk, ok := legacyFlatKeys[key]; ok {
+		cfg.Deprecated = append(cfg.Deprecated, DeprecatedKeyUse{Old: key, New: lk.newLoc})
+		key = lk.assignAs
+	}
+
+	if dst := listFieldFor(cfg, key); dst != nil {
+		if rest != "" {
+			return 0, fmt.Errorf("config: line %d: %q expects a list on following indented lines, not an inline value", line, key)
+		}
+		items, listConsumed, lerr := parseYAMLList(lines, next)
+		if lerr != nil {
+			return 0, lerr
+		}
+		*dst = items
+		return listConsumed, nil
+	}
+
+	value, verr := unquoteYAML(rest)
+	if verr != nil {
+		return 0, fmt.Errorf("config: line %d: bad value %q: %w", line, rest, verr)
+	}
+	handled, herr := assignScalarField(cfg, key, value, line)
+	if herr != nil {
+		return 0, herr
+	}
+	if !handled {
+		return 0, fmt.Errorf("config: line %d: unrecognized key %q", line, key)
+	}
+	return 0, nil
 }
 
 // parseShipBlock parses the indented body of a top-level `ship:` key — the
