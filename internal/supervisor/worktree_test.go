@@ -3,11 +3,15 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
 func TestEnsureDistinctWorktreesRefusesCollision(t *testing.T) {
@@ -126,5 +130,129 @@ func TestWriteSettingsWritesConfinedFile(t *testing.T) {
 	}
 	if !strings.Contains(string(data), wt+"/**") {
 		t.Errorf("settings should scope edits to the worktree path")
+	}
+}
+
+func TestWriteSettingsWrapsMkdirAllError(t *testing.T) {
+	wt := t.TempDir()
+	// A regular file at .claude blocks MkdirAll from creating it as a dir.
+	if err := os.WriteFile(filepath.Join(wt, ".claude"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding blocking file: %v", err)
+	}
+
+	err := WriteSettings(wt, nil, nil)
+	if err == nil {
+		t.Fatal("want error when settings dir can't be created, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating settings dir") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestWriteSettingsWrapsWriteFileError(t *testing.T) {
+	wt := t.TempDir()
+	// A directory at the settings path itself blocks WriteFile, while MkdirAll
+	// of its already-existing parent still succeeds.
+	settingsPath := filepath.Join(wt, ".claude", "settings.local.json")
+	if err := os.MkdirAll(settingsPath, 0o755); err != nil {
+		t.Fatalf("seeding blocking dir: %v", err)
+	}
+
+	err := WriteSettings(wt, nil, nil)
+	if err == nil {
+		t.Fatal("want error when settings file can't be written, got nil")
+	}
+	if !strings.Contains(err.Error(), "writing settings file") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+// fakeFailingAgent is a minimal AgentAdapter whose RenderSettings always
+// errors, used to force WriteSettings' one remaining branch (a
+// RenderSettings failure) without any adapter that actually fails.
+type fakeFailingAgent struct{}
+
+func (fakeFailingAgent) DefaultLauncher() string { return "" }
+
+func (fakeFailingAgent) RenderSettings(string, []string, []string) (string, []byte, error) {
+	return "", nil, errors.New("boom")
+}
+
+func (fakeFailingAgent) PlanEvidence(string, string) (bool, int, error) { return false, 0, nil }
+
+func TestWriteSettingsWrapsRenderSettingsError(t *testing.T) {
+	orig := defaultAgent
+	defer func() { defaultAgent = orig }()
+	defaultAgent = fakeFailingAgent{}
+
+	err := WriteSettings(t.TempDir(), nil, nil)
+	if err == nil {
+		t.Fatal("want error when RenderSettings fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "rendering settings") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestWriteBriefWritesTrailingNewline(t *testing.T) {
+	wt := t.TempDir()
+	if err := WriteBrief(wt, "do the thing"); err != nil {
+		t.Fatalf("WriteBrief: %v", err)
+	}
+	got, err := os.ReadFile(protocol.BriefPath(wt))
+	if err != nil {
+		t.Fatalf("reading brief.md: %v", err)
+	}
+	if string(got) != "do the thing\n" {
+		t.Errorf("brief content = %q, want %q", got, "do the thing\n")
+	}
+}
+
+func TestWriteBriefWrapsMkdirAllError(t *testing.T) {
+	wt := t.TempDir()
+	// A regular file at .claude blocks MkdirAll from creating .claude/argus.
+	if err := os.WriteFile(filepath.Join(wt, ".claude"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding blocking file: %v", err)
+	}
+
+	err := WriteBrief(wt, "brief")
+	if err == nil {
+		t.Fatal("want error when argus dir can't be created, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating argus dir") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestWriteBriefWrapsWriteFileError(t *testing.T) {
+	wt := t.TempDir()
+	// A directory at brief.md's own path blocks WriteFile, while MkdirAll of
+	// its already-existing parent still succeeds.
+	if err := os.MkdirAll(protocol.BriefPath(wt), 0o755); err != nil {
+		t.Fatalf("seeding blocking dir: %v", err)
+	}
+
+	err := WriteBrief(wt, "brief")
+	if err == nil {
+		t.Fatal("want error when brief.md can't be written, got nil")
+	}
+	if !strings.Contains(err.Error(), "writing brief.md") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestRunWorktreeBootstrapCommandTimeoutIsKilled(t *testing.T) {
+	// Passing an already-short-deadlined parent ctx makes WithTimeout's
+	// effective deadline the earlier one, exercising the 5-minute timeout
+	// path without waiting anywhere near 5 minutes.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := RunWorktreeBootstrapCommand(ctx, t.TempDir(), "sleep 5")
+	if err == nil {
+		t.Fatal("want error when bootstrap command exceeds its deadline, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeded") || !strings.Contains(err.Error(), "was killed") {
+		t.Errorf("error should report the timeout, got: %v", err)
 	}
 }
