@@ -61,6 +61,27 @@ func TestDetectDefaultBaseErrorsWithNoOriginHEAD(t *testing.T) {
 	}
 }
 
+// Real git refuses to store a symbolic-ref target with an empty final
+// component ("refs/remotes/origin/"), so the TrimPrefix-empty branch can't
+// be reached through any real repo state — only through a stubbed git
+// binary that hands back that exact string.
+func TestDetectDefaultBaseErrorsWhenOriginHEADTrimsToEmpty(t *testing.T) {
+	stubDir := t.TempDir()
+	stub := "#!/bin/sh\necho 'origin/'\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := DetectDefaultBase(context.Background(), t.TempDir())
+	if err == nil {
+		t.Fatal("want an error when origin/HEAD trims to an empty branch name, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty branch name") {
+		t.Errorf("error = %q, want it to mention the empty branch name", err)
+	}
+}
+
 func TestResolveBaseExplicitFlagWinsOutright(t *testing.T) {
 	repo := newRepoWithOriginHEAD(t)
 	if err := protocol.Write(protocol.StatusPath(repo), &protocol.Status{Base: "develop"}); err != nil {
@@ -111,5 +132,13 @@ func TestResolveBaseFallsBackToLiteralMain(t *testing.T) {
 	got := ResolveBase(context.Background(), repo, "main", false)
 	if got != "main" {
 		t.Errorf("ResolveBase = %q, want the literal fallback %q", got, "main")
+	}
+}
+
+func TestResolveBaseFallsBackToMainWhenRepoRootFails(t *testing.T) {
+	notARepo := t.TempDir()
+	got := ResolveBase(context.Background(), notARepo, "main", false)
+	if got != "main" {
+		t.Errorf("ResolveBase = %q, want the literal fallback %q when RepoRoot errors", got, "main")
 	}
 }
