@@ -781,3 +781,368 @@ func TestRebaseBriefCarriesRebaseSteps(t *testing.T) {
 		}
 	}
 }
+
+// TestGitMergeConflictsNonConflictErrorPropagates confirms a merge-tree
+// failure unrelated to a real conflict (any exit code other than 1) surfaces
+// as an error, not a false "conflicts" result — a non-git worktree makes
+// merge-tree fail this way without needing a real repo at all.
+func TestGitMergeConflictsNonConflictErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	notGit := t.TempDir()
+	conflicts, err := gitMergeConflicts(ctx, notGit, "main")
+	if err == nil {
+		t.Fatal("want an error from merge-tree against a non-git worktree")
+	}
+	if conflicts {
+		t.Error("a merge-tree failure unrelated to conflicts must not be reported as a conflict")
+	}
+	if !strings.Contains(err.Error(), "checking merge conflicts") {
+		t.Errorf("error should wrap the merge-tree failure, got %v", err)
+	}
+}
+
+// TestConflictsWithPropagatesMergeTreeError confirms ConflictsWith forwards
+// gitMergeConflicts' own error rather than swallowing it into a plain false.
+func TestConflictsWithPropagatesMergeTreeError(t *testing.T) {
+	ctx := context.Background()
+	notGit := t.TempDir()
+	conflicts, err := ConflictsWith(ctx, notGit, "main")
+	if err == nil {
+		t.Fatal("want ConflictsWith to propagate the underlying merge-tree error")
+	}
+	if conflicts {
+		t.Error("an error path must not also report a conflict")
+	}
+}
+
+// TestSameFunctionTouchedByBothMergeBaseErrorPropagates confirms a
+// merge-base failure (e.g. a non-git worktree) is wrapped and returned rather
+// than treated as "no conflict".
+func TestSameFunctionTouchedByBothMergeBaseErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	notGit := t.TempDir()
+	_, err := sameFunctionTouchedByBoth(ctx, notGit, "main")
+	if err == nil {
+		t.Fatal("want an error resolving merge-base against a non-git worktree")
+	}
+	if !strings.Contains(err.Error(), "resolving merge base with origin/main") {
+		t.Errorf("error should name what failed, got %v", err)
+	}
+}
+
+// TestTouchedFunctionsDiffErrorWrapped confirms a `git diff` failure is
+// wrapped with the from..to range rather than returned bare.
+func TestTouchedFunctionsDiffErrorWrapped(t *testing.T) {
+	ctx := context.Background()
+	notGit := t.TempDir()
+	_, err := touchedFunctions(ctx, notGit, "abc", "HEAD")
+	if err == nil {
+		t.Fatal("want an error diffing in a non-git worktree")
+	}
+	if !strings.Contains(err.Error(), "diffing abc..HEAD") {
+		t.Errorf("error should name the diff range, got %v", err)
+	}
+}
+
+const funcAOriginal = `package supervisor
+
+func FuncA() int {
+	return 1
+}
+`
+
+const funcAEdited = `package supervisor
+
+func FuncA() int {
+	return 2
+}
+`
+
+const funcBOriginal = `package supervisor
+
+func FuncB() int {
+	return 1
+}
+`
+
+const funcBEdited = `package supervisor
+
+func FuncB() int {
+	return 2
+}
+`
+
+// initMultiFileRepo is initGoRepo's multi-file counterpart: a bare origin
+// plus a clone, seeded with every entry in files, so a test can diverge each
+// side onto a different file entirely.
+func initMultiFileRepo(t *testing.T, files map[string]string) (worktree, base string) {
+	t.Helper()
+	base = "main"
+	origin := gitTempDir(t)
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	run(origin, "init", "-q", "--bare", "-b", base, ".")
+	seed := gitTempDir(t)
+	run(seed, "init", "-q", "-b", base, ".")
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(seed, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(seed, "add", "-A")
+	run(seed, "commit", "-q", "-m", "seed")
+	run(seed, "remote", "add", "origin", origin)
+	run(seed, "push", "-q", "origin", base)
+
+	worktree = gitTempDir(t)
+	run(filepath.Dir(worktree), "clone", "-q", origin, filepath.Base(worktree))
+	return worktree, base
+}
+
+// writeFileAndCommit overwrites name in dir with content and commits it.
+func writeFileAndCommit(t *testing.T, dir, name, content, msg string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, dir, "add", "-A")
+	gitDo(t, dir, "commit", "-q", "-m", msg)
+}
+
+// TestSameFunctionTouchedByBothIgnoresFileOnlyOnOneSide confirms a file that
+// only one side's diff touches at all — not merely a different function
+// within a shared file — takes the "theirs has no entry for this file" path
+// and never reaches the per-function comparison.
+func TestSameFunctionTouchedByBothIgnoresFileOnlyOnOneSide(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initMultiFileRepo(t, map[string]string{"a.go": funcAOriginal, "b.go": funcBOriginal})
+
+	other := gitTempDir(t)
+	gitDo(t, filepath.Dir(other), "clone", "-q", mustRemote(t, wt), filepath.Base(other))
+	writeFileAndCommit(t, other, "b.go", funcBEdited, "edit FuncB")
+	gitDo(t, other, "push", "-q", "origin", base)
+
+	writeFileAndCommit(t, wt, "a.go", funcAEdited, "edit FuncA")
+
+	if err := FetchBase(ctx, wt, base); err != nil {
+		t.Fatalf("FetchBase: %v", err)
+	}
+
+	conflicts, err := sameFunctionTouchedByBoth(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("sameFunctionTouchedByBoth: %v", err)
+	}
+	if conflicts {
+		t.Error("edits to entirely different files should not conflict, even before comparing per-function")
+	}
+}
+
+// TestParseTouchedFunctionsSkipsHunkBeforeFilename confirms a "@@" hunk
+// header that appears before any "+++ " line — so file is still "" — is
+// skipped rather than recorded under a phantom empty-string file key.
+func TestParseTouchedFunctionsSkipsHunkBeforeFilename(t *testing.T) {
+	diff := "@@ -1,1 +1,1 @@ func Orphan() {\n-old\n+new\n"
+	got := parseTouchedFunctions(diff)
+	if len(got) != 0 {
+		t.Errorf("a hunk with no preceding +++ line should be skipped entirely, got %+v", got)
+	}
+}
+
+// TestRemoteBranchSHATransportErrorWrapped confirms an ls-remote transport
+// failure (a non-git worktree stands in for any origin-unreachable case) is
+// wrapped with the branch it was querying for, not returned bare.
+func TestRemoteBranchSHATransportErrorWrapped(t *testing.T) {
+	ctx := context.Background()
+	notGit := t.TempDir()
+	_, err := RemoteBranchSHA(ctx, notGit, "main")
+	if err == nil {
+		t.Fatal("want an error querying a non-git worktree")
+	}
+	if !strings.Contains(err.Error(), "querying origin for main") {
+		t.Errorf("error should wrap with branch context, got %v", err)
+	}
+}
+
+// TestCommitsAheadOfBaseRevListErrorWrapped confirms a rev-list failure (a
+// non-git worktree) is wrapped with the base it was counting against.
+func TestCommitsAheadOfBaseRevListErrorWrapped(t *testing.T) {
+	ctx := context.Background()
+	notGit := t.TempDir()
+	_, err := CommitsAheadOfBase(ctx, notGit, "main")
+	if err == nil {
+		t.Fatal("want an error counting commits in a non-git worktree")
+	}
+	if !strings.Contains(err.Error(), "counting commits ahead of origin/main") {
+		t.Errorf("error should wrap with base context, got %v", err)
+	}
+}
+
+// TestCommitsAheadOfBaseNonNumericParseErrorWrapped confirms a git stdout
+// that isn't a plain integer (never happens with real `rev-list --count`, so
+// a fake git stand-in is needed to reach this branch at all) reports a parse
+// error rather than a bogus count.
+func TestCommitsAheadOfBaseNonNumericParseErrorWrapped(t *testing.T) {
+	ctx := context.Background()
+	bin := t.TempDir()
+	writeFakeBinary(t, bin, "git", 0)
+	fakeBinPATH(t, bin)
+
+	_, err := CommitsAheadOfBase(ctx, t.TempDir(), "main")
+	if err == nil {
+		t.Fatal("want a parse error when git's own output isn't numeric")
+	}
+	if !strings.Contains(err.Error(), "parsing commit count") {
+		t.Errorf("error should name the parse failure, got %v", err)
+	}
+}
+
+// TestPushAndVerifyHappyPath confirms the shared push-then-verify pair
+// succeeds end to end once a real commit actually lands on origin.
+func TestPushAndVerifyHappyPath(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGitRepo(t)
+	writeAndCommit(t, wt, "line1\nline2\n", "advance")
+
+	if err := PushAndVerify(ctx, wt, base); err != nil {
+		t.Fatalf("PushAndVerify: %v", err)
+	}
+}
+
+// TestPushAndVerifyForcePushErrorWrapped confirms a ForcePushBranch failure
+// (no origin remote configured) is wrapped with branch context rather than
+// returned bare.
+func TestPushAndVerifyForcePushErrorWrapped(t *testing.T) {
+	ctx := context.Background()
+	wt := t.TempDir()
+	run := gitInit(t, wt)
+	run("commit", "-q", "--allow-empty", "-m", "init")
+
+	err := PushAndVerify(ctx, wt, "feat-x")
+	if err == nil {
+		t.Fatal("want an error pushing from a worktree with no origin remote")
+	}
+	if !strings.Contains(err.Error(), "pushing feat-x to origin") {
+		t.Errorf("error should wrap with branch context, got %v", err)
+	}
+}
+
+// writeFakeGitDispatch drops an executable "git" stand-in into dir that
+// unconditionally exits 0 for a push (simulating one that reports success
+// without actually landing) while returning divergent SHAs for rev-parse
+// HEAD and ls-remote — the exact shape PushAndVerify's own VerifyPushLanded
+// call must catch, and one no real git repo can be coaxed into producing
+// since a real push that exits 0 always does land.
+func writeFakeGitDispatch(t *testing.T, dir string) {
+	t.Helper()
+	script := filepath.Join(dir, "git")
+	content := `#!/bin/sh
+case "$*" in
+  *"push "*) exit 0 ;;
+  *"rev-parse HEAD"*) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+  *"ls-remote "*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/heads/feat\n' ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("writing fake git dispatch: %v", err)
+	}
+}
+
+// TestPushAndVerifyCatchesUnlandedPush confirms PushAndVerify surfaces
+// VerifyPushLanded's own mismatch error when the push subprocess exits 0 but
+// origin never actually moved.
+func TestPushAndVerifyCatchesUnlandedPush(t *testing.T) {
+	ctx := context.Background()
+	bin := t.TempDir()
+	writeFakeGitDispatch(t, bin)
+	fakeBinPATH(t, bin)
+
+	err := PushAndVerify(ctx, t.TempDir(), "feat")
+	if err == nil {
+		t.Fatal("want VerifyPushLanded to catch a push that reported success but did not land")
+	}
+	if !strings.Contains(err.Error(), "did not land") {
+		t.Errorf("error should surface VerifyPushLanded's mismatch, got %v", err)
+	}
+}
+
+// TestVerifyPushLandedHeadSHAErrorWrapped confirms a HeadSHA failure (a
+// non-git worktree) is wrapped rather than returned bare.
+func TestVerifyPushLandedHeadSHAErrorWrapped(t *testing.T) {
+	ctx := context.Background()
+	notGit := t.TempDir()
+	err := VerifyPushLanded(ctx, notGit, "main")
+	if err == nil {
+		t.Fatal("want an error resolving local HEAD in a non-git worktree")
+	}
+	if !strings.Contains(err.Error(), "resolving local HEAD") {
+		t.Errorf("error should wrap the HeadSHA failure, got %v", err)
+	}
+}
+
+// TestVerifyPushLandedRemoteBranchSHAErrorPropagates confirms a
+// RemoteBranchSHA failure (no origin remote configured, so HeadSHA succeeds
+// but the origin query can't) propagates VerifyPushLanded's own error
+// unwrapped further — RemoteBranchSHA already carries branch context.
+func TestVerifyPushLandedRemoteBranchSHAErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	wt := t.TempDir()
+	run := gitInit(t, wt)
+	run("commit", "-q", "--allow-empty", "-m", "init")
+
+	err := VerifyPushLanded(ctx, wt, "main")
+	if err == nil {
+		t.Fatal("want an error querying origin when no origin remote is configured")
+	}
+	if !strings.Contains(err.Error(), "querying origin for main") {
+		t.Errorf("VerifyPushLanded should propagate RemoteBranchSHA's own wrapped error, got %v", err)
+	}
+}
+
+// TestInvalidateStatusNonNotExistErrorWrapped confirms a removal failure
+// other than "file doesn't exist" (a non-empty directory sitting at the
+// status path, so os.Remove refuses regardless of the caller's permissions)
+// is reported rather than swallowed like the ErrNotExist case.
+func TestInvalidateStatusNonNotExistErrorWrapped(t *testing.T) {
+	wt := t.TempDir()
+	statusPath := protocol.StatusPath(wt)
+	if err := os.MkdirAll(statusPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(statusPath, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := InvalidateStatus(wt)
+	if err == nil {
+		t.Fatal("want an error when the status path is a non-empty directory os.Remove can't delete")
+	}
+	if !strings.Contains(err.Error(), "removing") {
+		t.Errorf("error should wrap the removal failure, got %v", err)
+	}
+}
+
+// TestIsStaleZeroSinceReturnsFalse confirms a zero since (no dispatch time to
+// compare against) never marks a file stale, regardless of its mtime.
+func TestIsStaleZeroSinceReturnsFalse(t *testing.T) {
+	if isStale(filepath.Join(t.TempDir(), "missing"), time.Time{}) {
+		t.Error("a zero since should never be treated as making a file stale")
+	}
+}
+
+// TestIsStaleStatErrorReturnsFalse confirms a path that can't be stat'd
+// (e.g. no file written yet) is treated as not stale — the caller's own
+// handling of a missing/unreadable status file decides that case instead.
+func TestIsStaleStatErrorReturnsFalse(t *testing.T) {
+	if isStale(filepath.Join(t.TempDir(), "does-not-exist"), time.Now()) {
+		t.Error("a path that can't be stat'd should not be treated as stale")
+	}
+}
