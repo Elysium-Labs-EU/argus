@@ -3,6 +3,7 @@ package protocol
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -64,6 +65,45 @@ func TestWritePaneRegistryUnwritableDir(t *testing.T) {
 	}
 }
 
+func TestLoadPaneRegistryNoPanesKeyReinitsEmptyMap(t *testing.T) {
+	repoRoot := t.TempDir()
+	path := PaneRegistryPath(repoRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// Valid JSON, but no "panes" key at all — Panes decodes nil, not empty,
+	// so the reinit branch is the only thing standing between callers and a
+	// nil-map write panic.
+	if err := os.WriteFile(path, []byte(`{"nested":{"x":true}}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	got, err := LoadPaneRegistry(repoRoot)
+	if err != nil {
+		t.Fatalf("LoadPaneRegistry: %v", err)
+	}
+	if got.Panes == nil || len(got.Panes) != 0 {
+		t.Errorf("want a non-nil empty Panes map, got %+v", got.Panes)
+	}
+}
+
+func TestLoadPaneRegistryUnreadablePath(t *testing.T) {
+	repoRoot := t.TempDir()
+	path := PaneRegistryPath(repoRoot)
+	// A directory at the registry path fails os.ReadFile with EISDIR, not
+	// ErrNotExist — this exercises the "reading pane registry" branch
+	// distinct from the missing-file case.
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	_, err := LoadPaneRegistry(repoRoot)
+	if err == nil {
+		t.Fatal("want error reading a registry path that is a directory, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "reading pane registry") {
+		t.Errorf("error %q does not mention reading pane registry", got)
+	}
+}
+
 func TestLoadPaneRegistryMalformedJSON(t *testing.T) {
 	repoRoot := t.TempDir()
 	path := PaneRegistryPath(repoRoot)
@@ -75,5 +115,46 @@ func TestLoadPaneRegistryMalformedJSON(t *testing.T) {
 	}
 	if _, err := LoadPaneRegistry(repoRoot); err == nil {
 		t.Fatal("want error decoding malformed pane registry, got nil")
+	}
+}
+
+func TestWritePaneRegistryRenameFails(t *testing.T) {
+	repoRoot := t.TempDir()
+	path := PaneRegistryPath(repoRoot)
+	// A directory already sitting at the target path makes the final
+	// os.Rename fail after the tmp file was written successfully —
+	// distinct from a MkdirAll or WriteFile failure.
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	err := WritePaneRegistry(repoRoot, PaneRegistry{Panes: map[string]string{"k": "v"}})
+	if err == nil {
+		t.Fatal("want error renaming into a path occupied by a directory, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "renaming pane registry into place") {
+		t.Errorf("error %q does not mention renaming pane registry into place", got)
+	}
+}
+
+func TestWritePaneRegistryWriteFailsAfterMkdirAll(t *testing.T) {
+	repoRoot := t.TempDir()
+	dir := filepath.Dir(PaneRegistryPath(repoRoot))
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// The dir already exists, so WritePaneRegistry's own MkdirAll is a
+	// no-op that succeeds regardless of permissions — only the WriteFile
+	// into it fails here.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o750) }) // let t.TempDir's own cleanup remove it
+
+	err := WritePaneRegistry(repoRoot, PaneRegistry{Panes: map[string]string{"k": "v"}})
+	if err == nil {
+		t.Fatal("want error writing into a read-only registry dir, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "writing pane registry") {
+		t.Errorf("error %q does not mention writing pane registry", got)
 	}
 }
