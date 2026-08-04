@@ -108,11 +108,11 @@ func TestEnforceOwnershipStaleMismatchPrintsNoticeAndProceeds(t *testing.T) {
 	}
 }
 
-// initOwnerConfigRepo makes a real git checkout with .argus/config.yml
-// containing owner_stale_after: ownerStaleAfterYAML, so
-// resolveOwnerStaleAfterForWorktree's supervisor.RepoRoot call has a real
-// repo to resolve — mirrors attachWorktree's own local git helper closure.
-func initOwnerConfigRepo(t *testing.T, ownerStaleAfterYAML string) string {
+// initGitRepoWithRawConfig makes a real git checkout with .argus/config.yml
+// containing raw verbatim, so resolveOwnerStaleAfterForWorktree's
+// supervisor.RepoRoot call has a real repo to resolve — mirrors
+// attachWorktree's own local git helper closure.
+func initGitRepoWithRawConfig(t *testing.T, raw string) string {
 	t.Helper()
 	wt := t.TempDir()
 	git := func(args ...string) {
@@ -128,10 +128,17 @@ func initOwnerConfigRepo(t *testing.T, ownerStaleAfterYAML string) string {
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		t.Fatalf("mkdir .argus: %v", err)
 	}
-	if err := os.WriteFile(cfgPath, []byte("owner_stale_after: \""+ownerStaleAfterYAML+"\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o644); err != nil {
 		t.Fatalf("writing config.yml: %v", err)
 	}
 	return wt
+}
+
+// initOwnerConfigRepo makes a real git checkout with .argus/config.yml
+// containing owner_stale_after: ownerStaleAfterYAML.
+func initOwnerConfigRepo(t *testing.T, ownerStaleAfterYAML string) string {
+	t.Helper()
+	return initGitRepoWithRawConfig(t, "owner_stale_after: \""+ownerStaleAfterYAML+"\"\n")
 }
 
 func TestEnforceOwnershipUsesRepoConfigOwnerStaleAfterWhenFlagNotExplicit(t *testing.T) {
@@ -175,6 +182,44 @@ func TestResolveOwnerStaleAfterForWorktreeOutsideRepoFallsBackToFlag(t *testing.
 	}
 	if got != 30*time.Minute {
 		t.Errorf("resolveOwnerStaleAfterForWorktree = %v, want the flag's own default", got)
+	}
+}
+
+// TestResolveOwnerStaleAfterForWorktreeMalformedConfigReturnsUserError covers
+// ownership.go's other repoconfig.Load failure branch: unlike
+// resolveOwnerStaleAfterForWorktree's own missing-repo-root fallback (silent,
+// via nilerr), a config file that exists but fails to parse is a real,
+// user-facing error — a colon-less line has no recognized "key: value" split.
+func TestResolveOwnerStaleAfterForWorktreeMalformedConfigReturnsUserError(t *testing.T) {
+	wt := initGitRepoWithRawConfig(t, "this is not valid yaml\n")
+	_, err := resolveOwnerStaleAfterForWorktree(context.Background(), wt, false, 30*time.Minute)
+	if err == nil {
+		t.Fatal("want a malformed config.yml to error, got nil")
+	}
+	if _, ok := errors.AsType[*ui.UserError](err); !ok {
+		t.Errorf("err = %v (%T), want a *ui.UserError", err, err)
+	}
+}
+
+// TestEnforceOwnershipPropagatesResolveOwnerStaleAfterForWorktreeErr covers
+// enforceOwnership's own early return (ownership.go L57-59): a malformed
+// repo config must fail the whole call before ever reaching
+// ownership.ResolveOwnerID/Enforce — proven here by an owner mismatch that
+// would otherwise refuse for a different reason if config resolution didn't
+// short-circuit first.
+func TestEnforceOwnershipPropagatesResolveOwnerStaleAfterForWorktreeErr(t *testing.T) {
+	wt := initGitRepoWithRawConfig(t, "this is not valid yaml\n")
+	seedOwnerLease(t, wt, time.Now())
+	var buf bytes.Buffer
+	err := enforceOwnership(context.Background(), &buf, wt, ownerFlags{owner: "sess-2"}, time.Now())
+	if err == nil {
+		t.Fatal("want a malformed repo config to fail enforceOwnership, got nil")
+	}
+	if _, ok := errors.AsType[*ui.UserError](err); !ok {
+		t.Errorf("err = %v (%T), want a *ui.UserError", err, err)
+	}
+	if buf.String() != "" {
+		t.Errorf("want no notice written when config resolution fails before the lease check, got: %q", buf.String())
 	}
 }
 
