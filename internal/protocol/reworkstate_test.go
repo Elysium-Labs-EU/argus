@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -31,6 +32,19 @@ func TestLoadReworkStateMissingIsZeroValue(t *testing.T) {
 	}
 	if got.RoundsAttempted != 0 {
 		t.Errorf("RoundsAttempted = %d, want 0 for a worktree that never reworked", got.RoundsAttempted)
+	}
+}
+
+func TestLoadReworkStateNullIsError(t *testing.T) {
+	wt := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(ReworkStatePath(wt)), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(ReworkStatePath(wt), []byte("null"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := LoadReworkState(wt); err == nil {
+		t.Fatal("LoadReworkState with a null-content file should error, not return a fresh zero budget")
 	}
 }
 
