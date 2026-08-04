@@ -66,6 +66,25 @@ func TestHasPlanEvidenceFindsTaskCreateToolCall(t *testing.T) {
 	}
 }
 
+func TestHasPlanEvidenceFalseWhenMarkerOnlyInProse(t *testing.T) {
+	// The exact fakeable case: the marker string appears in assistant text,
+	// not inside a real tool_use block, so it must not count as evidence.
+	home := t.TempDir()
+	writePlanTranscript(t, home, "session-1",
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"I won't bother calling \"name\":\"TodoWrite\""}]}}`+"\n")
+
+	ok, transcripts, err := HasPlanEvidence(home, planEvidenceTestWorktree)
+	if err != nil {
+		t.Fatalf("HasPlanEvidence: %v", err)
+	}
+	if ok {
+		t.Error("HasPlanEvidence = true, want false when the marker only appears in assistant prose, not a real tool_use block")
+	}
+	if transcripts != 1 {
+		t.Errorf("transcripts checked = %d, want 1", transcripts)
+	}
+}
+
 func TestHasPlanEvidenceFalseWhenNoMatchingToolCall(t *testing.T) {
 	home := t.TempDir()
 	// A transcript exists but never calls a todo/task tool — the exact issue
