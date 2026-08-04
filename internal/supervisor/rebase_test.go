@@ -248,6 +248,39 @@ func TestConflictsWithDetectsCleanAndConflicting(t *testing.T) {
 	}
 }
 
+// TestFuncNameInContext covers the declaration shapes funcNameRe's plain
+// "identifier immediately before (" rule can't extract a name from — generic
+// funcs, arrow-fn consts, and class/type/interface/struct decls — plus the
+// plain-func case it already handled and the conservative whole-line
+// fallback for anything none of the patterns recognize.
+func TestFuncNameInContext(t *testing.T) {
+	tests := []struct {
+		name    string
+		context string
+		want    string
+	}{
+		{"plain receiver method", "func (s *Supervisor) reconcile(cfg *Config) error {", "reconcile"},
+		{"plain top-level func", "func unrelated() int {", "unrelated"},
+		{"generic top-level func", "func Map[T any](items []T) {", "Map"},
+		{"generic receiver method", "func (s *Server[T]) Foo[U any](x U) {", "Foo"},
+		{"arrow-fn const", "const fn = (a) => {", "fn"},
+		{"arrow-fn let, single arg no parens", "let fn = a => {", "fn"},
+		{"class decl", "class Foo {", "Foo"},
+		{"struct decl via type", "type Config struct {", "Config"},
+		{"interface decl", "interface Bar {", "Bar"},
+		{"unrecognized shape falls back to whole line", "??? not a declaration ???", "??? not a declaration ???"},
+		{"empty context stays empty", "", ""},
+		{"whitespace-only context stays empty", "   ", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := funcNameInContext(tt.context); got != tt.want {
+				t.Errorf("funcNameInContext(%q) = %q, want %q", tt.context, got, tt.want)
+			}
+		})
+	}
+}
+
 // reconcileBase reproduces a diff-adjacency hazard: reconcile() has two
 // structurally near-identical "for _, st := range states"
 // loops (mirroring the real internal/supervisor/loop.go), which is what leads
@@ -484,6 +517,126 @@ func TestConflictsWithIgnoresEditsToDifferentFunctions(t *testing.T) {
 	}
 	if conflicts {
 		t.Error("ConflictsWith should not flag a conflict for edits to unrelated functions")
+	}
+}
+
+// mapBase is reconcileBase's generic-func counterpart: before the fix,
+// funcNameRe returned "" for a generic func's declaration line (the "[T
+// any]" sits between the name and "(", breaking "identifier immediately
+// before ("), so parseTouchedFunctions silently dropped every hunk inside
+// Map() and the same-function safety net never fired for it.
+const mapBase = `package supervisor
+
+func Map[T any](items []T, states []*workerState) []T {
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		measure(st)
+	}
+
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ok, err := HasPlanEvidence(cfg.Home, st.Worktree)
+		if err != nil {
+			continue
+		}
+		st.hasPlanEvidence = ok
+	}
+	return items
+}
+`
+
+// mapWithGuard is mapBase's guard-clause half of the same non-overlapping-
+// lines edit pair used by reconcileWithGuard.
+const mapWithGuard = `package supervisor
+
+func Map[T any](items []T, states []*workerState) []T {
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		measure(st)
+	}
+
+	if !usesDefaultLauncher(cfg.Launcher) {
+		return items
+	}
+
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ok, err := HasPlanEvidence(cfg.Home, st.Worktree)
+		if err != nil {
+			continue
+		}
+		st.hasPlanEvidence = ok
+	}
+	return items
+}
+`
+
+// mapWithRename is mapBase's rename half of the same edit pair.
+const mapWithRename = `package supervisor
+
+func Map[T any](items []T, states []*workerState) []T {
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		measure(st)
+	}
+
+	for _, st := range states {
+		if !st.hasFile {
+			continue
+		}
+		ok, err := defaultAgent.PlanEvidence(cfg.Home, st.Worktree)
+		if err != nil {
+			continue
+		}
+		st.hasPlanEvidence = ok
+	}
+	return items
+}
+`
+
+// TestConflictsWithCatchesGenericFuncEditedByBothSides is the generic-func
+// analog of TestConflictsWithCatchesSameFunctionEditedByBothSides: it
+// reproduces issue #493's repro exactly, confirming the fix actually closes
+// the hole rather than just satisfying the unit-level table test above.
+func TestConflictsWithCatchesGenericFuncEditedByBothSides(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGoRepo(t, mapBase)
+
+	other := gitTempDir(t)
+	gitDo(t, filepath.Dir(other), "clone", "-q", mustRemote(t, wt), filepath.Base(other))
+	writeAndCommit(t, other, mapWithGuard, "add guard")
+	gitDo(t, other, "push", "-q", "origin", base)
+
+	writeAndCommit(t, wt, mapWithRename, "rename call via seam")
+
+	if err := FetchBase(ctx, wt, base); err != nil {
+		t.Fatalf("FetchBase: %v", err)
+	}
+
+	textConflict, err := gitMergeConflicts(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("gitMergeConflicts: %v", err)
+	}
+	if textConflict {
+		t.Fatal("test setup should reproduce a textually clean merge (git's own false negative) — got a real conflict instead")
+	}
+
+	conflicts, err := ConflictsWith(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("ConflictsWith: %v", err)
+	}
+	if !conflicts {
+		t.Error("ConflictsWith should flag a conflict when both sides edit a generic func's body, even though git's own merge-tree reports clean")
 	}
 }
 
