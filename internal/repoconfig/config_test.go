@@ -570,6 +570,208 @@ func TestLoadMalformedLineErrors(t *testing.T) {
 	}
 }
 
+// TestLoadUnreadablePathNonNotExistError covers Load's other os.ReadFile
+// branch: a path whose parent component exists but isn't a directory fails
+// with ENOTDIR, not ENOENT, so os.IsNotExist(err) is false and Load must
+// propagate the error instead of treating it as "missing file".
+func TestLoadUnreadablePathNonNotExistError(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := Load(filepath.Join(blocker, "config.yml"))
+	if err == nil {
+		t.Fatal("Load(path through a file): want error, got nil")
+	}
+	if !reflect.DeepEqual(cfg, Config{}) {
+		t.Errorf("Load(path through a file) cfg = %+v, want zero Config", cfg)
+	}
+}
+
+// TestSaveMkdirAllErrorWrapped covers Save's MkdirAll error path: the parent
+// directory can't be created because a path component is already a regular
+// file, not a directory.
+func TestSaveMkdirAllErrorWrapped(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	err := Save(filepath.Join(blocker, "sub", "config.yml"), &Config{})
+	if err == nil {
+		t.Fatal("Save(parent path blocked by a file): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating config directory") {
+		t.Errorf("Save error = %q, want it to mention %q", err.Error(), "creating config directory")
+	}
+}
+
+// TestSaveWriteFileErrorWrapped covers Save's WriteFile error path: MkdirAll
+// succeeds (the parent already exists) but the target path is itself a
+// directory, so WriteFile fails with EISDIR.
+func TestSaveWriteFileErrorWrapped(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	err := Save(path, &Config{})
+	if err == nil {
+		t.Fatal("Save(target path is a directory): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "writing config file") {
+		t.Errorf("Save error = %q, want it to mention %q", err.Error(), "writing config file")
+	}
+}
+
+// TestLoadUnknownKeyWithOwnListBlockSkipsPastIt covers parseYAML's
+// unknown-key-introduces-a-list-block branch: the unrecognized key's
+// indented "- " lines must be skipped as a unit, not tripped over by the
+// "list item outside of a recognized key" check, and parsing must resume
+// correctly at the next real key.
+func TestLoadUnknownKeyWithOwnListBlockSkipsPastIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	content := "future_list_key:\n  - one\n  - two\nbase_branch: \"main\"\n"
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.BaseBranch != "main" {
+		t.Errorf("BaseBranch = %q, want %q (parsing must resume past the skipped list block)", got.BaseBranch, "main")
+	}
+}
+
+// TestLoadBadQuotedScalarValueErrors covers unquoteYAML's error path as
+// surfaced through a scalar field: an invalid Go quote escape is a hard
+// parse error, not a value that's silently left bare.
+func TestLoadBadQuotedScalarValueErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "base_branch: \"\\x\"\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(bad quoted scalar): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "bad value") {
+		t.Errorf("Load error = %q, want it to mention %q", err.Error(), "bad value")
+	}
+}
+
+// TestLoadBadQuotedListItemErrors covers parseYAMLList's own unquoteYAML
+// error path, distinct from the scalar-value one above.
+func TestLoadBadQuotedListItemErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "allow:\n  - \"\\x\"\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(bad quoted list item): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "bad list item") {
+		t.Errorf("Load error = %q, want it to mention %q", err.Error(), "bad list item")
+	}
+}
+
+// TestLoadPhaseSkipBadBoolErrors covers assignPhaseKey's ParseBool error
+// path for the skip subkey.
+func TestLoadPhaseSkipBadBoolErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "phase.planning.skip: notabool\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(phase.planning.skip: notabool): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "phase.planning.skip") {
+		t.Errorf("Load error = %q, want it to mention %q", err.Error(), "phase.planning.skip")
+	}
+}
+
+// TestLoadPhaseDenyInlineValueErrors covers assignPhaseKey's deny-must-be-a-
+// list-not-an-inline-value error path.
+func TestLoadPhaseDenyInlineValueErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "phase.planning.deny: inlineval\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(phase.planning.deny: inlineval): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "expects a list") {
+		t.Errorf("Load error = %q, want it to mention %q", err.Error(), "expects a list")
+	}
+}
+
+// TestLoadMaxDiffLinesBadIntErrors covers assignScalarField's Atoi error
+// path for max_diff_lines.
+func TestLoadMaxDiffLinesBadIntErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "max_diff_lines: notanint\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(max_diff_lines: notanint): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "max_diff_lines") {
+		t.Errorf("Load error = %q, want it to mention %q", err.Error(), "max_diff_lines")
+	}
+}
+
+// TestLoadReworkBudgetBadIntErrors covers assignScalarField's Atoi error
+// path for rework_budget.
+func TestLoadReworkBudgetBadIntErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "rework_budget: notanint\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(rework_budget: notanint): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "rework_budget") {
+		t.Errorf("Load error = %q, want it to mention %q", err.Error(), "rework_budget")
+	}
+}
+
+// TestLoadBarePhaseKeyIgnored pins parsePhaseKey's ok=false case: a
+// phase.<name> key with no ".<subkey>" is not shaped like the schema expects,
+// so it falls through as an ordinary unrecognized top-level key (ignored)
+// rather than the "unrecognized phase policy key" hard error that a
+// phase.<name>.<badsubkey> key gets.
+func TestLoadBarePhaseKeyIgnored(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := writeFile(path, "phase.planning: true\nbase_branch: \"main\"\n"); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(bare phase.planning key): %v", err)
+	}
+	if got.BaseBranch != "main" {
+		t.Errorf("BaseBranch = %q, want %q", got.BaseBranch, "main")
+	}
+	if len(got.Phases) != 0 {
+		t.Errorf("Phases = %+v, want empty (bare key must not be treated as a phase policy)", got.Phases)
+	}
+}
+
 func writeFile(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
