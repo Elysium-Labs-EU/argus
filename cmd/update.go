@@ -44,7 +44,11 @@ var httpClient = &http.Client{
 // .github/workflows/release.yml to sign at release time — it is never
 // checked into this repo. Keep this in sync with the identical PEM block in
 // scripts/install.sh; `make check-pubkey-sync` fails CI if they diverge.
-const releaseSigningPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+//
+// A var (not a const) solely so tests can swap in malformed PEM/DER to
+// exercise parseReleaseSigningPublicKey's error branches; production code
+// never reassigns it.
+var releaseSigningPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzH6mhj2TebCaVFtf1zMAeCpQ9yg1
 /VTcggLqSs5h5zkIkBbyl6RrXqSjHrHA1MUvqQWj6GDuzIIshcBtSzQH1g==
 -----END PUBLIC KEY-----
@@ -383,7 +387,7 @@ func verifyReleaseSignature(ctx context.Context, out io.Writer, rel Release, che
 	if dlErr := downloadFile(ctx, sig.DownloadURL, sigTmp); dlErr != nil {
 		return fmt.Errorf("downloading signature: %w", dlErr)
 	}
-	sigData, err := os.ReadFile(sigTmp) //nolint:gosec // fixed name in an argus-owned temp dir
+	sigData, err := readFileFunc(sigTmp)
 	if err != nil {
 		return fmt.Errorf("reading signature: %w", err)
 	}
@@ -448,6 +452,16 @@ func resignBinary(ctx context.Context, goos, path string) error {
 // without shelling out to the real codesign binary.
 var resignFunc = resignBinary
 
+// readFileFunc backs the two fixed-name temp-file reads in this file (the
+// downloaded checksums and signature), as a var so tests can force a read
+// failure without racing a real filesystem to induce one.
+var readFileFunc = os.ReadFile
+
+// chmodFunc backs replaceBinary's tmp-file chmod, as a var so tests can force
+// the chmod failure branch — hard to trigger for real since chmod(2) only
+// checks file ownership, not directory permissions.
+var chmodFunc = os.Chmod
+
 // replaceBinary installs newPath over dstPath, which may be the currently
 // running executable: it copies to a same-directory temp file, chmods it
 // executable, then renames over dstPath. The rename is atomic on the same
@@ -468,7 +482,7 @@ func replaceBinary(ctx context.Context, newPath, dstPath, backupPath string) err
 	if err := copyFile(newPath, tmp); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, 0o755); err != nil { //nolint:gosec // installed binary must be executable
+	if err := chmodFunc(tmp, 0o755); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("chmod %s: %w", tmp, err)
 	}
@@ -500,9 +514,14 @@ func checkWritable(dir string) error {
 	return os.Remove(probe)
 }
 
+// executableFunc resolves the running binary's path, as a var (not a direct
+// call to os.Executable) so tests can point currentBinaryPath at a dangling
+// symlink and exercise the EvalSymlinks failure branch below.
+var executableFunc = os.Executable
+
 // currentBinaryPath returns the resolved path of the running argus binary.
 func currentBinaryPath() (string, error) {
-	exePath, err := os.Executable()
+	exePath, err := executableFunc()
 	if err != nil {
 		return "", fmt.Errorf("locating running binary: %w", err)
 	}
@@ -624,7 +643,7 @@ func downloadAndVerifyUpdate(ctx context.Context, out io.Writer, rel Release, as
 	if dlErr := downloadFile(ctx, checksums.DownloadURL, checksumsTmp); dlErr != nil {
 		return "", fmt.Errorf("downloading checksums: %w", dlErr)
 	}
-	checksumsData, err := os.ReadFile(checksumsTmp) //nolint:gosec // fixed name in an argus-owned temp dir
+	checksumsData, err := readFileFunc(checksumsTmp)
 	if err != nil {
 		return "", fmt.Errorf("reading checksums: %w", err)
 	}
