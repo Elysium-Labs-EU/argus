@@ -138,6 +138,98 @@ func TestGitLabOpenPRSurfacesAPIMessage(t *testing.T) {
 	}
 }
 
+func TestGitLabOpenPRMalformedResponse(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `not json`, 201)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r"})
+	if err == nil || !strings.Contains(err.Error(), "decoding merge request response") {
+		t.Errorf("OpenPR err = %v, want it to mention decoding merge request response", err)
+	}
+}
+
+func TestGitLabFindPRMalformedResponse(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"not":"an array"}`, 200)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, _, err = f.FindPR(context.Background(), "o", "r", "feat-x")
+	if err == nil || !strings.Contains(err.Error(), "decoding merge request list") {
+		t.Errorf("FindPR err = %v, want it to mention decoding merge request list", err)
+	}
+}
+
+func TestGitLabFindPRSurfacesDoError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"project not found"}`, 404)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, found, err := f.FindPR(context.Background(), "o", "r", "feat-x")
+	if err == nil || !strings.Contains(err.Error(), "project not found") {
+		t.Errorf("FindPR err = %v, want it to surface the 404 API message", err)
+	}
+	if found {
+		t.Error("found should be false on error")
+	}
+}
+
+func TestGitLabFetchIssueMalformedResponse(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `not json`, 200)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.FetchIssue(context.Background(), "o", "r", 42)
+	if err == nil || !strings.Contains(err.Error(), "decoding issue response") {
+		t.Errorf("FetchIssue err = %v, want it to mention decoding issue response", err)
+	}
+}
+
+func TestGitLabFetchIssueSurfacesDoError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"issue not found"}`, 404)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.FetchIssue(context.Background(), "o", "r", 42)
+	if err == nil || !strings.Contains(err.Error(), "issue not found") {
+		t.Errorf("FetchIssue err = %v, want it to surface the 404 API message", err)
+	}
+}
+
+// TestGitLabDoRejectsInvalidMethod pins do's own request-construction failure
+// path: http.NewRequestWithContext rejects a method containing whitespace,
+// and that must surface wrapped rather than panic or silently succeed.
+func TestGitLabDoRejectsInvalidMethod(t *testing.T) {
+	g := &gitlab{http: &http.Client{}, host: "gitlab.com", base: "https://gitlab.com/api/v4", token: "t"}
+	_, err := g.do(context.Background(), "BAD METHOD", "https://gitlab.com/api/v4/projects/o%2Fr", nil)
+	if err == nil || !strings.Contains(err.Error(), "building request") {
+		t.Errorf("do err = %v, want it to mention building request", err)
+	}
+}
+
+// TestGitLabDoOmitsStatusNoteForClientError pins svcstatus.WorthMentioning's
+// caller-vs-host split at the do level: a 4xx is the caller's problem, so no
+// status-page note should be appended even when one is configured.
+func TestGitLabDoOmitsStatusNoteForClientError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"bad request"}`, 400)
+	f, err := New("gitlab.corp.example.com", "t", hc, KindGitLab, "https://status.corp.example.com")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.OpenPR(context.Background(), &PRRequest{Owner: "o", Repo: "r"})
+	if err == nil || !strings.Contains(err.Error(), "bad request") {
+		t.Fatalf("OpenPR err = %v, want it to surface the 400 API message", err)
+	}
+	if strings.Contains(err.Error(), "status.corp.example.com") {
+		t.Errorf("OpenPR err = %q, want no status-page note for a 4xx", err.Error())
+	}
+}
+
 // TestGitLabPRChecksRefusesUnimplemented guards the deliberate MVP scope cut:
 // PRChecks is GitHub-only for now, and GitLab must refuse clearly rather than
 // silently return no checks (which a poller would misread as "not started
