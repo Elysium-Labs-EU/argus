@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,11 +14,21 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
+
+// testLogger returns a *eventlog.Logger that discards its output, for tests
+// that call a function taking a *eventlog.Logger directly without going
+// through openRunLog's real file-backed one.
+func testLogger(t *testing.T) *eventlog.Logger {
+	t.Helper()
+	return eventlog.New(io.Discard, "ship", "test", nil)
+}
 
 func TestDefaultPRTitle(t *testing.T) {
 	if got := defaultPRTitle(144, "fix-x"); got != "fix: fix-x (#144)" {
@@ -1138,6 +1149,577 @@ func TestShipChangeGateRunsEvenWithForce(t *testing.T) {
 	if err == nil {
 		t.Fatal("want ship_lint failure to block ship even with --force")
 	}
+}
+
+// TestCheckApprovedLoadApprovalErrPropagates covers the LoadApproval-error
+// branch: a corrupt verdict.json must fail closed, the same as no verdict at
+// all, rather than being silently treated as "not found".
+func TestCheckApprovedLoadApprovalErrPropagates(t *testing.T) {
+	wt := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(protocol.VerdictPath(wt)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(protocol.VerdictPath(wt), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproved(context.Background(), wt, "HEAD", false); err == nil {
+		t.Fatal("want error when verdict.json is malformed")
+	}
+}
+
+// TestCheckApprovedMeasureDiffErrPropagates covers the re-measure step
+// failing outright (a base ref that doesn't resolve) rather than merely
+// disagreeing with the recorded hash.
+func TestCheckApprovedMeasureDiffErrPropagates(t *testing.T) {
+	wt := gitRepo(t)
+	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: true, Source: "gate"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproved(context.Background(), wt, "origin/does-not-exist", false); err == nil {
+		t.Fatal("want error when MeasureDiff's base ref does not resolve")
+	}
+}
+
+// TestCheckApprovedContentHashErrPropagates covers ContentHash itself
+// failing (not just disagreeing): a tracked path replaced on disk by a
+// directory still shows up in MeasureDiff's file list (git only compares
+// blobs, not on-disk file types), but ContentHash's os.ReadFile on it fails.
+func TestCheckApprovedContentHashErrPropagates(t *testing.T) {
+	wt := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", wt}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(wt, "sub"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "base")
+
+	if err := os.Remove(filepath.Join(wt, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(wt, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "sub", "inner.txt"), []byte("inner\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: true, Source: "gate"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkApproved(context.Background(), wt, "HEAD", false); err == nil {
+		t.Fatal("want error when a tracked diff path is now a directory on disk")
+	}
+}
+
+// TestEnforceShipGateRepoRootErrRefusesGate covers a worktree outside any
+// git repo: the gate must refuse (return an error), not silently skip
+// enforcement and let shipChange proceed to commit.
+func TestEnforceShipGateRepoRootErrRefusesGate(t *testing.T) {
+	if err := enforceShipGate(context.Background(), io.Discard, t.TempDir(), false, ""); err == nil {
+		t.Fatal("want the gate to refuse a worktree outside any git repo")
+	}
+}
+
+// TestEnforceShipGateRepoConfigLoadErrRefusesGate covers a malformed
+// .argus/config.yml: the gate must refuse rather than silently proceeding
+// as if the repo had no config at all.
+func TestEnforceShipGateRepoConfigLoadErrRefusesGate(t *testing.T) {
+	wt := gitRepo(t)
+	if err := os.MkdirAll(filepath.Join(wt, ".argus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(repoconfig.Path(wt), []byte("not a valid config line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := enforceShipGate(context.Background(), io.Discard, wt, false, "")
+	if err == nil {
+		t.Fatal("want the gate to refuse when the repo's config.yml is malformed")
+	}
+	if !strings.Contains(err.Error(), "loading") {
+		t.Errorf("error should name the config load failure, got: %v", err)
+	}
+}
+
+// TestResolveRepoRemoteURLErrPropagates covers a worktree with no origin
+// remote at all: forge/owner/name can never be derived, so resolveRepo must
+// fail rather than return zero-value host/owner/name.
+func TestResolveRepoRemoteURLErrPropagates(t *testing.T) {
+	wt := gitRepo(t) // no origin remote added
+	if _, _, _, err := resolveRepo(context.Background(), "", wt); err == nil {
+		t.Fatal("want error resolving a repo with no origin remote")
+	}
+}
+
+// TestResolveRepoRejectsMalformedOverride covers --repo given in a shape
+// that isn't owner/name — must fail with a UserError, not silently split on
+// the wrong character or fall through with an empty owner/name.
+func TestResolveRepoRejectsMalformedOverride(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@github.com:acme/widget.git"})
+	_, _, _, err := resolveRepo(context.Background(), "not-owner-slash-name", wt)
+	if err == nil {
+		t.Fatal("want error for a --repo value that isn't owner/name")
+	}
+	if _, ok := errors.AsType[*ui.UserError](err); !ok {
+		t.Errorf("want a UserError, got %T: %v", err, err)
+	}
+}
+
+// TestResolveShipContextCurrentBranchErrPropagates covers the
+// currentBranch-fails branch: resolveShipContext must surface it rather
+// than proceeding with a zero-value branch.
+func TestResolveShipContextCurrentBranchErrPropagates(t *testing.T) {
+	original := currentBranch
+	currentBranch = func(context.Context, string) (string, error) {
+		return "", errors.New("boom")
+	}
+	t.Cleanup(func() { currentBranch = original })
+
+	wt := gitRepo(t)
+	_, err := resolveShipContext(context.Background(), io.Discard, &shipArgs{worktree: wt, base: "main"})
+	if err == nil {
+		t.Fatal("want error when currentBranch fails")
+	}
+}
+
+// TestResolveShipContextCheckApprovedErrPropagates covers a worktree with no
+// argus verdict and no --force: resolveShipContext must refuse before ever
+// resolving the repo/forge.
+func TestResolveShipContextCheckApprovedErrPropagates(t *testing.T) {
+	wt := gitRepo(t)
+	_, err := resolveShipContext(context.Background(), io.Discard, &shipArgs{worktree: wt, base: "main"})
+	if err == nil {
+		t.Fatal("want error when the worktree has no argus verdict and --force is not set")
+	}
+}
+
+// TestResolveShipContextResolveRepoErrPropagates covers resolveRepo failing
+// (no origin remote) once the approval gate has been cleared via --force.
+func TestResolveShipContextResolveRepoErrPropagates(t *testing.T) {
+	wt := gitRepo(t) // no origin remote added
+	_, err := resolveShipContext(context.Background(), io.Discard, &shipArgs{worktree: wt, base: "main", force: true})
+	if err == nil {
+		t.Fatal("want error when the worktree's origin remote can't be resolved")
+	}
+}
+
+// TestRunShipRealPathTitleTooLongHeadlessErrors covers runShip's non-dry-run
+// path far enough to reach resolvePRTitle: a real token and a valid forge
+// let it past the earlier checks, and a too-long worker-reported title with
+// no TTY attached then fails resolvePRTitle itself.
+func TestRunShipRealPathTitleTooLongHeadlessErrors(t *testing.T) {
+	withStdinInteractive(t, false)
+	t.Setenv("CODEBERG_TOKEN", "dummy-token")
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
+	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: true, Source: "gate"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: strings.Repeat("x", 80)}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{worktree: wt, base: "main", force: true})
+	if err == nil {
+		t.Fatal("want error when the real (non-dry-run) path hits a too-long title with no TTY")
+	}
+	if !strings.Contains(err.Error(), "80") {
+		t.Errorf("error should name the offending length, got: %v", err)
+	}
+}
+
+// TestNewShipCmdRunERejectsUnreadableCredentialConfig covers RunE's own
+// resolveCredentialOverrides-error branch, driven through the real cobra
+// command (not runShip directly) so RunE's own wiring is exercised: pointing
+// ARGUS_CONFIG_FILE at a directory makes config.Load fail with something
+// other than "not exist".
+func TestNewShipCmdRunERejectsUnreadableCredentialConfig(t *testing.T) {
+	t.Setenv("ARGUS_CONFIG_FILE", t.TempDir())
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--worktree", wt, "--base", "main", "--force", "--dry-run"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("want error when the persisted credential config can't be read")
+	}
+}
+
+// TestPostShipJiraNewClientErrWarnsAndReturnsAlreadyNotified covers
+// newJiraClient itself failing (e.g. missing Jira env config): postShipJira
+// must warn and return alreadyNotified unchanged rather than panicking on a
+// nil client.
+func TestPostShipJiraNewClientErrWarnsAndReturnsAlreadyNotified(t *testing.T) {
+	original := newJiraClient
+	newJiraClient = func() (jiraIssueWriter, error) { return nil, errors.New("no JIRA_BASE_URL") }
+	t.Cleanup(func() { newJiraClient = original })
+
+	var buf bytes.Buffer
+	a := &shipArgs{jiraIssue: "PROJ-1"}
+	got := postShipJira(context.Background(), &buf, testLogger(t), a, forge.PR{HTMLURL: "https://fake/pull/1"}, false)
+	if got != false {
+		t.Errorf("want alreadyNotified(false) passed through unchanged, got %v", got)
+	}
+	if !strings.Contains(buf.String(), "jira post-ship for PROJ-1") {
+		t.Errorf("want a jira post-ship warning in output, got: %q", buf.String())
+	}
+}
+
+// TestPostShipJiraAssignErrWarnsButStillComments covers the assign-fails
+// branch specifically: unlike Transition, a failed Assign must not skip the
+// Comment call that links the PR back to the issue.
+func TestPostShipJiraAssignErrWarnsButStillComments(t *testing.T) {
+	w := &fakeJiraWriter{failOn: "assign"}
+	original := newJiraClient
+	newJiraClient = func() (jiraIssueWriter, error) { return w, nil }
+	t.Cleanup(func() { newJiraClient = original })
+
+	var buf bytes.Buffer
+	a := &shipArgs{jiraIssue: "PROJ-1", jiraAssignee: "acc-123"}
+	got := postShipJira(context.Background(), &buf, testLogger(t), a, forge.PR{HTMLURL: "https://fake/pull/1"}, false)
+	if got != true {
+		t.Errorf("want postShipJira to still succeed via the comment, got %v", got)
+	}
+	if len(w.assignees) != 0 {
+		t.Errorf("want no recorded assignee since Assign failed, got %v", w.assignees)
+	}
+	if len(w.comments) != 1 {
+		t.Errorf("want the comment still posted despite the assign failure, got %v", w.comments)
+	}
+	if !strings.Contains(buf.String(), "jira post-ship for PROJ-1") {
+		t.Errorf("want a jira post-ship warning in output, got: %q", buf.String())
+	}
+}
+
+func TestTitlePrefixIssueRefPrefersJiraIssueOverPlainIssue(t *testing.T) {
+	got := titlePrefixIssueRef(&shipArgs{jiraIssue: "PROJ-9", issue: 21})
+	if got != "PROJ-9" {
+		t.Errorf("want the Jira key to win, got %q", got)
+	}
+}
+
+func TestTitlePrefixIssueRefEmptyWhenNeitherSet(t *testing.T) {
+	got := titlePrefixIssueRef(&shipArgs{})
+	if got != "" {
+		t.Errorf("want empty when neither --jira-issue nor --issue is set, got %q", got)
+	}
+}
+
+// TestWritePRChangeSectionHappyPath covers the successful MeasureDiff path:
+// a real diff against a resolvable base produces the "## Change" summary
+// line plus a bullet per changed file, instead of the silently-omitted
+// section MeasureDiff's error path leaves (see TestBuildPRBodyReport).
+func TestWritePRChangeSectionHappyPath(t *testing.T) {
+	wt := gitRepo(t)
+	sha, err := exec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", wt, "update-ref", "refs/remotes/origin/main", strings.TrimSpace(string(sha))).CombinedOutput(); err != nil {
+		t.Fatalf("update-ref: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", wt, "add", "-A").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", wt, "commit", "-q", "-m", "add f").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	var b strings.Builder
+	writePRChangeSection(context.Background(), &b, wt, "main")
+	got := b.String()
+	if !strings.Contains(got, "## Change") {
+		t.Errorf("want a Change section header, got: %q", got)
+	}
+	if !strings.Contains(got, "1 file(s), +1/-0") {
+		t.Errorf("want the file/line summary, got: %q", got)
+	}
+	if !strings.Contains(got, "- `f.go`") {
+		t.Errorf("want a per-file bullet, got: %q", got)
+	}
+}
+
+// TestWritePRVerificationSectionIncludesRealWorldProof covers the
+// RealWorldProof-non-empty branch: a worker's proof line must appear in the
+// PR body even with no test entries at all.
+func TestWritePRVerificationSectionIncludesRealWorldProof(t *testing.T) {
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{RealWorldProof: "curl'd the live endpoint, got 200"}); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	writePRVerificationSection(&b, wt)
+	if got := b.String(); !strings.Contains(got, "Real-world proof: curl'd the live endpoint, got 200") {
+		t.Errorf("want the real-world proof line, got: %q", got)
+	}
+}
+
+// TestConfigDefaultsEmptyOutsideRepo covers forgeConfigDefault/
+// statusPageConfigDefault/titlePrefixTemplateConfigDefault's RepoRoot-error
+// branch: a worktree outside any git repo has no config to offer, so each
+// must return "" rather than propagating the error (they are all
+// best-effort, per their own doc comments).
+func TestConfigDefaultsEmptyOutsideRepo(t *testing.T) {
+	wt := t.TempDir()
+	if got := forgeConfigDefault(context.Background(), io.Discard, wt); got != "" {
+		t.Errorf("forgeConfigDefault outside a repo = %q, want \"\"", got)
+	}
+	if got := statusPageConfigDefault(context.Background(), io.Discard, wt); got != "" {
+		t.Errorf("statusPageConfigDefault outside a repo = %q, want \"\"", got)
+	}
+	if got := titlePrefixTemplateConfigDefault(context.Background(), io.Discard, wt); got != "" {
+		t.Errorf("titlePrefixTemplateConfigDefault outside a repo = %q, want \"\"", got)
+	}
+}
+
+// TestConfigDefaultsEmptyOnMalformedRepoConfig covers the same three
+// functions' repoconfig.Load-error branch: a malformed .argus/config.yml
+// must not propagate as an error either — each falls through to "" so a
+// broken config degrades to no-default rather than blocking every ship
+// command that touches this worktree.
+func TestConfigDefaultsEmptyOnMalformedRepoConfig(t *testing.T) {
+	wt := gitRepo(t)
+	if err := os.MkdirAll(filepath.Join(wt, ".argus"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(repoconfig.Path(wt), []byte("not a valid config line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := forgeConfigDefault(context.Background(), io.Discard, wt); got != "" {
+		t.Errorf("forgeConfigDefault with a malformed config = %q, want \"\"", got)
+	}
+	if got := statusPageConfigDefault(context.Background(), io.Discard, wt); got != "" {
+		t.Errorf("statusPageConfigDefault with a malformed config = %q, want \"\"", got)
+	}
+	if got := titlePrefixTemplateConfigDefault(context.Background(), io.Discard, wt); got != "" {
+		t.Errorf("titlePrefixTemplateConfigDefault with a malformed config = %q, want \"\"", got)
+	}
+}
+
+// TestRunShipDryRunTitleTooLongHeadlessErrors covers the dry-run path's own
+// resolvePRTitle call failing (distinct from the real-path call tested by
+// TestRunShipRealPathTitleTooLongHeadlessErrors): a dry-run must still
+// refuse to preview an over-length title rather than silently truncating.
+func TestRunShipDryRunTitleTooLongHeadlessErrors(t *testing.T) {
+	withStdinInteractive(t, false)
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Title: strings.Repeat("x", 80)}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{worktree: wt, base: "main", force: true, dryRun: true})
+	if err == nil {
+		t.Fatal("want error when the dry-run path hits a too-long title with no TTY")
+	}
+	if strings.Contains(buf.String(), "ship plan (dry run)") {
+		t.Errorf("dry-run should not print a plan when the title is rejected: %q", buf.String())
+	}
+}
+
+// TestRunShipRealPathReachesShipChange covers runShip's own success-path
+// tail (building shipTarget and calling shipChange) once token/forge/title
+// resolution all succeed. A failing ship_verify_command makes shipChange
+// itself fail fast, deterministically and without touching the network,
+// while still proving runShip's own lines ran.
+func TestRunShipRealPathReachesShipChange(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // openRunLog writes under ~/.argus
+	t.Setenv("CODEBERG_TOKEN", "dummy-token")
+	wt := gitRepo(t, []string{"remote", "add", "origin", "git@codeberg.org:acme/widget.git"})
+	if err := repoconfig.Save(repoconfig.Path(wt), &repoconfig.Config{ShipVerifyCommand: "exit 1"}); err != nil {
+		t.Fatalf("seeding ship_verify_command config: %v", err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	err := runShip(cmd, &shipArgs{worktree: wt, base: "main", force: true})
+	if err == nil {
+		t.Fatal("want the ship_verify_command failure to surface through runShip's real (non-dry-run) path")
+	}
+	if !strings.Contains(err.Error(), "ship_lint") {
+		t.Errorf("error should name ship_lint (from enforceShipGate, reached via shipChange), got: %v", err)
+	}
+}
+
+// TestShipChangeCommitFailurePropagates covers CommitAll failing for a
+// reason other than ErrNothingToCommit (a rejecting pre-commit hook): unlike
+// the nothing-to-commit case, this must stop shipChange before any push.
+func TestShipChangeCommitFailurePropagates(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	hookDir := filepath.Join(wt, ".git", "hooks")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target)
+	if err == nil {
+		t.Fatal("want error when the pre-commit hook rejects the commit")
+	}
+	if f.opened != nil {
+		t.Error("no PR should be opened when the commit itself fails")
+	}
+}
+
+// TestShipChangeFindPRErrPropagates covers the existing-PR check itself
+// failing (a forge API error), distinct from FindPR simply reporting none
+// found: shipChange must not fall through to opening a possibly-duplicate
+// PR when it couldn't even check.
+func TestShipChangeFindPRErrPropagates(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	f := &fakeForge{findPRErr: errors.New("forge unavailable")}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target)
+	if err == nil {
+		t.Fatal("want error when FindPR itself fails")
+	}
+	if !strings.Contains(err.Error(), "checking for an existing PR") {
+		t.Errorf("error should name the FindPR step, got: %v", err)
+	}
+	if f.opened != nil {
+		t.Error("no PR should be opened when FindPR errored")
+	}
+}
+
+// TestShipChangeOpenPRErrPropagates covers OpenPR itself failing after a
+// successful commit/push/FindPR-not-found: the branch is already live on
+// origin at this point, but the PR never gets created and shipChange must
+// report that rather than silently succeeding.
+func TestShipChangeOpenPRErrPropagates(t *testing.T) {
+	wt, cmd, _ := shipChangeTestSetup(t)
+	f := &fakeForge{openErr: errors.New("forge rejected the PR")}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target)
+	if err == nil {
+		t.Fatal("want error when OpenPR fails")
+	}
+}
+
+// TestShipChangeWarnsOnLifecycleWriteFailure covers the best-effort
+// WriteLifecycle-fails-after-a-successful-PR branch: shipChange must still
+// report success (the PR really did open) while printing a warning, not
+// fail the whole ship over a bookkeeping write.
+func TestShipChangeWarnsOnLifecycleWriteFailure(t *testing.T) {
+	wt, cmd, buf := shipChangeTestSetup(t)
+	// A plain file where .claude/argus should be a directory makes every
+	// protocol write under it (including WriteLifecycle) fail.
+	if err := os.MkdirAll(filepath.Join(wt, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".claude", "argus"), []byte("blocking"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	if err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target); err != nil {
+		t.Fatalf("a lifecycle write failure must not fail the ship: %v", err)
+	}
+	if f.opened == nil {
+		t.Fatal("want the PR still opened despite the lifecycle write failure")
+	}
+	if !strings.Contains(buf.String(), "recording worktree lifecycle") {
+		t.Errorf("want a lifecycle-write warning in output, got: %q", buf.String())
+	}
+}
+
+// TestShipChangeWarnsOnLifecycleWriteFailureAfterJiraNotify covers the
+// second WriteLifecycle call — the one recording JiraNotified after a
+// successful postShipJira — failing the same best-effort way as the first.
+// Unlike the first failure, this one is only logged to the run log, not
+// printed to out, so the observable proof here is that postShipJira still
+// ran to completion (the comment landed) despite the write around it
+// failing both times.
+func TestShipChangeWarnsOnLifecycleWriteFailureAfterJiraNotify(t *testing.T) {
+	wt, cmd, buf := shipChangeTestSetup(t)
+	if err := os.MkdirAll(filepath.Join(wt, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".claude", "argus"), []byte("blocking"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := &fakeJiraWriter{}
+	withFakeJiraClient(t, w)
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	args := &shipArgs{worktree: wt, base: "main", jiraIssue: "PROJ-1"}
+	if err := shipChange(cmd, f, args, target); err != nil {
+		t.Fatalf("a lifecycle write failure must not fail the ship: %v", err)
+	}
+	if f.opened == nil {
+		t.Fatal("want the PR still opened despite the lifecycle write failure")
+	}
+	if len(w.comments) != 1 {
+		t.Errorf("want postShipJira to still run to completion despite both lifecycle writes failing, comments = %v", w.comments)
+	}
+	if !strings.Contains(buf.String(), "recording worktree lifecycle") {
+		t.Errorf("want at least the first lifecycle-write warning in output, got: %q", buf.String())
+	}
+}
+
+// TestNewJiraClientDefaultWiringErrorsWithNoConfig covers the production
+// default of newJiraClient (jira.NewFromEnv) actually running, instead of
+// always being stubbed out by withFakeJiraClient: with no JIRA_* env vars
+// and no config file reachable, it must return an error rather than a nil
+// client that would panic postShipJira.
+func TestNewJiraClientDefaultWiringErrorsWithNoConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("JIRA_BASE_URL", "")
+	t.Setenv("JIRA_EMAIL", "")
+	t.Setenv("JIRA_API_TOKEN", "")
+	t.Setenv("JIRA_CONFIG_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
+
+	if _, err := newJiraClient(); err == nil {
+		t.Fatal("want an error from the default Jira client wiring with no Jira config present")
+	}
+}
+
+// TestResolveRepoDetectErrPropagates covers forge.Detect itself failing on
+// an origin remote that doesn't parse as any recognized URL shape (RemoteURL
+// succeeds, but the value it returns is unusable).
+func TestResolveRepoDetectErrPropagates(t *testing.T) {
+	wt := gitRepo(t, []string{"remote", "add", "origin", "not-a-recognizable-remote-url"})
+	if _, _, _, err := resolveRepo(context.Background(), "", wt); err == nil {
+		t.Fatal("want error when the origin remote doesn't parse as any known forge URL shape")
+	}
+}
+
+// TestIsStdinInteractiveDefaultWiring covers isStdinInteractive's own
+// production closure (isatty.IsTerminal) actually running, instead of
+// always being overridden by withStdinInteractive.
+func TestIsStdinInteractiveDefaultWiring(t *testing.T) {
+	_ = isStdinInteractive()
 }
 
 var _ forge.Forge = (*fakeForge)(nil)
