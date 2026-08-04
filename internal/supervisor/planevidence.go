@@ -2,9 +2,11 @@ package supervisor
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -14,7 +16,22 @@ import (
 // TaskCreate is the typed-task variant some harness configurations use
 // instead. Either appearing as a real tool call in the worker's own transcript
 // is enough.
-var planEvidenceMarkers = []string{`"name":"TodoWrite"`, `"name":"TaskCreate"`}
+var planEvidenceMarkers = []string{"TodoWrite", "TaskCreate"}
+
+// transcriptToolUseLine is the subset of a Claude Code session JSONL record
+// needed to find real tool calls: an assistant message's content array can
+// hold text and tool_use blocks side by side, and only a tool_use block's
+// name is ground truth — the same name can otherwise appear anywhere in an
+// assistant's prose or in an echoed tool_result without a call ever having
+// happened.
+type transcriptToolUseLine struct {
+	Message struct {
+		Content []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"content"`
+	} `json:"message"`
+}
 
 // projectPathReplacer mirrors the directory-naming scheme Claude Code itself
 // uses for a project's transcript directory under ~/.claude/projects: every
@@ -60,10 +77,10 @@ func HasPlanEvidence(home, worktree string) (bool, int, error) {
 }
 
 // transcriptContainsAny reports whether any line of the transcript at path
-// contains one of markers as a plain substring. This is a deliberately simple
-// grep, not a JSON tool-call parse: like parseNumstat's plain-text approach to
-// git output, exactness on structure buys nothing here — a raw tool-use name
-// occurring anywhere in the line is already the signal being checked for.
+// records a real tool_use block whose name is one of markers. Matching is
+// scoped to parsed tool_use blocks, not a raw line substring, so a marker
+// name mentioned in assistant prose or echoed back inside a tool_result
+// (neither of which is a tool call) can't pass this check.
 func transcriptContainsAny(path string, markers []string) (bool, error) {
 	f, err := os.Open(path) //nolint:gosec // path came from a glob under home/.claude/projects, not user input
 	if err != nil {
@@ -76,9 +93,12 @@ func transcriptContainsAny(path string, markers []string) (bool, error) {
 	// match TokensForSession's scanner.
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for sc.Scan() {
-		line := sc.Text()
-		for _, m := range markers {
-			if strings.Contains(line, m) {
+		var line transcriptToolUseLine
+		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
+			continue // skip malformed/non-message lines rather than fail the whole scan
+		}
+		for _, block := range line.Message.Content {
+			if block.Type == "tool_use" && slices.Contains(markers, block.Name) {
 				return true, nil
 			}
 		}
