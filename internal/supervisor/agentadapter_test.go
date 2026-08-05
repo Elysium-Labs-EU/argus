@@ -163,6 +163,61 @@ func TestSettingsForWiresCheckToolHook(t *testing.T) {
 	}
 }
 
+// TestRecordPlanHooksShape pins recordPlanHooks' own matcher/command shape,
+// independent of settingsFor's wiring — the two TodoWrite/TaskCreate|
+// TaskUpdate matchers, each pointing at the single hidden `argus worker
+// record-plan` command.
+func TestRecordPlanHooksShape(t *testing.T) {
+	hooks := recordPlanHooks()
+	if len(hooks) != 2 {
+		t.Fatalf("recordPlanHooks() = %d matchers, want 2", len(hooks))
+	}
+	wantMatchers := map[string]bool{"TodoWrite": false, "TaskCreate|TaskUpdate": false}
+	for _, matcher := range hooks {
+		if _, ok := wantMatchers[matcher.Matcher]; !ok {
+			t.Errorf("unexpected matcher %q", matcher.Matcher)
+			continue
+		}
+		wantMatchers[matcher.Matcher] = true
+		if len(matcher.Hooks) != 1 || matcher.Hooks[0].Command != "argus worker record-plan" {
+			t.Errorf("matcher %q hook entries = %+v, want a single \"argus worker record-plan\" command", matcher.Matcher, matcher.Hooks)
+		}
+	}
+	for m, seen := range wantMatchers {
+		if !seen {
+			t.Errorf("missing matcher %q", m)
+		}
+	}
+}
+
+// TestSettingsForWiresRecordPlanHook is TestSettingsForWiresCheckToolHook's
+// PostToolUse counterpart: every freshly spawned worker must get the live
+// plan-evidence recorder, not just the PreToolUse gate, or
+// HasFreshPlanEvidence would have nothing to check against for a normal
+// argus-spawned worker.
+func TestSettingsForWiresRecordPlanHook(t *testing.T) {
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil)
+	if len(settings.Hooks.PostToolUse) != 2 {
+		t.Fatalf("PostToolUse hooks = %d, want 2", len(settings.Hooks.PostToolUse))
+	}
+	wantMatchers := map[string]bool{"TodoWrite": false, "TaskCreate|TaskUpdate": false}
+	for _, matcher := range settings.Hooks.PostToolUse {
+		if _, ok := wantMatchers[matcher.Matcher]; !ok {
+			t.Errorf("unexpected matcher %q", matcher.Matcher)
+			continue
+		}
+		wantMatchers[matcher.Matcher] = true
+		if len(matcher.Hooks) != 1 || matcher.Hooks[0].Command != "argus worker record-plan" {
+			t.Errorf("matcher %q hook entries = %+v, want a single \"argus worker record-plan\" command", matcher.Matcher, matcher.Hooks)
+		}
+	}
+	for m, seen := range wantMatchers {
+		if !seen {
+			t.Errorf("missing PostToolUse hook for matcher %q", m)
+		}
+	}
+}
+
 func TestClaudeCodeAdapterPlanEvidenceDelegates(t *testing.T) {
 	home := t.TempDir()
 	wt := t.TempDir()

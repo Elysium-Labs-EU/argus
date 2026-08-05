@@ -247,6 +247,22 @@ func TestRunWorkerCheckTool(t *testing.T) {
 		}
 	})
 
+	t.Run("blocks argus worker record-plan regardless of phase", func(t *testing.T) {
+		exitCode = 0
+		wt := newWorktree(t, protocol.PhaseWorking)
+		stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":"argus worker record-plan"}}`, wt))
+		var stderr bytes.Buffer
+		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+			t.Fatalf("runWorkerCheckTool: %v", err)
+		}
+		if exitCode != 2 {
+			t.Errorf("exit code = %d, want 2 — record-plan only ever runs as a PostToolUse hook, never a worker's own Bash self-invocation", exitCode)
+		}
+		if !strings.Contains(stderr.String(), "PostToolUse hook") {
+			t.Errorf("stderr = %q, want it to explain record-plan is hook-only", stderr.String())
+		}
+	})
+
 	t.Run("passes on non-matching command during planning", func(t *testing.T) {
 		exitCode = 0
 		wt := newWorktree(t, protocol.PhasePlanning)

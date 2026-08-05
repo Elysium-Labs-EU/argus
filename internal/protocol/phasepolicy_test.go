@@ -30,6 +30,21 @@ func TestDeniedInPhase(t *testing.T) {
 	}
 }
 
+// TestDenyFloorDeniesRecordPlan pins the specific addition this issue makes
+// to DenyFloor: `argus worker record-plan` only ever runs as a PostToolUse
+// hook argus itself wires (see supervisor.recordPlanHooks), never a worker's
+// own Bash self-invocation — without this, a repo's phases.<name>.allow could
+// grant a wide-enough Bash pattern to let a worker forge plan-log.jsonl
+// entries by hand.
+func TestDenyFloorDeniesRecordPlan(t *testing.T) {
+	if !slices.Contains(DenyFloor(), "argus worker record-plan") {
+		t.Errorf("DenyFloor() = %v, want it to contain %q", DenyFloor(), "argus worker record-plan")
+	}
+	if _, ok := MatchesDeniedCommand("argus worker record-plan", DenyFloor()); !ok {
+		t.Error("MatchesDeniedCommand(argus worker record-plan, DenyFloor()) = false, want true")
+	}
+}
+
 func TestAlwaysDeniedCommandsBlockedEveryPhase(t *testing.T) {
 	for _, p := range append([]Phase{Phase(""), PhaseDone}, ConfigurablePhases...) {
 		for _, cmd := range AlwaysDeniedCommands {

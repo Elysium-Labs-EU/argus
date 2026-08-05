@@ -51,18 +51,39 @@ func TestIsLegalTransition(t *testing.T) {
 	}
 }
 
+// TestRequiresPlanEvidence table-tests RequiresPlanEvidence across every
+// legal edge in legalTransitions (plus a couple of illegal ones, since
+// RequiresPlanEvidence itself never checks legality) — the gate now covers
+// three edges, not just planning -> working, so a table pins every one of
+// them individually instead of a single spot check plus an "everything else
+// is false" list that would silently go stale if a new edge were added
+// without a matching test case.
 func TestRequiresPlanEvidence(t *testing.T) {
-	if !RequiresPlanEvidence(PhasePlanning, PhaseWorking) {
-		t.Error("RequiresPlanEvidence(planning, working) = false, want true")
-	}
-	other := []struct{ cur, next Phase }{
+	gated := []struct{ cur, next Phase }{
+		{PhasePlanning, PhaseWorking},
 		{PhaseWorking, PhaseSelfTest},
-		{PhaseSelfTest, PhaseWorking},
-		{PhaseBlocked, PhaseWorking},
-		{Phase(""), PhasePlanning},
-		{PhasePlanning, PhasePlanning},
+		{PhaseSelfTest, PhaseAwaitingReview},
 	}
-	for _, tc := range other {
+	for _, tc := range gated {
+		if !RequiresPlanEvidence(tc.cur, tc.next) {
+			t.Errorf("RequiresPlanEvidence(%q, %q) = false, want true", tc.cur, tc.next)
+		}
+	}
+
+	ungated := []struct{ cur, next Phase }{
+		{PhasePlanning, PhasePlanning},
+		{PhaseSelfTest, PhaseWorking},
+		{PhaseAwaitingReview, PhaseWorking},
+		{PhaseAwaitingReview, PhaseBlocked},
+		{PhaseBlocked, PhaseWorking},
+		{PhaseWorking, PhaseBlocked},
+		{PhaseSelfTest, PhaseBlocked},
+		{PhaseRebase, PhaseAwaitingReview},
+		{Phase(""), PhasePlanning},
+		{PhasePlanning, PhaseDone},
+		{PhaseWorking, PhaseAwaitingReview},
+	}
+	for _, tc := range ungated {
 		if RequiresPlanEvidence(tc.cur, tc.next) {
 			t.Errorf("RequiresPlanEvidence(%q, %q) = true, want false", tc.cur, tc.next)
 		}

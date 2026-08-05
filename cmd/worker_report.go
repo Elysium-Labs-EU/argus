@@ -25,6 +25,7 @@ func newWorkerCmd() *cobra.Command {
 	cmd.AddCommand(newWorkerAnswerCmd())
 	cmd.AddCommand(newWorkerSteerCmd())
 	cmd.AddCommand(newWorkerCheckToolCmd())
+	cmd.AddCommand(newWorkerRecordPlanCmd())
 	return cmd
 }
 
@@ -191,14 +192,27 @@ func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status
 			Hint: fmt.Sprintf("legal from %q: %v", cur.Phase, protocol.LegalNext(cur.Phase)),
 		}
 	}
-	if protocol.RequiresPlanEvidence(cur.Phase, next) && len(cur.Plan) == 0 {
-		return &ui.UserError{
-			Err:  fmt.Errorf("cannot move %q -> %q: no plan/todo evidence reported during planning", cur.Phase, next),
-			Hint: `report phase "planning" again with a non-empty "plan" array listing your todo items before moving to "working"`,
+	stamp := now()
+	// RequiresPlanEvidence gates three edges (planning -> working, working ->
+	// self_test, self_test -> awaiting_review) on live plan-log.jsonl activity
+	// recorded since this worktree's own checkpoint, replacing a single
+	// self-reported Plan field that used to be cheap to fake once and coast on
+	// for every later phase — see checkPlanEvidence.
+	//
+	// A rejected report here leaves cur.Phase unchanged: nothing below this
+	// point runs, so status.json still names the same phase it did before the
+	// call. The worker's own retry is therefore to call TodoWrite (or
+	// TaskCreate/TaskUpdate) again and re-send the exact same, already-legal
+	// forward edge — not a new transition. legalTransitions must not grow a
+	// self-loop to "fix" this retry path; the retry already works today
+	// precisely because the rejected phase never moved.
+	if protocol.RequiresPlanEvidence(cur.Phase, next) {
+		if err := checkPlanEvidence(worktree, &cur, next, stamp); err != nil {
+			return err
 		}
 	}
 	rest.Phase = next
-	rest.UpdatedAt = now()
+	rest.UpdatedAt = stamp
 	// Base is set once by supervise at worktree-creation time (see
 	// internal/repoconfig), never by the worker — its reported JSON body has
 	// no "base" key, so unmarshaling it into rest always leaves rest.Base
@@ -221,4 +235,56 @@ func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status
 		rest.Title = cur.Title
 	}
 	return protocol.Write(protocol.StatusPath(worktree), rest)
+}
+
+// checkPlanEvidence enforces one of protocol.RequiresPlanEvidence's gated
+// edges at report time. When worktree's plan-log.jsonl exists (a run argus
+// itself hooked via recordPlanHooks/argus worker record-plan), the live
+// signal wins: the edge needs a record fresher than the worktree's own
+// checkpoint (supervisor.HasFreshPlanEvidence), and a pass advances that
+// checkpoint (supervisor.AdvancePlanCheckpoint) so the next gated edge can't
+// reuse evidence this one already spent.
+//
+// When the log is entirely absent — a worker spawned without argus's hooks at
+// all, e.g. a foreign or headless run — there is no live signal to fall back
+// on, so this fails open rather than hard-rejecting a run argus never
+// instrumented: planning -> working keeps the original self-reported check
+// (cur.Plan non-empty), the one edge that already had a legacy signal before
+// this widened to three. The two newly gated edges have no self-reported
+// field of their own to fall back on and are left unenforced here, exactly as
+// they were before RequiresPlanEvidence widened — the transcript-grep
+// backstop in applyPlanEvidenceCheck still covers the terminal
+// awaiting_review/done review gate regardless of which edge got here.
+//
+// cur is taken by pointer purely to avoid copying protocol.Status on every
+// call; checkPlanEvidence never mutates it.
+func checkPlanEvidence(worktree string, cur *protocol.Status, next protocol.Phase, stamp time.Time) error {
+	fresh, logExists, err := supervisor.HasFreshPlanEvidence(worktree)
+	if err != nil {
+		return &ui.UserError{
+			Err:  fmt.Errorf("checking plan evidence for %s: %w", worktree, err),
+			Hint: "plan-log.jsonl or plan-checkpoint.json under .claude/argus/ could not be read; fix or remove it before reporting again",
+		}
+	}
+	if !logExists {
+		if cur.Phase == protocol.PhasePlanning && next == protocol.PhaseWorking && len(cur.Plan) == 0 {
+			return &ui.UserError{
+				Err:  fmt.Errorf("cannot move %q -> %q: no plan/todo evidence reported during planning", cur.Phase, next),
+				Hint: `report phase "planning" again with a non-empty "plan" array listing your todo items before moving to "working"`,
+			}
+		}
+		return nil
+	}
+	if !fresh {
+		return &ui.UserError{
+			Err:  fmt.Errorf("cannot move %q -> %q: no fresh TodoWrite/TaskCreate/TaskUpdate activity recorded since the last checkpoint", cur.Phase, next),
+			Hint: "call your todo-list tool again in this phase (a real tool call, not just a claimed plan), then report the same phase move again",
+		}
+	}
+	if err := supervisor.AdvancePlanCheckpoint(worktree, stamp); err != nil {
+		return &ui.UserError{
+			Err: fmt.Errorf("advancing plan checkpoint for %s: %w", worktree, err),
+		}
+	}
+	return nil
 }
