@@ -76,6 +76,14 @@ linters:
           - gosec
           - noctx
         path: _test\.go
+      # "cancelled" is GitHub's and GitLab's own literal check-conclusion API
+      # vocabulary (double-L, not US spelling) — Check.Conclusion must
+      # reproduce it verbatim to match what callers compare against, so it is
+      # not a typo for misspell's US locale check to flag.
+      - linters:
+          - misspell
+        path: internal/forge/gitlab(_test)?\.go
+        text: '`cancelled` is a misspelling of `canceled`'
     paths:
       - third_party$
       - builtin$

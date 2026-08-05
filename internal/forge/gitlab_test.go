@@ -2,6 +2,8 @@ package forge
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -230,16 +232,330 @@ func TestGitLabDoOmitsStatusNoteForClientError(t *testing.T) {
 	}
 }
 
-// TestGitLabPRChecksRefusesUnimplemented guards the deliberate MVP scope cut:
-// PRChecks is GitHub-only for now, and GitLab must refuse clearly rather than
-// silently return no checks (which a poller would misread as "not started
-// yet" forever).
-func TestGitLabPRChecksRefusesUnimplemented(t *testing.T) {
-	f, err := New("gitlab.com", "t", nil, KindAuto, "")
+func TestGitLabPRChecksMergeReadyWhenAllSucceed(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head_pipeline":{"id":55}}`,
+		`[
+			{"name":"build","status":"success","web_url":"https://gitlab.com/o/r/-/jobs/1"},
+			{"name":"lint","status":"skipped"}
+		]`,
+	})
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := f.PRChecks(context.Background(), "o", "r", 1); err == nil {
-		t.Fatal("want an error for GitLab, got nil")
+	checks, err := f.PRChecks(context.Background(), "o", "r", 9)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("checks = %+v, want 2", checks)
+	}
+	for _, c := range checks {
+		if !c.Terminal() || c.Failed() {
+			t.Errorf("check %+v: want Terminal()=true Failed()=false", c)
+		}
+	}
+	if checks[0].LogURL != "https://gitlab.com/o/r/-/jobs/1" {
+		t.Errorf("LogURL = %q, want the job's web_url", checks[0].LogURL)
+	}
+}
+
+func TestGitLabPRChecksNamesFailingCheck(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head_pipeline":{"id":55}}`,
+		`[
+			{"name":"build","status":"success"},
+			{"name":"test","status":"failed","web_url":"https://gitlab.com/o/r/-/jobs/2"}
+		]`,
+	})
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 9)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	var failing []Check
+	for _, c := range checks {
+		if c.Failed() {
+			failing = append(failing, c)
+		}
+	}
+	if len(failing) != 1 || failing[0].Name != "test" {
+		t.Fatalf("failing checks = %+v, want just %q", failing, "test")
+	}
+	if failing[0].Conclusion != "failure" {
+		t.Errorf("Conclusion = %q, want %q", failing[0].Conclusion, "failure")
+	}
+}
+
+func TestGitLabPRChecksCanceledMapsToCancelledConclusion(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head_pipeline":{"id":55}}`,
+		`[{"name":"deploy","status":"canceled"}]`,
+	})
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 9)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != 1 || checks[0].Conclusion != "cancelled" || !checks[0].Terminal() || !checks[0].Failed() {
+		t.Fatalf("checks = %+v, want one terminal, failed cancelled check", checks)
+	}
+}
+
+// TestGitLabPRChecksMixedRunningAndTerminalIsNotAllDone pins tend's own
+// done-detection: a pipeline with even one still-running job must not read
+// as merge-ready just because the rest already finished.
+func TestGitLabPRChecksMixedRunningAndTerminalIsNotAllDone(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head_pipeline":{"id":55}}`,
+		`[
+			{"name":"build","status":"success"},
+			{"name":"test","status":"running"}
+		]`,
+	})
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 9)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	allTerminal := true
+	for _, c := range checks {
+		if !c.Terminal() {
+			allTerminal = false
+		}
+	}
+	if allTerminal {
+		t.Error("want at least one non-terminal check while a job is still running")
+	}
+}
+
+// TestGitLabPRChecksPendingAndCreatedAreNotTerminal covers the remaining
+// non-terminal statuses the design lists alongside "running".
+func TestGitLabPRChecksPendingAndCreatedAreNotTerminal(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head_pipeline":{"id":55}}`,
+		`[
+			{"name":"queued","status":"pending"},
+			{"name":"not-started","status":"created"}
+		]`,
+	})
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 9)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("checks = %+v, want 2", checks)
+	}
+	for _, c := range checks {
+		if c.Terminal() {
+			t.Errorf("check %+v: want Terminal()=false", c)
+		}
+	}
+}
+
+// TestGitLabPRChecksManualJobMapsToSkippedNonBlocking pins the documented
+// design decision: a manual job GitLab never auto-triggers must not leave
+// tend blocking forever, so it maps to a terminal, non-blocking "skipped"
+// conclusion — the same one GitHub gives an intentionally-not-run check.
+func TestGitLabPRChecksManualJobMapsToSkippedNonBlocking(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head_pipeline":{"id":55}}`,
+		`[
+			{"name":"build","status":"success"},
+			{"name":"deploy-to-prod","status":"manual"}
+		]`,
+	})
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 9)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("checks = %+v, want 2", checks)
+	}
+	for _, c := range checks {
+		if !c.Terminal() || c.Failed() {
+			t.Errorf("check %+v: want Terminal()=true Failed()=false (manual job must not hang tend)", c)
+		}
+	}
+}
+
+// TestGitLabPRChecksFallsBackToLegacyPipelineField covers an MR response
+// whose head_pipeline is absent (older GitLab versions only ever populate
+// the legacy "pipeline" field) so PRChecks still finds a pipeline to poll.
+func TestGitLabPRChecksFallsBackToLegacyPipelineField(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"pipeline":{"id":77}}`,
+		`[{"name":"build","status":"success"}]`,
+	})
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 9)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != 1 || checks[0].Name != "build" {
+		t.Fatalf("checks = %+v, want the single job from the legacy pipeline", checks)
+	}
+}
+
+// TestGitLabPRChecksNoPipelineYetReturnsEmptyChecks covers an MR that has no
+// pipeline at all yet (CI hasn't picked it up): PRChecks must report zero
+// checks with no error, the same "not started" signal tend's evaluateChecks
+// already reads for a GitHub PR before any check has posted, rather than
+// erroring on a merge request that just hasn't run CI yet.
+func TestGitLabPRChecksNoPipelineYetReturnsEmptyChecks(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{}`, 200)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 9)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != 0 {
+		t.Errorf("checks = %+v, want none", checks)
+	}
+}
+
+// TestGitLabPRChecksPaginatesBeyondFirstPage pins the same page-boundary
+// hazard as the GitHub client: a page exactly as long as gitlabJobsPerPage
+// must not be mistaken for the last one, or a failing job sitting on page 2
+// would never be fetched at all.
+func TestGitLabPRChecksPaginatesBeyondFirstPage(t *testing.T) {
+	page1Jobs := make([]map[string]string, gitlabJobsPerPage)
+	for i := range page1Jobs {
+		page1Jobs[i] = map[string]string{"name": fmt.Sprintf("job-%d", i), "status": "success"}
+	}
+	page1Body, err := json.Marshal(page1Jobs)
+	if err != nil {
+		t.Fatalf("marshaling page 1 fixture: %v", err)
+	}
+	page2Body, err := json.Marshal([]map[string]string{
+		{"name": "job-page-2-failing", "status": "failed"},
+	})
+	if err != nil {
+		t.Fatalf("marshaling page 2 fixture: %v", err)
+	}
+
+	replies := []string{`{"head_pipeline":{"id":55}}`, string(page1Body), string(page2Body)}
+	var gotURLs []string
+	call := 0
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotURLs = append(gotURLs, r.URL.String())
+		i := call
+		if i >= len(replies) {
+			i = len(replies) - 1
+		}
+		call++
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(replies[i])), Header: make(http.Header)}, nil
+	})}
+
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	checks, err := f.PRChecks(context.Background(), "o", "r", 9)
+	if err != nil {
+		t.Fatalf("PRChecks: %v", err)
+	}
+	if len(checks) != gitlabJobsPerPage+1 {
+		t.Fatalf("checks = %d, want %d (a full first page plus one on page 2)", len(checks), gitlabJobsPerPage+1)
+	}
+	var failing *Check
+	for i := range checks {
+		if checks[i].Name == "job-page-2-failing" {
+			failing = &checks[i]
+		}
+	}
+	if failing == nil {
+		t.Fatal("want the page-2-only check present in the result")
+	}
+	if !failing.Failed() {
+		t.Errorf("job-page-2-failing: Failed() = false, want true")
+	}
+	if len(gotURLs) != 3 {
+		t.Fatalf("requests made = %d, want 3 (MR lookup + 2 job pages), got %v", len(gotURLs), gotURLs)
+	}
+	if !strings.Contains(gotURLs[1], "page=1") || !strings.Contains(gotURLs[2], "page=2") {
+		t.Errorf("want the page param to increment across requests, got %v", gotURLs)
+	}
+}
+
+func TestGitLabPRChecksMRLookupDecodeError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `not json`, 200)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.PRChecks(context.Background(), "o", "r", 9)
+	if err == nil || !strings.Contains(err.Error(), "decoding merge request response") {
+		t.Errorf("PRChecks error = %v, want it to mention decoding merge request response", err)
+	}
+}
+
+func TestGitLabPRChecksJobsDecodeError(t *testing.T) {
+	hc := sequencedHTTP(t, []string{
+		`{"head_pipeline":{"id":55}}`,
+		`not json`,
+	})
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.PRChecks(context.Background(), "o", "r", 9)
+	if err == nil || !strings.Contains(err.Error(), "decoding pipeline jobs response") {
+		t.Errorf("PRChecks error = %v, want it to mention decoding pipeline jobs response", err)
+	}
+}
+
+func TestGitLabPRChecksMRLookupSurfacesDoError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"merge request not found"}`, 404)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.PRChecks(context.Background(), "o", "r", 9)
+	if err == nil || !strings.Contains(err.Error(), "merge request not found") {
+		t.Errorf("PRChecks error = %v, want it to surface the 404 API message", err)
+	}
+}
+
+func TestGitLabPRChecksJobsLookupSurfacesDoError(t *testing.T) {
+	call := 0
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		call++
+		if call == 1 {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"head_pipeline":{"id":55}}`)), Header: make(http.Header)}, nil
+		}
+		return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader(`{"message":"pipeline not found"}`)), Header: make(http.Header)}, nil
+	})}
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.PRChecks(context.Background(), "o", "r", 9)
+	if err == nil || !strings.Contains(err.Error(), "pipeline not found") {
+		t.Errorf("PRChecks error = %v, want it to surface the 404 API message", err)
 	}
 }
