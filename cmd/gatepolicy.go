@@ -12,7 +12,7 @@ import (
 
 // gateFlags carries supervise/rework's --max-diff-lines/--proof-required-path/
 // --always-review-path values together with whether each was actually passed
-// on the command line (cmd.Flags().Changed), mirroring resolveSuperviseBase's
+// on the command line (cmd.Flags().Changed), mirroring supervisor.ResolveGateBase's
 // own explicit/flagValue split for --base.
 type gateFlags struct {
 	proofRequiredPaths    []string
@@ -25,7 +25,7 @@ type gateFlags struct {
 
 // resolveGatePolicy applies an explicit flag over this repo's .argus/config.yml
 // gate keys over the flag's own default (already the value in f when nothing
-// was passed), the same three-source precedence resolveSuperviseBase applies
+// was passed), the same three-source precedence supervisor.ResolveGateBase applies
 // for --base. rc is a pointer solely to avoid copying the struct at the call
 // site; rc.MaxDiffLines is itself a pointer because 0 is a legal, meaningful
 // value (disables the diff ceiling) that must stay distinguishable from "key
@@ -74,7 +74,7 @@ func resolveMaxReworkBudget(explicit bool, flagValue int, rc *repoconfig.Config)
 // (or its deprecated alias --verify-cmd) over this repo's .argus/config.yml
 // gate_verify_command over "" (no command configured — the gate's prior
 // behavior), the same explicit-flag-wins precedence resolveGatePolicy and
-// resolveSuperviseBase apply for their own sources. It is not folded into
+// supervisor.ResolveGateBase apply for their own sources. It is not folded into
 // gateFlags/resolveGatePolicy: unlike ReviewPolicy's fields,
 // GateVerifyCommand is not consumed by the pure Assess/gateVerdict policy
 // check, it is a shell command supervisor.Config threads to

@@ -153,7 +153,7 @@ cannot be disabled by repo config.`,
 			}
 			applyRepoWorktreeDir(workers, resolveWorktreeDir(cmd.Flags().Changed("worktree-dir"), worktreeDir, &rc))
 
-			resolvedBase := resolveSuperviseBase(cmd.Context(), cmd.Flags().Changed("base"), base, repoRoot, &rc)
+			gateBase := supervisor.ResolveGateBase(cmd.Context(), cmd.Flags().Changed("base"), base, repoRoot, &rc)
 			policy, err := resolveGatePolicy(gateFlags{
 				maxDiffLines:          maxDiffLines,
 				proofRequiredPaths:    proofRequiredPaths,
@@ -172,7 +172,7 @@ cannot be disabled by repo config.`,
 
 			return runSupervision(cmd, client, workers, &superviseOpts{
 				attach: attach, dryRun: dryRun, noCredProxy: noCredProxy,
-				base: resolvedBase, launcher: resolveLauncher(cmd.Flags().Changed("launcher"), launcher, &rc), workerRuntime: workerRuntime,
+				base: gateBase.Ref, baseSource: gateBase.Source, launcher: resolveLauncher(cmd.Flags().Changed("launcher"), launcher, &rc), workerRuntime: workerRuntime,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewEffort: resolveReviewEffort(cmd.Flags().Changed("review-effort"), reviewEffort, &rc), reviewConcurrency: reviewConcurrency,
 				policy: policy, gateVerifyCommand: gateVerifyCommand, worktreeBootstrapCmd: worktreeBootstrapCommand,
@@ -238,6 +238,7 @@ type superviseOpts struct {
 	workerRuntime        string
 	launcher             string
 	base                 string
+	baseSource           supervisor.BaseSource
 	workerPlacement      string
 	reviewNote           string
 	gateVerifyCommand    string
@@ -313,33 +314,9 @@ func parentWorkspace(placement string) (string, error) {
 	}
 }
 
-// resolveSuperviseBase applies --base > this repo's .argus/config.yml
-// base_branch > detected origin/HEAD > the flag's own default ("origin/main"),
-// threading the bare branch name repoconfig/DetectDefaultBase both return
-// into the "origin/<branch>" ref convention herdr.WorktreeSpec.Base expects
-// (unlike rebase/ship's own --base, which is a bare branch name — see
-// supervisor.ResolveBase). explicit is cmd.Flags().Changed("base"): an
-// operator-passed flag always wins outright, matching ResolveBase's own
-// precedence for the same three sources everywhere else they're read. rc is
-// a pointer solely to avoid copying the struct at the call site.
-func resolveSuperviseBase(ctx context.Context, explicit bool, flagValue, repoRoot string, rc *repoconfig.Config) string {
-	if explicit {
-		return flagValue
-	}
-	if rc.BaseBranch != "" {
-		return "origin/" + rc.BaseBranch
-	}
-	if repoRoot != "" {
-		if detected, err := supervisor.DetectDefaultBase(ctx, repoRoot); err == nil && detected != "" {
-			return "origin/" + detected
-		}
-	}
-	return flagValue
-}
-
 // resolveWorkerPlacement applies --worker-placement > this repo's
 // .argus/config.yml worker_placement > the flag's own default ("workspace"),
-// the same explicit-flag-wins precedence resolveSuperviseBase uses. explicit
+// the same explicit-flag-wins precedence supervisor.ResolveGateBase uses. explicit
 // is cmd.Flags().Changed("worker-placement"). The value is validated once,
 // downstream in parentWorkspace, so a bad config value fails the same way a
 // bad flag value does rather than needing a second check here. rc is a
@@ -426,6 +403,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		Client:                   client,
 		Log:                      logger,
 		Base:                     o.base,
+		BaseSource:               o.baseSource,
 		Home:                     home,
 		Launcher:                 o.launcher,
 		ParentWorkspace:          parentWS,

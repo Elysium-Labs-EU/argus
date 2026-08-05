@@ -50,6 +50,15 @@ func Preflight(ctx context.Context, cfg *Config, plans []WorkerPlan) error {
 	for _, root := range distinctRepoRoots(plans) {
 		if err := checkRepoRoot(ctx, root); err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		// Checked only once root is confirmed a real git repo, so a bad
+		// --repo isn't misreported as a bad --base. A base ref that doesn't
+		// exist is a config/infra problem, not a review outcome — it must
+		// never reach the gate and come out as an escalation indistinguishable
+		// from a real one (see VerifyBaseRef).
+		if err := VerifyBaseRef(ctx, root, ResolvedBase{Ref: cfg.Base, Source: cfg.BaseSource}); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if err := checkShellSyntax(ctx, "gate_verify_command", cfg.GateVerifyCommand); err != nil {

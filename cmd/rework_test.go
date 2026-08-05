@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -195,6 +198,206 @@ func TestRunReworkEmptyWorktree(t *testing.T) {
 	err := runRework(cmd, herdr.New(), &fakeReviewer{}, reworkLogger(), &reworkOpts{})
 	if _, ok := errors.AsType[*ui.UserError](err); !ok {
 		t.Fatalf("want a *ui.UserError for an empty worktree, got %v", err)
+	}
+}
+
+// updateRefOriginBranch fakes a remote-tracking ref (refs/remotes/origin/<branch>)
+// pointing at HEAD, the shape a real clone off a non-main-default repo would
+// have, without needing a real remote to pull from — mirrors the pattern
+// ship_test.go's TestWritePRChangeSectionHappyPath already uses.
+func updateRefOriginBranch(t *testing.T, dir, branch string) {
+	t.Helper()
+	if out, err := exec.Command("git", "-C", dir, "update-ref", "refs/remotes/origin/"+branch, "HEAD").CombinedOutput(); err != nil {
+		t.Fatalf("git update-ref refs/remotes/origin/%s: %v\n%s", branch, err, out)
+	}
+}
+
+// writeReworkRepoConfig writes a minimal .argus/config.yml under dir with the
+// given raw YAML body — unlike doctor_test.go's writeRepoConfig, the body
+// isn't hardcoded to base_branch: main, since these tests need other values.
+func writeReworkRepoConfig(t *testing.T, dir, yaml string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".argus"), 0o755); err != nil {
+		t.Fatalf("mkdir .argus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".argus", "config.yml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("writing config.yml: %v", err)
+	}
+}
+
+// TestBuildReworkConfigResolvesBaseFromRepoConfig is the regression test for
+// the reported bug: buildReworkConfig loaded repoconfig but set Config.Base
+// straight from the flag, never consulting base_branch, so rework always
+// diffed against origin/main even on a repo whose trunk was "develop". Proof
+// here is indirect but exact: the fixture's only real remote-tracking ref is
+// origin/develop — if buildReworkConfig fell back to the unresolved
+// "origin/main" flag value (the pre-fix behavior), VerifyBaseRef would reject
+// it and this call would error instead of returning origin/develop.
+func TestBuildReworkConfigResolvesBaseFromRepoConfig(t *testing.T) {
+	dir := initGitDirWithDiff(t)
+	writeReworkRepoConfig(t, dir, "base_branch: \"develop\"\n")
+	updateRefOriginBranch(t, dir, "develop")
+
+	cfg, _, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{worktree: dir, base: "origin/main"}, &fakeReviewer{}, reworkLogger())
+	if err != nil {
+		t.Fatalf("buildReworkConfig: %v", err)
+	}
+	if cfg.Base != "origin/develop" {
+		t.Errorf("Config.Base = %q, want origin/develop from .argus/config.yml base_branch, not the unresolved origin/main flag default", cfg.Base)
+	}
+	if cfg.BaseSource != supervisor.BaseSourceConfig {
+		t.Errorf("Config.BaseSource = %q, want %q", cfg.BaseSource, supervisor.BaseSourceConfig)
+	}
+}
+
+// TestBuildReworkConfigPropagatesRepoRootError proves buildReworkConfig
+// wraps and returns a supervisor.RepoRoot failure instead of proceeding with
+// an unresolved repo root.
+func TestBuildReworkConfigPropagatesRepoRootError(t *testing.T) {
+	notARepo := t.TempDir()
+	_, _, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{worktree: notARepo}, &fakeReviewer{}, reworkLogger())
+	if err == nil {
+		t.Fatal("want an error when the worktree isn't a git repo, got nil")
+	}
+}
+
+// TestBuildReworkConfigPropagatesRepoConfigLoadError proves a malformed
+// .argus/config.yml fails buildReworkConfig instead of silently falling
+// through with a zero Config.
+func TestBuildReworkConfigPropagatesRepoConfigLoadError(t *testing.T) {
+	dir := initGitDir(t)
+	writeReworkRepoConfig(t, dir, "base_branch: [unterminated\n")
+	_, _, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{worktree: dir}, &fakeReviewer{}, reworkLogger())
+	if err == nil {
+		t.Fatal("want an error for a malformed .argus/config.yml, got nil")
+	}
+}
+
+// TestBuildReworkConfigPropagatesHomeDirError proves buildReworkConfig
+// surfaces an os.UserHomeDir failure rather than proceeding with an empty
+// Home.
+func TestBuildReworkConfigPropagatesHomeDirError(t *testing.T) {
+	t.Setenv("HOME", "")
+	dir := initGitDir(t)
+	_, _, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{worktree: dir}, &fakeReviewer{}, reworkLogger())
+	if err == nil {
+		t.Fatal("want an error when $HOME is unset, got nil")
+	}
+}
+
+// TestBuildReworkConfigPropagatesGatePolicyError proves an invalid
+// --max-diff-lines fails buildReworkConfig instead of silently accepting a
+// nonsensical negative diff ceiling.
+func TestBuildReworkConfigPropagatesGatePolicyError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	_, _, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{
+		worktree: dir,
+		gate:     gateFlags{maxDiffLines: -1, maxDiffLinesExplicit: true},
+	}, &fakeReviewer{}, reworkLogger())
+	if err == nil {
+		t.Fatal("want an error for a negative --max-diff-lines, got nil")
+	}
+}
+
+// TestRunReworkDryRunShowsConfigResolvedBase pins the review fix: --dry-run
+// must preview the same base ref a real run would actually diff against —
+// resolved via ResolveGateBase from .argus/config.yml's base_branch — not
+// the raw, unresolved --base flag default. Before this fix, --dry-run never
+// called buildReworkConfig at all, so it always previewed the literal flag
+// value regardless of repo config, breaking parity with supervise's own
+// --dry-run (which does resolve through config).
+func TestRunReworkDryRunShowsConfigResolvedBase(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDirWithDiff(t)
+	writeReworkRepoConfig(t, dir, "base_branch: \"develop\"\n")
+	updateRefOriginBranch(t, dir, "develop")
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	cmd, buf := testCmd()
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected herdr call during --dry-run: %v", args)
+		return nil, nil
+	})
+
+	err := runRework(cmd, client, &fakeReviewer{}, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "origin/main", maxRounds: 3, dryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("runRework: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "base:       origin/develop") {
+		t.Errorf("dry-run plan should show the config-resolved base origin/develop, not the unresolved origin/main flag default:\n%s", out)
+	}
+	if strings.Contains(out, "origin/main") {
+		t.Errorf("dry-run plan must not show the unresolved flag default origin/main:\n%s", out)
+	}
+}
+
+// TestReworkAndSuperviseAgreeOnGateBase pins that rework's real
+// buildReworkConfig code path and supervise's own base-resolution call shape
+// (cmd/supervise.go's newSuperviseCmd RunE) land on the identical ref and
+// source for the same repo/config — both now funnel through the one shared
+// supervisor.ResolveGateBase helper, so they can't independently drift apart
+// again the way they did before this fix.
+func TestReworkAndSuperviseAgreeOnGateBase(t *testing.T) {
+	dir := initGitDirWithDiff(t)
+	writeReworkRepoConfig(t, dir, "base_branch: \"develop\"\n")
+	updateRefOriginBranch(t, dir, "develop")
+
+	reworkCfg, repoRoot, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{worktree: dir, base: "origin/main"}, &fakeReviewer{}, reworkLogger())
+	if err != nil {
+		t.Fatalf("buildReworkConfig: %v", err)
+	}
+
+	rc, err := repoconfig.Load(repoconfig.Path(repoRoot))
+	if err != nil {
+		t.Fatalf("repoconfig.Load: %v", err)
+	}
+	superviseBase := supervisor.ResolveGateBase(context.Background(), false, "origin/main", repoRoot, &rc)
+
+	if reworkCfg.Base != superviseBase.Ref || reworkCfg.BaseSource != superviseBase.Source {
+		t.Errorf("rework resolved base=%q source=%q, supervise resolved base=%q source=%q — must agree",
+			reworkCfg.Base, reworkCfg.BaseSource, superviseBase.Ref, superviseBase.Source)
+	}
+}
+
+// TestRunReworkFailsFastOnUnresolvableBaseRef pins the fail-fast fix: an
+// unresolvable --base must error before any round dispatches (no herdr call
+// at all) with a message naming the bad ref and its source, rather than
+// dispatching a round that would later surface as an opaque per-worker
+// measure_diff failure indistinguishable from a real review escalation.
+func TestRunReworkFailsFastOnUnresolvableBaseRef(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	cmd, _ := testCmd()
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected herdr call: an unresolvable base ref must fail before any dispatch: %v", args)
+		return nil, nil
+	})
+
+	err := runRework(cmd, client, &fakeReviewer{}, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "origin/does-not-exist", baseExplicit: true, maxRounds: 3,
+	})
+	userErr, ok := errors.AsType[*ui.UserError](err)
+	if !ok {
+		t.Fatalf("want a *ui.UserError for an unresolvable base ref, got %T: %v", err, err)
+	}
+	if !strings.Contains(userErr.Error(), `"origin/does-not-exist" does not exist`) {
+		t.Errorf("error = %q, want it to name the unresolvable ref", userErr.Error())
+	}
+	if !strings.Contains(userErr.Error(), "resolved from: flag") {
+		t.Errorf("error = %q, want it to name the source (flag)", userErr.Error())
+	}
+	// A fail-fast base-ref error must never reach the gate and overwrite the
+	// seeded verdict with a gate escalation.
+	if a, found, aerr := protocol.LoadApproval(dir); aerr != nil || !found || a.Source != "review" {
+		t.Errorf("verdict should be unchanged from the seeded one, got found=%v approval=%+v err=%v", found, a, aerr)
 	}
 }
 
@@ -930,7 +1133,7 @@ func TestReworkFindingsFlagIsVerbatimAndRepeatable(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&buf)
-	cmd.SetArgs([]string{"--worktree", dir, "--dry-run", "--findings", withCommas, "--findings", withQuote})
+	cmd.SetArgs([]string{"--worktree", dir, "--base", "HEAD", "--dry-run", "--findings", withCommas, "--findings", withQuote})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("rework --dry-run: %v", err)
 	}
@@ -958,7 +1161,7 @@ func TestReworkFindingsFileAppends(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&buf)
-	cmd.SetArgs([]string{"--worktree", dir, "--dry-run", "--findings", "flag finding", "--findings-file", file})
+	cmd.SetArgs([]string{"--worktree", dir, "--base", "HEAD", "--dry-run", "--findings", "flag finding", "--findings-file", file})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("rework --dry-run: %v", err)
 	}

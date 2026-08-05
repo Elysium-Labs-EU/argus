@@ -83,7 +83,7 @@ outcome instead of retrying forever.`,
 			// .argus/config.yml is loaded: review_effort can come from that file,
 			// and the flag/config precedence can't be decided before it's read.
 			return runRework(cmd, herdr.New(), nil, logger, &reworkOpts{
-				worktree: worktree, base: base, task: task, findings: findings,
+				worktree: worktree, base: base, baseExplicit: cmd.Flags().Changed("base"), task: task, findings: findings,
 				launcher: launcher, workerRuntime: workerRuntime, interval: interval,
 				maxRounds: maxRounds, maxRoundsExplicit: cmd.Flags().Changed("max-rounds"),
 				dryRun: dryRun, noCredProxy: noCredProxy, credentialEnv: overrides,
@@ -166,6 +166,7 @@ type reworkOpts struct {
 	livenessInterval        time.Duration
 	dryRun                  bool
 	noCredProxy             bool
+	baseExplicit            bool
 	gateVerifyCmdExplicit   bool
 	reviewEffortExplicit    bool
 	reviewNoteExplicit      bool
@@ -208,9 +209,20 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 		return err
 	}
 
+	// buildReworkConfig runs before the --dry-run check (not inside
+	// prepareReworkRun, which resolves everything else) specifically so a
+	// dry-run preview shows the actual config-resolved base ref it would diff
+	// against for real (e.g. origin/develop from .argus/config.yml
+	// base_branch), not the raw, unresolved --base flag default — and so a
+	// bad base ref fails the preview fast too, the same "even under --dry-run"
+	// guarantee Preflight's own --repo check gives supervise.
 	cfg, repoRoot, budget, err := buildReworkConfig(ctx, out, opts, reviewer, logger)
 	if err != nil {
 		return err
+	}
+	if opts.dryRun {
+		renderReworkPlan(out, opts, branch, findings)
+		return nil
 	}
 	return runReworkLoop(ctx, out, logger, client, cfg, repoRoot, branch, task, findings, budget, opts)
 }
@@ -219,10 +231,11 @@ func runRework(cmd *cobra.Command, client herdr.Client, reviewer supervisor.Revi
 // dispatching rounds — ownership, --max-rounds' own default, round 1's
 // findings, and the branch/task the brief will name — split out of runRework
 // so these sequential guard clauses don't inflate its own complexity. done
-// means runRework should return (err, which may be nil) without ever
-// entering the round loop: either the worktree already has an approving
-// verdict (findings == nil, nothing to rework) or --dry-run already printed
-// the plan.
+// means runRework should return (err, which is nil here) without ever
+// entering the round loop: the worktree already has an approving verdict
+// (findings == nil, nothing to rework). --dry-run's own short-circuit lives
+// in runRework instead, after buildReworkConfig, so the dry-run preview can
+// show the config-resolved base ref rather than the raw flag value.
 func prepareReworkRun(ctx context.Context, out io.Writer, opts *reworkOpts) (branch, task string, findings []string, done bool, err error) {
 	if oerr := enforceOwnership(ctx, out, opts.worktree, opts.owner, time.Now()); oerr != nil {
 		return "", "", nil, true, oerr
@@ -262,10 +275,6 @@ func prepareReworkRun(ctx context.Context, out io.Writer, opts *reworkOpts) (bra
 		task = taskFor(opts.worktree, branch)
 	}
 
-	if opts.dryRun {
-		renderReworkPlan(out, opts, branch, findings)
-		return "", "", nil, true, nil
-	}
 	return branch, task, findings, false, nil
 }
 
@@ -355,11 +364,12 @@ func escalateReworkBudgetExceeded(out io.Writer, worktree string, findings []str
 }
 
 // buildReworkConfig assembles runRework's per-round supervisor.Config:
-// resolving the repo root, loading its repoconfig, defaulting the reviewer,
-// and reading $HOME — split out so this one-time setup doesn't inflate
-// runRework's own branching. The returned int is the resolved rework restart
-// budget (see resolveMaxReworkBudget) — not part of supervisor.Config since
-// it governs runRework's own loop, not anything the gate/reviewer consult.
+// resolving the repo root, loading its repoconfig, resolving and validating
+// the gate/review base ref, defaulting the reviewer, and reading $HOME —
+// split out so this one-time setup doesn't inflate runRework's own
+// branching. The returned int is the resolved rework restart budget (see
+// resolveMaxReworkBudget) — not part of supervisor.Config since it governs
+// runRework's own loop, not anything the gate/reviewer consult.
 func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, reviewer supervisor.Reviewer, logger *eventlog.Logger) (*supervisor.Config, string, int, error) {
 	repoRoot, err := supervisor.RepoRoot(ctx, opts.worktree)
 	if err != nil {
@@ -370,6 +380,23 @@ func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, rev
 		return nil, "", 0, &ui.UserError{Err: fmt.Errorf("loading %s: %w", repoconfig.Path(repoRoot), err)}
 	}
 	warnDeprecatedConfigKeys(out, &rc)
+
+	// Resolved through the same precedence supervise uses (explicit --base >
+	// this repo's base_branch > detected origin/HEAD > the flag's own
+	// default) so the two commands can't drift apart on which ref they diff
+	// against — see supervisor.ResolveGateBase. Verified to actually exist
+	// before any round dispatches: a bad base ref is a config/infra problem,
+	// not a review outcome, and must never reach the gate and come out as an
+	// escalation indistinguishable from a real one. opts.base is updated to
+	// the resolved ref so dispatchReworkRound's brief tells the worker the
+	// same base the gate actually diffs against, not the raw, unresolved flag
+	// value.
+	resolvedBase := supervisor.ResolveGateBase(ctx, opts.baseExplicit, opts.base, repoRoot, &rc)
+	if verr := supervisor.VerifyBaseRef(ctx, repoRoot, resolvedBase); verr != nil {
+		return nil, "", 0, verr
+	}
+	opts.base = resolvedBase.Ref
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("resolving home dir: %w", err)
@@ -387,6 +414,7 @@ func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, rev
 		Policy:            policy,
 		Home:              home,
 		Base:              opts.base,
+		BaseSource:        resolvedBase.Source,
 		Reviewer:          reviewer,
 		ReviewNote:        resolveReviewNote(opts.reviewNoteExplicit, opts.reviewNote, &rc),
 		GateVerifyCommand: resolveGateVerifyCommand(opts.gateVerifyCmdExplicit, opts.gateVerifyCmd, &rc),

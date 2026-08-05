@@ -13,7 +13,7 @@ func bindWorktreeFlag(cmd *cobra.Command, dst *string, help string) {
 // bindBaseFlag registers the --base flag. defaultBase is passed in, not
 // hardcoded, because supervise/review/rework diff against a fetched ref
 // ("origin/main") while rebase/ship name a bare branch ("main") — see
-// resolveSuperviseBase and shipArgs.baseIsDefault for why that split is
+// supervisor.ResolveGateBase and shipArgs.baseIsDefault for why that split is
 // deliberate rather than accidental drift.
 func bindBaseFlag(cmd *cobra.Command, dst *string, defaultBase, help string) {
 	cmd.Flags().StringVar(dst, "base", defaultBase, help)
