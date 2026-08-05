@@ -1435,8 +1435,12 @@ func idleWithoutReport(agentStatus string, hasFile bool) bool {
 	return agentStatus == "idle" && !hasFile
 }
 
-// findPane returns the pane in panes matching paneID, if any.
-func findPane(panes []herdr.Pane, paneID string) (herdr.Pane, bool) {
+// FindPane returns the pane in panes matching paneID, if any. Exported so
+// cmd's own dispatchIntoPane (rebase/rework's shared pane-dispatch helper)
+// can reuse this same lookup — e.g. to resolve a freshly opened pane's
+// TabID for a best-effort TabRename — instead of a second, independently
+// written copy risking drift from this one.
+func FindPane(panes []herdr.Pane, paneID string) (herdr.Pane, bool) {
 	for i := range panes {
 		if panes[i].PaneID == paneID {
 			return panes[i], true
@@ -1477,7 +1481,7 @@ func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Log
 	}
 	st.herdrErr = ""
 
-	pane, found := findPane(panes, st.paneID)
+	pane, found := FindPane(panes, st.paneID)
 	if !found || (!herdrStuck(pane.AgentStatus) && !idleWithoutReport(pane.AgentStatus, st.hasFile)) {
 		st.herdrStuckElapsed = 0
 		st.herdrNudged = false

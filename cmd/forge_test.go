@@ -225,6 +225,25 @@ func TestJiraIssuesToTasks(t *testing.T) {
 	}
 }
 
+// TestJiraIssuesToTasksNormalizesLabelCase covers a lowercase --jira-issues
+// key (Jira keys are case-insensitive on lookup, so an operator typing
+// "proj-9" works the same as "PROJ-9"): the label is routed through
+// supervisor.TicketKey, the same extraction rework's fresh-pane respawn uses
+// on a status.json task, so both surfaces agree on uppercased casing instead
+// of a spawn-time label that could carry whatever case the operator typed.
+func TestJiraIssuesToTasksNormalizesLabelCase(t *testing.T) {
+	f := &fakeJira{issues: map[string]forge.Issue{
+		"proj-9": {Title: "lowercase key", Body: "body"},
+	}}
+	_, _, labels, err := jiraIssuesToTasks(context.Background(), io.Discard, f, t.TempDir(), "myrepo", []string{"proj-9"}, jiraSpawnOpts{}, briefNoteOverride{})
+	if err != nil {
+		t.Fatalf("jiraIssuesToTasks: %v", err)
+	}
+	if len(labels) != 1 || labels[0] != "PROJ-9" {
+		t.Errorf("labels: got %v, want [PROJ-9]", labels)
+	}
+}
+
 // TestJiraIssuesToTasksAssignsAndTransitionsOnSpawn covers the pre-spawn hook:
 // with assignToCaller set, each issue is assigned to the accountID Myself
 // resolves (fetched once, not once per issue); with transition set, each

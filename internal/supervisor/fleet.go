@@ -106,19 +106,27 @@ func FilterFleet(rows []FleetRow, controllerID string, all, includeIdle bool) Fl
 	return result
 }
 
-// ticketPattern matches a leading ticket key at the start of a branch name —
-// one or more letters, a hyphen, one or more digits (e.g. "AP-1169",
-// "ap-1166") — the shape a Jira/Linear/GitHub-issue-style branch prefix
-// takes regardless of which casing its project key was typed in.
+// ticketPattern matches a leading ticket key at the start of a string — one
+// or more letters, a hyphen, one or more digits (e.g. "AP-1169", "ap-1166")
+// — the shape a Jira/Linear/GitHub-issue-style branch prefix or task-string
+// prefix takes regardless of which casing its project key was typed in. See
+// TicketKey.
 var ticketPattern = regexp.MustCompile(`(?i)^([a-z]+)-(\d+)`)
 
-// normalizeTicket extracts and uppercases a leading ticket key from a branch
-// name (e.g. "ap-1166-fix-thing" -> "AP-1166"), so a fleet row maps to its
-// tracker key without eyeballing casing that varies branch to branch. Empty
-// when branch carries no such prefix — a plain descriptive branch, or one
-// argus itself auto-generated from a task slug.
-func normalizeTicket(branch string) string {
-	m := ticketPattern.FindStringSubmatch(branch)
+// TicketKey extracts and uppercases a leading ticket key from a branch name
+// or task string (e.g. "ap-1166-fix-thing" -> "AP-1166", "AP-1207: Fix
+// DELETE …" -> "AP-1207"), so every argus surface that shows a ticket key —
+// a fleet row, a rework respawn's herdr label, a --jira-issues spawn's own
+// label — agrees on the same extraction and the same uppercased casing,
+// regardless of which case the tracker or operator happened to type. Empty
+// when s carries no such prefix — a plain descriptive branch/task, or one
+// argus itself auto-generated from a task slug. The single shared derivation
+// site is deliberate (style.md's "one derivation site per ambient fact"):
+// before this, only fleet.go's own (unexported) copy existed, and
+// cmd/supervise.go's Jira label path and cmd/rework.go's status.json-task
+// label each risked re-deriving this independently and drifting apart.
+func TicketKey(s string) string {
+	m := ticketPattern.FindStringSubmatch(s)
 	if m == nil {
 		return ""
 	}
@@ -185,7 +193,7 @@ func (r *FleetRow) MarshalJSON() ([]byte, error) {
 		Verdict:        nullableApproval{Approval: r.Verdict, UpdatedAt: nullableTime(r.Verdict.UpdatedAt)},
 		Lifecycle:      nullableLifecycle{Lifecycle: r.Lifecycle, UpdatedAt: nullableTime(r.Lifecycle.UpdatedAt)},
 		Owner:          nullableOwner{Owner: r.Owner, SpawnedAt: nullableTime(r.Owner.SpawnedAt), HeartbeatAt: nullableTime(r.Owner.HeartbeatAt)},
-		Ticket:         normalizeTicket(r.Branch),
+		Ticket:         TicketKey(r.Branch),
 		PhaseUpdatedAt: nullableTime(r.Status.UpdatedAt),
 	})
 }

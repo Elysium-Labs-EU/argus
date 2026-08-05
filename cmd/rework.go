@@ -176,12 +176,23 @@ type reworkOpts struct {
 
 // dispatchTarget builds dispatchIntoPane's input from a reworkOpts, mirroring
 // rebaseOpts.dispatchTarget — the two commands share the same pane-reuse-vs-
-// spawn dispatch primitive.
-func (o *reworkOpts) dispatchTarget() *dispatchTarget {
+// spawn dispatch primitive. task is the round's resolved task text (see
+// dispatchReworkRound) — threaded in here rather than stored on reworkOpts
+// itself, since it varies by round while reworkOpts is built once for the
+// whole invocation. label is derived from it via supervisor.TicketKey — the
+// same extraction supervise's Jira label path and fleet's own ticket column
+// use — so dispatchIntoPane's fresh-pane relabel (see relabelFreshPane)
+// applies the worktree's actual ticket key instead of leaving a respawned
+// pane's label off the raw branch/task the way herdr.Client.WorktreeOpen
+// defaults it. "" (task carries no ticket-key prefix) leaves relabelFreshPane
+// a no-op, so herdr's own default label stands rather than re-deriving a
+// branch-slug fallback here.
+func (o *reworkOpts) dispatchTarget(task string) *dispatchTarget {
 	return &dispatchTarget{
 		worktree: o.worktree, launcher: o.launcher, workerRuntime: o.workerRuntime,
 		noCredProxy: o.noCredProxy, credentialEnv: o.credentialEnv,
 		livenessTimeout: o.livenessTimeout, livenessInterval: o.livenessInterval,
+		label: supervisor.TicketKey(task),
 	}
 }
 
@@ -643,7 +654,7 @@ func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Lo
 		return protocol.Status{}, "", dispatchedAt, werr
 	}
 
-	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget()); err != nil {
+	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget(task)); err != nil {
 		return protocol.Status{}, "", dispatchedAt, err
 	}
 
