@@ -290,20 +290,22 @@ func TestFilterFleetForeignRowNeverDoubleCountedAsIdle(t *testing.T) {
 	}
 }
 
-func TestNormalizeTicket(t *testing.T) {
+func TestTicketKey(t *testing.T) {
 	cases := []struct {
-		branch string
-		want   string
+		s    string
+		want string
 	}{
 		{"AP-1169-fix-thing", "AP-1169"},
 		{"ap-1166-fix-thing", "AP-1166"},
 		{"argus-fix-issue-554", ""},
 		{"", ""},
 		{"AP-1169", "AP-1169"},
+		{"AP-1207: Fix DELETE /api/web_app/<uuid> 500", "AP-1207"},
+		{"ap-1207: fix delete", "AP-1207"},
 	}
 	for _, c := range cases {
-		if got := normalizeTicket(c.branch); got != c.want {
-			t.Errorf("normalizeTicket(%q) = %q, want %q", c.branch, got, c.want)
+		if got := TicketKey(c.s); got != c.want {
+			t.Errorf("TicketKey(%q) = %q, want %q", c.s, got, c.want)
 		}
 	}
 }

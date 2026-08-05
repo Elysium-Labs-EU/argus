@@ -1109,13 +1109,28 @@ func TestReworkOptsDispatchTargetCopiesFields(t *testing.T) {
 		credentialEnv:   map[string]string{"github.com": "MY_TOKEN"},
 		livenessTimeout: time.Second, livenessInterval: time.Millisecond,
 	}
-	target := o.dispatchTarget()
+	target := o.dispatchTarget("AP-1207: fix DELETE endpoint")
 	if target.worktree != o.worktree || target.launcher != o.launcher || target.workerRuntime != o.workerRuntime ||
 		target.noCredProxy != o.noCredProxy || target.livenessTimeout != o.livenessTimeout || target.livenessInterval != o.livenessInterval {
 		t.Errorf("dispatchTarget() = %+v, want it to mirror reworkOpts %+v", target, o)
 	}
 	if target.credentialEnv["github.com"] != "MY_TOKEN" {
 		t.Errorf("dispatchTarget() dropped credentialEnv: %+v", target)
+	}
+	if target.label != "AP-1207" {
+		t.Errorf("dispatchTarget() label = %q, want the ticket key extracted from task", target.label)
+	}
+}
+
+// TestReworkOptsDispatchTargetLabelEmptyWithoutTicketKey covers a task with
+// no ticket-key prefix: dispatchTarget's label must stay "" so
+// relabelFreshPane leaves herdr's own default label alone, rather than
+// re-deriving a branch-slug fallback here.
+func TestReworkOptsDispatchTargetLabelEmptyWithoutTicketKey(t *testing.T) {
+	o := &reworkOpts{worktree: "/wt"}
+	target := o.dispatchTarget("fix the DELETE endpoint, no ticket prefix")
+	if target.label != "" {
+		t.Errorf("dispatchTarget() label = %q, want \"\" for a task with no ticket-key prefix", target.label)
 	}
 }
 

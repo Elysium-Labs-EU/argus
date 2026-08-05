@@ -497,7 +497,7 @@ func (t *paneStuckTracker) check(ctx context.Context, client herdr.Client, paneI
 	if err != nil {
 		return nil //nolint:nilerr // a herdr transport error says nothing about the worker's own state; must not itself count as evidence of being stuck
 	}
-	pane, found := findPane(panes, paneID)
+	pane, found := FindPane(panes, paneID)
 	stuck := found && (herdrStuck(pane.AgentStatus) || idleWithoutReport(pane.AgentStatus, hasFile))
 	if out != nil && stuck != t.wasStuck {
 		if stuck {

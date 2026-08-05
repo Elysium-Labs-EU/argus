@@ -372,10 +372,18 @@ func commitRebaseResolution(ctx context.Context, worktree, branch, base string, 
 // rather than spawning a brand new one via the full supervise pipeline — so
 // the pane-reuse-vs-spawn logic below is written once.
 type dispatchTarget struct {
-	credentialEnv    map[string]string
-	worktree         string
-	launcher         string
-	workerRuntime    string
+	credentialEnv map[string]string
+	worktree      string
+	launcher      string
+	workerRuntime string
+	// label, when set, is the herdr tab label dispatchIntoPane applies (via
+	// TabRename) once it confirms paneID has no live agent — a genuinely
+	// fresh pane, not a live session being re-tasked. rebaseOpts never sets
+	// this; only reworkOpts does, derived from supervisor.TicketKey (see its
+	// own dispatchTarget), since rebase's dispatch never had a labeling
+	// requirement of its own. "" is a no-op: leave herdr's own default label
+	// alone.
+	label            string
 	noCredProxy      bool
 	livenessTimeout  time.Duration
 	livenessInterval time.Duration
@@ -427,6 +435,7 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	}
 
 	logger.Action("dispatch", branch, "spawn-new-agent", paneID)
+	relabelFreshPane(ctx, logger, client, paneID, branch, target.label)
 	spawnLine, cleanup, err := buildRebaseSpawnLine(ctx, logger, target.worktree, branch, target.launcher, target.workerRuntime, target.noCredProxy, target.credentialEnv)
 	defer cleanup()
 	if err != nil {
@@ -451,6 +460,42 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	// only once the agent starts actually running) still fails fast instead
 	// of hanging forever.
 	return waitForAgentLive(ctx, client, paneID, target.livenessTimeout, target.livenessInterval)
+}
+
+// relabelFreshPane best-effort renames paneID's tab to label, once
+// dispatchIntoPane's own AgentGet check has already confirmed paneID has no
+// live agent — a genuinely fresh pane, not a live session being re-tasked.
+// This is the fix for rework's fresh-pane respawn losing its ticket-key
+// label: herdr.Client.WorktreeOpen (unlike WorktreeCreate) has no --label of
+// its own, so a worktree whose herdr workspace was closed and reopened
+// otherwise keeps whatever generic default herdr picks instead of the
+// ticket key rework already knows from status.json — mirroring
+// internal/supervisor/loop.go's createAndPlaceWorktree, which applies the
+// same TabRename-after-placement fix on the spawn path's own nested-tab
+// case. label == "" is a no-op (rebase never sets one; a rework task with no
+// ticket-key prefix leaves herdr's own default alone rather than
+// re-deriving a branch-slug fallback here). A PaneList/lookup/rename failure
+// is logged, never fatal — this is a cosmetic label, never worth aborting a
+// dispatch over.
+func relabelFreshPane(ctx context.Context, logger *eventlog.Logger, client herdr.Client, paneID, branch, label string) {
+	if label == "" {
+		return
+	}
+	panes, err := client.PaneList(ctx)
+	if err != nil {
+		logger.Action("dispatch", branch, "relabel-pane-list-failed", err.Error())
+		return
+	}
+	pane, found := supervisor.FindPane(panes, paneID)
+	if !found || pane.TabID == "" {
+		logger.Action("dispatch", branch, "relabel-no-tab-id", paneID)
+		return
+	}
+	if err := client.TabRename(ctx, pane.TabID, label); err != nil {
+		logger.Action("dispatch", branch, "relabel-failed", err.Error())
+		return
+	}
+	logger.Action("dispatch", branch, "relabeled", label)
 }
 
 // fallBackToPaneRun recovers from an AgentPrompt call herdr reported as

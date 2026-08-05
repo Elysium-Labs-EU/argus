@@ -1199,12 +1199,18 @@ func repoBranchPrefix(ctx context.Context, repoPath string) string {
 // branch name, and a bare ticket-key label (the Jira key itself, e.g.
 // "AP-1207" — already the bare form issuesToTasks has to synthesize with a
 // leading "#" for a numeric issue), mirroring issuesToTasks for the
-// git-forge issue pipeline. It also runs the optional pre-spawn Jira hook
-// (jiraSpawn) before a worker for that issue starts, so the ticket shows a
-// claimed signal on the board for its whole worker lifetime rather than only
-// after ship's post-ship hook runs (see postShipJira in cmd/ship.go). Unlike
-// that post-ship hook, a failure here aborts the spawn instead of degrading
-// to a warning — the PR doesn't exist yet, so there is still something to
+// git-forge issue pipeline. The label is routed through
+// supervisor.TicketKey — the same extraction rework uses on a worktree's
+// status.json task — rather than using key verbatim, so the two agree on
+// casing even though a bare Jira key already carries no colon suffix for
+// TicketKey to strip; key itself is the fallback for the never-expected case
+// where an operator's --jira-issues value doesn't match TicketKey's own
+// pattern. It also runs the optional pre-spawn Jira hook (jiraSpawn) before
+// a worker for that issue starts, so the ticket shows a claimed signal on
+// the board for its whole worker lifetime rather than only after ship's
+// post-ship hook runs (see postShipJira in cmd/ship.go). Unlike that
+// post-ship hook, a failure here aborts the spawn instead of degrading to a
+// warning — the PR doesn't exist yet, so there is still something to
 // protect: an operator finding out the claim never took before workers pile
 // onto an apparently-unclaimed ticket. repoPath resolves this repo's
 // optional brief_note the same way issuesToTasks does.
@@ -1238,7 +1244,11 @@ func jiraIssuesToTasks(ctx context.Context, out io.Writer, c jiraSpawnClient, re
 			"Fix Jira issue %s: %s\n\n%s\n\n%s",
 			key, iss.Title, iss.Body, tail))
 		branches = append(branches, fmt.Sprintf("%s-fix-%s", branchPrefix, strings.ToLower(key)))
-		labels = append(labels, key)
+		label := supervisor.TicketKey(key)
+		if label == "" {
+			label = key
+		}
+		labels = append(labels, label)
 	}
 	return tasks, branches, labels, nil
 }
