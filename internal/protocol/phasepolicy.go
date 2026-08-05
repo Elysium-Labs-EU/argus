@@ -12,12 +12,12 @@ var ConfigurablePhases = []Phase{PhasePlanning, PhaseWorking, PhaseSelfTest, Pha
 
 // PhasePolicy is one repo's configured additions for a single phase: Deny
 // adds Bash prefixes on top of DeniedInPhase's floor; Skip drops this
-// policy's own Deny (never the floor). Allow is parsed and schema-validated
-// per phase but has no resolver of its own yet — it is groundwork for the
-// follow-up worker-permissions minimal-rights work (switching workers to
-// dontAsk with a curated per-phase allow set), which needs the per-phase
-// structure to already exist. Deny/Allow are ordered before Skip for struct
-// alignment (fieldalignment-enforced), not logical order.
+// policy's own Deny (never the floor). Allow holds Claude Code permission
+// patterns (e.g. "Bash(go test *)") granted only while a worker reports this
+// phase — see internal/supervisor's ResolvedAllowForPhase, the resolver that
+// unions it with the structural floor and strips anything overlapping
+// DenyFloor. Deny/Allow are ordered before Skip for struct alignment
+// (fieldalignment-enforced), not logical order.
 type PhasePolicy struct {
 	Deny  []string
 	Allow []string
@@ -43,18 +43,31 @@ var AlwaysDeniedCommands = []string{"argus ship", "argus rework", "argus review"
 
 // DeniedInPhase returns the Bash command prefixes denied while a worker
 // reports phase p, before any repo config is applied — the floor
-// ResolvedDenyForPhase always includes and no config can remove.
-// AlwaysDeniedCommands applies regardless of p; PhasePlanning additionally
-// denies commit/push (same set as AskGatedCommands) — a worker shouldn't
-// touch git before it has even reported a plan. Every other phase gets only
-// AlwaysDeniedCommands; commit/push stay ask-gated there instead (see
-// AgentAdapter.RenderSettings).
-func DeniedInPhase(p Phase) []string {
-	denied := slices.Clone(AlwaysDeniedCommands)
-	if p == PhasePlanning {
-		denied = append(denied, AskGatedCommands...)
-	}
-	return denied
+// ResolvedDenyForPhase always includes and no config can remove. It is
+// exactly DenyFloor() for every phase: a worker never commits or pushes at
+// all, in any phase — only argus ship does, once a verdict exists — so there
+// is no phase where allowing the underlying git command becomes safe. p is
+// kept as a parameter (rather than dropped now that it's unused) because
+// ResolvedDenyForPhase and every caller are phase-shaped call sites; a future
+// phase-specific addition to the floor should not need to change every
+// signature along the chain again.
+func DeniedInPhase(_ Phase) []string {
+	return DenyFloor()
+}
+
+// DenyFloor is the hardcoded, unremovable set of Bash command prefixes
+// denied in every phase: AlwaysDeniedCommands plus AskGatedCommands (git
+// commit, git push). Subtracted last from any resolved *allow* set (see
+// internal/supervisor's ResolvedAllowForPhase) as well as being the floor
+// DeniedInPhase always returns — the same two facts, read from the two
+// different directions a repo's config can try to approach them from (an
+// over-broad allow entry, or a config trying to Skip its way past a deny).
+// No phases.<any>.allow entry, materialized toolchain command, or --allow
+// flag can re-grant any of these: a worker edits files and reports; argus
+// ship is the only path that ever runs git commit or git push.
+func DenyFloor() []string {
+	floor := slices.Clone(AlwaysDeniedCommands)
+	return append(floor, AskGatedCommands...)
 }
 
 // ResolvedDenyForPhase merges DeniedInPhase's floor with project's own

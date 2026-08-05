@@ -26,11 +26,16 @@ type AgentAdapter interface {
 
 	// RenderSettings builds the worktree-scoped permission file this agent
 	// reads at session launch: its path relative to worktree, and its
-	// encoded content. repoAllow is the repo's own .argus/config.yml allow
-	// list (see internal/repoconfig), inserted after the agent's fixed
-	// structural entries; extraAllow appends operator-supplied CLI --allow
-	// patterns on top of that, for a one-off run.
-	RenderSettings(worktree string, repoAllow, extraAllow []string) (path string, content []byte, err error)
+	// encoded content. project is the repo's own .argus/config.yml
+	// phases.<name>.allow policy (see internal/repoconfig); baseAllow is its
+	// phase-independent top-level allow list; extraAllow appends
+	// operator-supplied CLI --allow patterns on top of both, for a one-off
+	// run. The rendered allow list is the union of every configurable
+	// phase's own resolved allow (see ResolvedAllowForPhase) — the static
+	// session-wide file can't itself be phase-conditional, so the live
+	// PreToolUse hook (argus worker check-tool) narrows it back down to the
+	// worker's actual current phase on every call.
+	RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) (path string, content []byte, err error)
 
 	// PlanEvidence reports whether any session transcript for worktree
 	// contains a real todo-list tool call — the unfakeable backstop for the
@@ -51,8 +56,8 @@ func (claudeCodeAdapter) DefaultLauncher() string {
 	return DefaultLauncher
 }
 
-func (claudeCodeAdapter) RenderSettings(worktree string, repoAllow, extraAllow []string) (string, []byte, error) {
-	settings := settingsFor(worktree, repoAllow, extraAllow)
+func (claudeCodeAdapter) RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) (string, []byte, error) {
+	settings := settingsFor(worktree, project, baseAllow, extraAllow)
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", nil, fmt.Errorf("encoding settings: %w", err)
@@ -65,14 +70,20 @@ func (claudeCodeAdapter) PlanEvidence(home, worktree string) (bool, int, error) 
 }
 
 // permissionSettings mirrors the shape Claude Code reads from
-// .claude/settings.local.json. argus generates it per worktree so containment is
-// a technical fact, not an instruction a worker has to remember — the allow list
-// pre-clears routine read/build/test/edit-in-own-worktree calls, and the deny
-// list makes "never leave or destroy your worktree" enforced.
+// .claude/settings.local.json under --permission-mode dontAsk: never prompt
+// a human, resolve every call from Allow/Deny alone (read-only tools stay
+// auto-allowed by the mode itself) — an unlisted mutating command is denied
+// and fed back to the worker, not asked and not hung. argus generates this
+// per worktree so containment is a technical fact, not an instruction a
+// worker has to remember — Allow pre-clears routine read/build/test/
+// edit-in-own-worktree calls, and Deny makes "never leave or destroy your
+// worktree, never commit or push" enforced natively, on top of the live
+// PreToolUse hook (see checkToolHook) that narrows Allow down to the
+// worker's current phase.
 //
 // EnableAllProjectMcpServers pre-approves Claude Code's one-time interactive
 // consent gate for any project-scoped MCP server (.mcp.json) it discovers —
-// a separate screen from --permission-mode auto's tool-permission checks,
+// a separate screen from --permission-mode's own tool-permission checks,
 // which does not cover it. A headless worker pane has no human to answer that
 // prompt, so left unset it hangs at agent_status idle forever with
 // status.json never written, indistinguishable from "hasn't started yet".
@@ -82,9 +93,16 @@ type permissionSettings struct {
 	EnableAllProjectMcpServers bool            `json:"enableAllProjectMcpServers"`
 }
 
+// permissionBlock has no Ask field: dontAsk never prompts, so an "ask" list
+// has no meaning to resolve against — a command is either in Allow (or
+// read-only, auto-allowed by the mode) or it's denied. git commit/push and
+// argus's own supervisor commands used to live in Ask, gated behind a human
+// approval outside planning; they are now in Deny unconditionally, in every
+// phase (see protocol.DenyFloor) — a worker never commits or pushes at all,
+// so there is no phase where prompting a human through it was the right
+// answer either.
 type permissionBlock struct {
 	Allow []string `json:"allow"`
-	Ask   []string `json:"ask"`
 	Deny  []string `json:"deny"`
 }
 
@@ -107,9 +125,11 @@ type hookEntry struct {
 }
 
 // checkToolHook wires `argus worker check-tool` as a PreToolUse/Bash hook on
-// every worker. The static allow/ask/deny lists below are read once at
-// session launch, so a phase-conditional rule (protocol.DeniedInPhase) needs
-// a hook that re-checks the worktree's current status.json live instead.
+// every worker. The static allow/deny lists above are read once at session
+// launch and can only ever be the union across every phase (dontAsk has no
+// notion of "phase"), so a phase-conditional rule — both DeniedInPhase's
+// floor and ResolvedAllowForPhase's own per-phase scoping — needs a hook
+// that re-checks the worktree's current status.json live instead.
 func checkToolHook() hookMatcher {
 	return hookMatcher{
 		Matcher: "Bash",
@@ -119,36 +139,43 @@ func checkToolHook() hookMatcher {
 	}
 }
 
-// settingsFor builds the worktree-scoped permission settings. This is the single
-// source of truth for worker permissions (lifted from the supervise-agents
-// skill): edits/writes are confined to the worktree, git read/write plumbing
-// is pre-cleared, commit/push stay gated behind ask, and destructive or
-// out-of-worktree operations are denied outright.
+// settingsFor builds the worktree-scoped permission settings for
+// --permission-mode dontAsk. This is the single source of truth for worker
+// permissions: edits/writes are confined to the worktree, the resolved allow
+// set (see ResolvedAllowForPhase) covers every configurable phase's own
+// materialized toolchain plus the structural floor, and destructive,
+// out-of-worktree, or deny-floor operations are denied outright — both
+// statically here (defense in depth) and live via checkToolHook.
 //
-// repoAllow is the repo's own .argus/config.yml allow list (see
-// internal/repoconfig) — it replaces the build/test-tool entries argus used
-// to hardcode for every repo regardless of toolchain; an empty
-// repoAllow (no config file, or none present) means no build/test tooling is
-// pre-cleared for anyone, not just non-Go repos, since argus itself has no
-// opinion on any repo's toolchain. extraAllow appends operator-supplied CLI
-// --allow patterns after that, for a one-off run.
-func settingsFor(worktree string, repoAllow, extraAllow []string) permissionSettings {
+// project is the repo's own .argus/config.yml phases.<name>.allow policy
+// (see internal/repoconfig); baseAllow is its phase-independent top-level
+// allow list — together they replace the build/test-tool entries argus used
+// to hardcode for every repo regardless of toolchain. With neither set (no
+// config file, or none present), a worker still gets exactly the structural
+// floor: enough to edit files and be gated, no repo toolchain command —
+// skipping setup makes a worker *more* restricted, never less. extraAllow
+// appends operator-supplied CLI --allow patterns on top of both, for a
+// one-off run.
+//
+// The rendered Allow list unions every protocol.ConfigurablePhases value's
+// own ResolvedAllowForPhase, since this file is read once at session launch
+// and can't itself vary by the worker's current phase — checkToolHook is
+// what actually narrows a live Bash call down to what the *current* phase's
+// own resolved set allows.
+func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) permissionSettings {
 	glob := worktree + "/**"
 	allow := []string{
 		"Edit(" + glob + ")",
 		"Write(" + glob + ")",
 	}
-	allow = append(allow, repoAllow...)
-	allow = append(allow,
-		"Bash(git status*)",
-		"Bash(git diff*)",
-		"Bash(git log*)",
-		"Bash(git add*)",
-	)
-	allow = append(allow, extraAllow...)
+	var unioned []string
+	for _, p := range protocol.ConfigurablePhases {
+		unioned = append(unioned, ResolvedAllowForPhase(p, project, baseAllow, extraAllow)...)
+	}
+	allow = append(allow, dedupeStrings(unioned)...)
 
 	// Deny wins over allow in Claude Code regardless of pattern specificity
-	// (deny/ask/allow are checked in that order, first match wins), so these
+	// (deny/allow are checked in that order, first match wins), so these
 	// entries carve the worker's own permission files out of the broad
 	// Edit/Write(glob) allows above: without them a worker could rewrite its
 	// own settings.local.json mid-session and grant itself capability the
@@ -179,26 +206,17 @@ func settingsFor(worktree string, repoAllow, extraAllow []string) permissionSett
 	for _, p := range ownSettings {
 		deny = append(deny, "Edit("+p+")", "Write("+p+")")
 	}
+	// Belt and suspenders alongside checkToolHook: DenyFloor's commands are
+	// unremovable regardless of what any phase's allow config says, so they
+	// are denied natively here too, not only caught live by the hook.
+	deny = append(deny, bashGlobEntries(protocol.DenyFloor())...)
 
 	return permissionSettings{
 		Permissions: permissionBlock{
 			Allow: allow,
-			Ask:   askGlobEntries(protocol.AskGatedCommands),
 			Deny:  deny,
 		},
 		Hooks:                      hooksBlock{PreToolUse: []hookMatcher{checkToolHook()}},
 		EnableAllProjectMcpServers: true,
 	}
-}
-
-// askGlobEntries converts commands (see protocol.AskGatedCommands) into the
-// Bash glob form Claude Code's permissions.ask expects. Deriving these from
-// the same slice every brief's NeverRunBrief clause names means the ask list
-// and a brief's own wording can never list different commands.
-func askGlobEntries(commands []string) []string {
-	entries := make([]string, len(commands))
-	for i, c := range commands {
-		entries[i] = "Bash(" + c + ":*)"
-	}
-	return entries
 }

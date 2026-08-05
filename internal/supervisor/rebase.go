@@ -293,14 +293,15 @@ This is expected. Resolve it in place (do NOT open a new PR):
   git fetch origin %s
   git merge origin/%s --no-commit
   # resolve conflicts so BOTH your change and the merged change coexist
-  # git add the resolved files, but do not commit them
+  # leave the resolution unstaged and uncommitted — argus stages it for you
   # re-run the repo's checks (make ci, or make test + make lint)
 
-%s — this worktree's own permission file asks before either runs, and no one
-is watching this dispatch to answer that prompt. Leave the merge resolved but
-uncommitted; argus commits it (using your reported title as the commit
-message) and force-pushes it once your report lands. Set title to a
-conventional-commit summary of the resolution.
+%s — this worktree's own permission file denies both outright, every phase,
+so don't attempt them; there is no prompt to answer, and no one watching this
+dispatch to answer one anyway. Leave the merge resolved but uncommitted;
+argus stages, commits (using your reported title as the commit message), and
+force-pushes it once your report lands. Set title to a conventional-commit
+summary of the resolution.
 
 Confirm the checks pass against the merged, uncommitted result, then set your
 status phase to "awaiting_review". Use "blocked" if the resolution needs a
@@ -497,8 +498,9 @@ func (t *paneStuckTracker) check(ctx context.Context, client herdr.Client, paneI
 
 // herdrBlockedMessage renders herdr's externally-observed pane state into a
 // message distinguishing why the worker can't write status.json itself: still
-// running but parked on an unanswered prompt (most commonly a permission-rule
-// override interrupting auto mode), idling without ever having reported once
+// running but parked on an unanswered prompt (most commonly a launcher
+// override away from dontAsk, back onto an interactive prompt), idling
+// without ever having reported once
 // (most commonly an interactive prompt herdr's blocked-detector doesn't
 // recognize), or its process having already ended.
 func herdrBlockedMessage(agentStatus, paneID string) string {

@@ -5,14 +5,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/permission"
+	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
@@ -23,34 +26,45 @@ func newInitCmd() *cobra.Command {
 		repo      string
 		forgeKind string
 		yes       bool
+		refresh   bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Write .argus/config.yml for this repo, prefilled from a toolchain guess",
 		Long: `Init peeks for Taskfile.yml, Makefile, package.json, or go.mod (in that order,
-first match wins) in the repo root to suggest allow/brief_note/ship_verify_command,
-prints the suggestion, and asks you to confirm or edit each value before
-writing .argus/config.yml (see internal/repoconfig). This is pure convenience:
-argus itself has no built-in opinion on any repo's toolchain and never will —
-guessing wrong, or a toolchain this version doesn't recognize, is not a bug to
-file, just edit the YAML by hand. base_branch is guessed separately, from the
-local refs/remotes/origin/HEAD ref rather than any toolchain marker — a ref a
-plain "git clone" sets up but a bare "git init" or a shallow/single-branch
-clone won't, so base_branch is left unset as often as not; that's a safe
-default; ResolveBase falls through to origin/HEAD and then "main" at
-ship/rebase time anyway. The forge key is the one setting init
-can't guess at all: a self-hosted host is exactly the ambiguity
-ship/supervise/worktree prune's own --forge flag exists to resolve, so
-it's only ever set via --forge here or the interactive prompt.`,
+first match wins) in the repo root to suggest phases.*.allow/brief_note/
+ship_verify_command, prints the suggestion, and asks you to confirm or edit
+each value before writing .argus/config.yml (see internal/repoconfig). The
+toolchain suggestion only ever populates phases.working.allow/
+phases.self_test.allow, never the phase-independent top-level allow — that
+key stays purely operator-authored, since a repo-wide grant would defeat the
+whole point of scoping build/test commands to the phases that actually run
+them. This is pure convenience: argus itself has no built-in opinion on any
+repo's toolchain and never will — guessing wrong, or a toolchain this version
+doesn't recognize, is not a bug to file, just edit the YAML by hand.
+base_branch is guessed separately, from the local refs/remotes/origin/HEAD
+ref rather than any toolchain marker — a ref a plain "git clone" sets up but
+a bare "git init" or a shallow/single-branch clone won't, so base_branch is
+left unset as often as not; that's a safe default; ResolveBase falls through
+to origin/HEAD and then "main" at ship/rebase time anyway. The forge key is
+the one setting init can't guess at all: a self-hosted host is exactly the
+ambiguity ship/supervise/worktree prune's own --forge flag exists to
+resolve, so it's only ever set via --forge here or the interactive prompt.
+
+--refresh re-materializes only the phases.*.allow suggestion from the
+current toolchain-detection default, preserving every other existing key
+(including a hand-authored top-level allow) — for a repo whose config.yml
+predates an improved default set in a newer argus.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runInit(cmd, &initArgs{repo: repo, yes: yes, forgeKind: forgeKind})
+			return runInit(cmd, &initArgs{repo: repo, yes: yes, forgeKind: forgeKind, refresh: refresh})
 		},
 	}
 
 	cmd.Flags().StringVar(&repo, "repo", ".", "repo to write .argus/config.yml for")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "write the detected suggestion without prompting, and overwrite an existing config.yml without asking")
 	cmd.Flags().StringVar(&forgeKind, "forge", "", "self-hosted forge kind for this repo's .argus/config.yml: \"gitlab\" or \"gitea\" (unset: prompted for interactively, or left unset with --yes, for a hosted or auto-detected forge)")
+	cmd.Flags().BoolVar(&refresh, "refresh", false, "load the existing .argus/config.yml and re-materialize only its phases.*.allow suggestion from the current toolchain-detection default, leaving every other key (including a hand-authored top-level allow) untouched (skips the overwrite confirmation)")
 	return cmd
 }
 
@@ -62,6 +76,7 @@ type initArgs struct {
 	repo      string
 	forgeKind string
 	yes       bool
+	refresh   bool
 }
 
 func runInit(cmd *cobra.Command, a *initArgs) error {
@@ -79,14 +94,23 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 	// typed/piped together.
 	reader := bufio.NewReader(cmd.InOrStdin())
 
-	if _, statErr := os.Stat(path); statErr == nil && !a.yes {
-		if !ui.Confirm(reader, out, fmt.Sprintf("%s already exists — overwrite?", path), false) {
-			_, _ = fmt.Fprintln(out, "Canceled.")
-			return nil
+	// A plain init over an existing file asks to overwrite first (unless
+	// --yes); --refresh never asks — loading and updating in place is the
+	// whole point of the flag, not a destructive surprise.
+	if !a.refresh {
+		if _, statErr := os.Stat(path); statErr == nil && !a.yes {
+			if !ui.Confirm(reader, out, fmt.Sprintf("%s already exists — overwrite?", path), false) {
+				_, _ = fmt.Fprintln(out, "Canceled.")
+				return nil
+			}
 		}
 	}
 
-	suggested := detectRepoConfig(cmd.Context(), repoRoot)
+	cfg, err := startingConfig(cmd.Context(), repoRoot, path, a)
+	if err != nil {
+		return err
+	}
+
 	// --forge can't be detected the way base_branch/allow/brief_note are (see
 	// detectRepoConfig): a self-hosted host is exactly the ambiguity forge.New
 	// refuses to guess at, so it only ever comes from an explicit --forge or
@@ -95,32 +119,13 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		if _, err := parseForgeKind(a.forgeKind); err != nil {
 			return err
 		}
-		suggested.Forge = a.forgeKind
+		cfg.Forge = a.forgeKind
 	}
-	cfg := suggested
 	if !a.yes {
-		cfg.BaseBranch = promptLine(reader, out, "base_branch", suggested.BaseBranch)
-		cfg.Allow = promptList(reader, out, "allow", suggested.Allow)
-		cfg.BriefNote = promptLine(reader, out, "brief_note", suggested.BriefNote)
-		cfg.MaxDiffLines = promptOptionalInt(reader, out, "phases.awaiting_review.max_diff_lines", suggested.MaxDiffLines)
-		cfg.ReworkBudget = promptOptionalInt(reader, out, "rework_budget (restart budget: total rework rounds a worktree may ever be dispatched for)", suggested.ReworkBudget)
-		cfg.ProofRequiredPaths = promptList(reader, out, "phases.awaiting_review.proof_required_paths", suggested.ProofRequiredPaths)
-		cfg.AlwaysReviewPaths = promptList(reader, out, "phases.awaiting_review.always_review_paths", suggested.AlwaysReviewPaths)
-		cfg.WorkerPlacement = promptLine(reader, out, "worker_placement (workspace|tab)", suggested.WorkerPlacement)
-		cfg.ShipVerifyCommand = promptLine(reader, out, "ship.verify_command (controller-side gate command run before commit)", suggested.ShipVerifyCommand)
-		cfg.GateVerifyCommand = promptLine(reader, out, "phases.awaiting_review.gate_verify_command (gate: shell command re-run in a worker's worktree before a verdict is recorded)", suggested.GateVerifyCommand)
-		cfg.WorktreeBootstrapCommand = promptLine(reader, out, "worktree_bootstrap_command (runs once in a fresh worktree, right after git worktree add, before the worker's agent starts)", suggested.WorktreeBootstrapCommand)
-		cfg.ReviewEffort = promptLine(reader, out, "phases.awaiting_review.review_effort (low|medium|high|xhigh|max)", suggested.ReviewEffort)
-		cfg.Launcher = promptLine(reader, out, "launcher (command started in each worker pane)", suggested.Launcher)
-		cfg.WorktreeDir = promptLine(reader, out, "worktree_dir (blank for <repo>/.claude/worktrees/<branch>; \"..\" for a sibling-of-repo layout)", suggested.WorktreeDir)
-		cfg.OwnerStaleAfter = promptLine(reader, out, "owner_stale_after (how long a worktree's owner-lease heartbeat may go quiet before a mismatched caller proceeds anyway, e.g. \"30m\"; blank for the built-in default)", suggested.OwnerStaleAfter)
-		cfg.TitlePrefixTemplate = promptLine(reader, out, "ship.title_prefix_template (required PR/commit title prefix, e.g. \"TICKET-{issue}: \")", suggested.TitlePrefixTemplate)
-		cfg.ReviewNote = promptLine(reader, out, "phases.awaiting_review.review_note (free-text note appended to the reviewer's prompt)", suggested.ReviewNote)
-		cfg.Forge = promptLine(reader, out, "forge (self-hosted only: gitlab|gitea, blank for hosted/auto-detected)", suggested.Forge)
-		cfg.StatusPage = promptLine(reader, out, "status_page (status page URL to point at on a host-shaped forge/push failure; blank to use svcstatus's built-in map, which only covers github.com/gitlab.com/codeberg.org)", suggested.StatusPage)
+		promptAllFields(reader, out, cfg)
 	}
 
-	if err := repoconfig.Save(path, &cfg); err != nil {
+	if err := repoconfig.Save(path, cfg); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "%s wrote %s\n", ui.LabelSuccess.Render("✓"), path)
@@ -132,6 +137,62 @@ func runInit(cmd *cobra.Command, a *initArgs) error {
 		offerConfigCheck(cmd, reader, out, repoRoot)
 	}
 	return nil
+}
+
+// startingConfig resolves the Config runInit prompts against and eventually
+// saves: a fresh toolchain-detected suggestion (the plain-init path), or —
+// with --refresh — the existing config.yml with only its phases.*.allow
+// suggestion re-materialized from the current toolchain-detection default,
+// every other key (including a hand-authored top-level allow) left exactly
+// as loaded. Any overwrite confirmation is
+// runInit's own concern, resolved before this is ever called. repoRoot is
+// runInit's own already-resolved root (supervisor.ResolveWorktree), not
+// re-derived here — a second, independent resolution of the same path is
+// exactly the kind of duplicated ambient lookup that can silently diverge
+// from the first.
+func startingConfig(ctx context.Context, repoRoot, path string, a *initArgs) (*repoconfig.Config, error) {
+	suggested := detectRepoConfig(ctx, repoRoot)
+	if !a.refresh {
+		return &suggested, nil
+	}
+	existing, err := repoconfig.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	// suggested.Allow is always empty (detectRepoConfig never populates the
+	// phase-independent top-level list — see its own comment), so there is
+	// nothing to re-materialize there; only phases.*.allow is toolchain-
+	// derived, and only it gets refreshed. existing.Allow, whatever an
+	// operator hand-authored, is left untouched.
+	existing.Phases = mergeAllowIntoPhases(existing.Phases, suggested.Phases)
+	return &existing, nil
+}
+
+// promptAllFields walks the operator through every interactive prompt,
+// mutating cfg in place with each answer (bare Enter keeps cfg's own current
+// value — the toolchain suggestion on a fresh init, or the preserved
+// existing value under --refresh).
+func promptAllFields(reader *bufio.Reader, out io.Writer, cfg *repoconfig.Config) {
+	cfg.BaseBranch = promptLine(reader, out, "base_branch", cfg.BaseBranch)
+	cfg.Allow = promptList(reader, out, "allow", cfg.Allow)
+	cfg.Phases = promptPhaseAllow(reader, out, cfg.Phases)
+	cfg.BriefNote = promptLine(reader, out, "brief_note", cfg.BriefNote)
+	cfg.MaxDiffLines = promptOptionalInt(reader, out, "phases.awaiting_review.max_diff_lines", cfg.MaxDiffLines)
+	cfg.ReworkBudget = promptOptionalInt(reader, out, "rework_budget (restart budget: total rework rounds a worktree may ever be dispatched for)", cfg.ReworkBudget)
+	cfg.ProofRequiredPaths = promptList(reader, out, "phases.awaiting_review.proof_required_paths", cfg.ProofRequiredPaths)
+	cfg.AlwaysReviewPaths = promptList(reader, out, "phases.awaiting_review.always_review_paths", cfg.AlwaysReviewPaths)
+	cfg.WorkerPlacement = promptLine(reader, out, "worker_placement (workspace|tab)", cfg.WorkerPlacement)
+	cfg.ShipVerifyCommand = promptLine(reader, out, "ship.verify_command (controller-side gate command run before commit)", cfg.ShipVerifyCommand)
+	cfg.GateVerifyCommand = promptLine(reader, out, "phases.awaiting_review.gate_verify_command (gate: shell command re-run in a worker's worktree before a verdict is recorded)", cfg.GateVerifyCommand)
+	cfg.WorktreeBootstrapCommand = promptLine(reader, out, "worktree_bootstrap_command (runs once in a fresh worktree, right after git worktree add, before the worker's agent starts)", cfg.WorktreeBootstrapCommand)
+	cfg.ReviewEffort = promptLine(reader, out, "phases.awaiting_review.review_effort (low|medium|high|xhigh|max)", cfg.ReviewEffort)
+	cfg.Launcher = promptLine(reader, out, "launcher (command started in each worker pane)", cfg.Launcher)
+	cfg.WorktreeDir = promptLine(reader, out, "worktree_dir (blank for <repo>/.claude/worktrees/<branch>; \"..\" for a sibling-of-repo layout)", cfg.WorktreeDir)
+	cfg.OwnerStaleAfter = promptLine(reader, out, "owner_stale_after (how long a worktree's owner-lease heartbeat may go quiet before a mismatched caller proceeds anyway, e.g. \"30m\"; blank for the built-in default)", cfg.OwnerStaleAfter)
+	cfg.TitlePrefixTemplate = promptLine(reader, out, "ship.title_prefix_template (required PR/commit title prefix, e.g. \"TICKET-{issue}: \")", cfg.TitlePrefixTemplate)
+	cfg.ReviewNote = promptLine(reader, out, "phases.awaiting_review.review_note (free-text note appended to the reviewer's prompt)", cfg.ReviewNote)
+	cfg.Forge = promptLine(reader, out, "forge (self-hosted only: gitlab|gitea, blank for hosted/auto-detected)", cfg.Forge)
+	cfg.StatusPage = promptLine(reader, out, "status_page (status page URL to point at on a host-shaped forge/push failure; blank to use svcstatus's built-in map, which only covers github.com/gitlab.com/codeberg.org)", cfg.StatusPage)
 }
 
 // printNextSteps names the two onboarding actions init deliberately can't
@@ -204,9 +265,72 @@ var toolchainGuesses = []toolchainGuess{
 	},
 }
 
+// phasesForToolchainAllow turns a toolchain guess's flat allow list into a
+// starting per-phase suggestion: working and self_test — the phases where a
+// worker actually builds/runs its own change — get the full toolchain allow;
+// planning, awaiting_review, and blocked get nothing beyond the structural
+// floor, since there is no legitimate toolchain command to run before a plan
+// exists or once a diff is already up for review. Returns nil for an empty
+// allow (no marker file matched), matching every other "not configured"
+// zero value here.
+func phasesForToolchainAllow(allow []string) protocol.PhaseConfig {
+	if len(allow) == 0 {
+		return nil
+	}
+	return protocol.PhaseConfig{
+		protocol.PhaseWorking:  {Allow: slices.Clone(allow)},
+		protocol.PhaseSelfTest: {Allow: slices.Clone(allow)},
+	}
+}
+
+// mergeAllowIntoPhases overlays suggested's own Allow onto existing,
+// preserving every phase's own Deny/Skip untouched and leaving any phase
+// present only in existing (e.g. a hand-authored planning.deny) exactly as
+// it was — --refresh only ever re-materializes the toolchain-derived allow
+// suggestion, never anything else a repo owner configured by hand.
+func mergeAllowIntoPhases(existing, suggested protocol.PhaseConfig) protocol.PhaseConfig {
+	merged := protocol.PhaseConfig{}
+	maps.Copy(merged, existing)
+	for p, sp := range suggested {
+		policy := merged[p]
+		policy.Allow = sp.Allow
+		merged[p] = policy
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+// promptPhaseAllow walks the operator through every protocol.
+// ConfigurablePhases value's own allow list — the interactive co-authoring
+// step: showing the proposed allowed actions (from toolchain detection, or
+// from an existing config's own phases.<name>.allow under --refresh) and
+// letting the operator add or remove entries, one phase at a time. Each
+// phase's own Deny/Skip (if any) is preserved untouched; only Allow is ever
+// prompted here — hand-edit the YAML directly for deny/skip, the same as
+// before this prompt existed.
+func promptPhaseAllow(reader *bufio.Reader, out io.Writer, suggested protocol.PhaseConfig) protocol.PhaseConfig {
+	result := protocol.PhaseConfig{}
+	maps.Copy(result, suggested)
+	for _, p := range protocol.ConfigurablePhases {
+		policy := result[p]
+		policy.Allow = promptList(reader, out, fmt.Sprintf("phases.%s.allow", p), policy.Allow)
+		if len(policy.Allow) > 0 || len(policy.Deny) > 0 || policy.Skip {
+			result[p] = policy
+		} else {
+			delete(result, p)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // detectRepoConfig peeks repoRoot for the marker files toolchainGuesses
-// tracks (first match wins) to suggest allow/brief_note, and separately
-// tries to detect the repo's default branch via origin/HEAD for
+// tracks (first match wins) to suggest phases.*.allow/brief_note, and
+// separately tries to detect the repo's default branch via origin/HEAD for
 // base_branch. Every part is best-effort: an operator confirms or edits the
 // result before anything is written (see runInit), so a wrong or empty
 // guess here is not a bug, just a starting point.
@@ -214,7 +338,15 @@ func detectRepoConfig(ctx context.Context, repoRoot string) repoconfig.Config {
 	var cfg repoconfig.Config
 	for _, g := range toolchainGuesses {
 		if _, err := os.Stat(filepath.Join(repoRoot, g.marker)); err == nil {
-			cfg.Allow = g.allow
+			// cfg.Allow (the phase-independent top-level list) is
+			// deliberately left unset here: ResolvedAllowForPhase unions it
+			// into every phase, so setting it to the toolchain guess would
+			// grant build/test commands in planning/awaiting_review/blocked
+			// too — silently defeating phasesForToolchainAllow's own
+			// working/self_test-only restriction. The toolchain suggestion
+			// belongs solely in cfg.Phases; cfg.Allow stays purely
+			// operator-authored.
+			cfg.Phases = phasesForToolchainAllow(g.allow)
 			cfg.BriefNote = g.briefNote
 			cfg.ShipVerifyCommand = g.shipVerifyCommand
 			break

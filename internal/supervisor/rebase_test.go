@@ -782,6 +782,22 @@ func TestRebaseBriefCarriesRebaseSteps(t *testing.T) {
 	}
 }
 
+// TestRebaseBriefDoesNotInstructGitAdd guards a real regression: git add is
+// not in the structural floor's allow set under the dontAsk permission
+// model (only read-only git plumbing is), so a brief instructing a
+// rebase-dispatched worker to run it would be denied by Claude Code's own
+// permission engine. ship's CommitAll stages everything itself (`git add
+// -A`) before committing, so the worker never needs to stage anything.
+func TestRebaseBriefDoesNotInstructGitAdd(t *testing.T) {
+	b := RebaseBrief("feat-x", "main")
+	if strings.Contains(b, "git add") {
+		t.Errorf("rebase brief instructs git add, which the worker's dontAsk permission set does not grant:\n%s", b)
+	}
+	if !strings.Contains(b, "denies both outright") {
+		t.Errorf("rebase brief should describe commit/push as denied (dontAsk), not merely ask-gated:\n%s", b)
+	}
+}
+
 // TestGitMergeConflictsNonConflictErrorPropagates confirms a merge-tree
 // failure unrelated to a real conflict (any exit code other than 1) surfaces
 // as an error, not a false "conflicts" result — a non-git worktree makes

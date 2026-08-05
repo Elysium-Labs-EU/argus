@@ -10,7 +10,7 @@ The point is verification, not just coordination. The gate trusts measured groun
 
 argus splits supervision into a deterministic majority and a judgment minority.
 
-The deterministic majority is plain Go. argus drives [herdr](https://github.com/ogulcancelik/herdr), a terminal multiplexer for AI agents, through its CLI to open panes. It then creates one git worktree per worker, writes each a task brief, and launches an agent in auto mode with a scoped permission file. Workers never write their status directly. A worker calls `argus worker report <phase>` and pipes typed JSON on stdin (files touched, tests run, diff stats, its plan). argus validates each move against a fixed transition table and stamps it. Nothing is scraped from terminal scrollback.
+The deterministic majority is plain Go. argus drives [herdr](https://github.com/ogulcancelik/herdr), a terminal multiplexer for AI agents, through its CLI to open panes. It then creates one git worktree per worker, writes each a task brief, and launches an agent under `--permission-mode dontAsk` with a curated, per-phase permission-allow set — default-deny, not the old auto-approve-and-chase-a-denylist. Workers never write their status directly. A worker calls `argus worker report <phase>` and pipes typed JSON on stdin (files touched, tests run, diff stats, its plan). argus validates each move against a fixed transition table and stamps it. Nothing is scraped from terminal scrollback.
 
 ```mermaid
 stateDiagram-v2
@@ -74,17 +74,22 @@ To build from source instead, `git clone` the repo and run `make build` (needs G
 
 Two steps, run once per repo checkout.
 
-**1. Scaffold the repo config.** Run `argus init` to scaffold `.argus/config.yml`. It peeks for `Taskfile.yml`, `Makefile`, `package.json`, or `go.mod` (in that order, first match wins) to guess toolchain values; `base_branch` is derived separately, from `refs/remotes/origin/HEAD`. Every key is optional and mirrors a CLI flag, so you can set them once here instead of repeating flags on every run:
+**1. Scaffold the repo config.** Run `argus init` to scaffold `.argus/config.yml`. It peeks for `Taskfile.yml`, `Makefile`, `package.json`, or `go.mod` (in that order, first match wins) to guess toolchain values; `base_branch` is derived separately, from `refs/remotes/origin/HEAD`. Interactively, it also walks you through each worker-lifecycle phase's own allow list (`planning`/`working`/`self_test`/`awaiting_review`/`blocked`), letting you add or remove what a worker gets to run in that specific phase — co-building the curated permission set rather than guessing it silently. `argus init --refresh` later re-materializes just that allow suggestion from the current toolchain default, leaving every other key untouched. Every key is optional and mirrors a CLI flag, so you can set them once here instead of repeating flags on every run:
 
 Keys are grouped into three regions by *when they actually run*: top-level
 (phase-independent), `ship:` (argus-side, after a verdict), and `phases:`
 (per-worker-lifecycle-phase — live `allow`/`deny`/`skip` on every phase, the
-gate/review cluster only on the terminal `awaiting_review` phase). See
-[`docs/repo-config.md`](docs/repo-config.md) for the full breakdown.
+gate/review cluster only on the terminal `awaiting_review` phase). `allow`
+and `phases.<name>.allow` are what a worker's `--permission-mode dontAsk`
+session actually gets granted, on top of a code-guaranteed structural floor
+(read-only git, argus's own status self-calls) and beneath a code-guaranteed
+deny floor (`git commit`/`push`, `argus ship`/`rework`/`review`/`supervise`)
+no allow entry can re-grant. See [`docs/repo-config.md`](docs/repo-config.md)
+for the full breakdown.
 
 ```yaml
 base_branch: main                  # branch to diff and PR against
-allow: []                          # extra Bash permission entries for every worker
+allow: []                          # Bash permission entries granted to every worker, in every phase
 brief_note: ""                     # text appended to every generated worker brief
 worktree_bootstrap_command: ""     # bootstrap: shell command run once in a freshly created worktree, before the worker is spawned (e.g. copying in gitignored local config); non-zero exit fails worktree creation
 worktree_dir: ""                   # where new worktrees are created (default: sibling of the repo)
@@ -100,6 +105,8 @@ ship:
   title_prefix_template: ""        # template for generated PR titles
 
 phases:
+  working:
+    allow: ["Bash(make test*)"]    # Bash permission entries granted only while a worker reports this phase
   awaiting_review:
     gate_verify_command: ""        # gate: shell command re-run in the worktree before approval (e.g. "make lint"); non-zero exit always escalates
     max_diff_lines: 0              # gate: diffs larger than this escalate (0 disables the ceiling)

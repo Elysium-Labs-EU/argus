@@ -6,23 +6,26 @@ import (
 )
 
 func TestDeniedInPhase(t *testing.T) {
-	planning := DeniedInPhase(PhasePlanning)
-	for _, want := range AskGatedCommands {
-		if !slices.Contains(planning, want) {
-			t.Errorf("DeniedInPhase(planning) = %v, missing AskGatedCommands entry %q", planning, want)
-		}
-	}
-	for _, want := range AlwaysDeniedCommands {
-		if !slices.Contains(planning, want) {
-			t.Errorf("DeniedInPhase(planning) = %v, missing AlwaysDeniedCommands entry %q", planning, want)
-		}
-	}
-
-	other := []Phase{Phase(""), PhaseWorking, PhaseSelfTest, PhaseAwaitingReview, PhaseBlocked, PhaseDone}
-	for _, p := range other {
+	// git commit/push are denied in every phase now, not just planning — a
+	// worker never commits or pushes at all; only argus ship does, once a
+	// verdict exists. Test every phase, not just planning, to guard the
+	// exact escalation this replaced: commit/push used to be merely
+	// ask-gated outside planning.
+	every := append([]Phase{Phase(""), PhaseDone}, ConfigurablePhases...)
+	for _, p := range every {
 		got := DeniedInPhase(p)
-		if !slices.Equal(got, AlwaysDeniedCommands) {
-			t.Errorf("DeniedInPhase(%q) = %v, want exactly AlwaysDeniedCommands %v", p, got, AlwaysDeniedCommands)
+		if !slices.Equal(got, DenyFloor()) {
+			t.Errorf("DeniedInPhase(%q) = %v, want exactly DenyFloor() %v", p, got, DenyFloor())
+		}
+		for _, want := range AskGatedCommands {
+			if !slices.Contains(got, want) {
+				t.Errorf("DeniedInPhase(%q) = %v, missing AskGatedCommands entry %q", p, got, want)
+			}
+		}
+		for _, want := range AlwaysDeniedCommands {
+			if !slices.Contains(got, want) {
+				t.Errorf("DeniedInPhase(%q) = %v, missing AlwaysDeniedCommands entry %q", p, got, want)
+			}
 		}
 	}
 }
@@ -74,8 +77,8 @@ func TestMatchesDeniedCommand(t *testing.T) {
 }
 
 func TestResolvedDenyForPhase(t *testing.T) {
-	if got := ResolvedDenyForPhase(PhaseWorking, nil); !slices.Equal(got, AlwaysDeniedCommands) {
-		t.Errorf("no project config, working phase = %v, want exactly the AlwaysDeniedCommands floor %v", got, AlwaysDeniedCommands)
+	if got := ResolvedDenyForPhase(PhaseWorking, nil); !slices.Equal(got, DenyFloor()) {
+		t.Errorf("no project config, working phase = %v, want exactly the DenyFloor() floor %v", got, DenyFloor())
 	}
 
 	project := PhaseConfig{PhaseWorking: {Deny: []string{"npm publish"}}}

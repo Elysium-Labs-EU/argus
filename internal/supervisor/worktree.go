@@ -55,8 +55,13 @@ func RunWorktreeBootstrapCommand(ctx context.Context, worktree, cmdStr string) e
 // run before the worker's agent starts, since settings are read once at
 // session launch. This is the generic (agent-agnostic) mechanics — path and
 // content are the agent's own concern; see AgentAdapter.RenderSettings.
-func WriteSettings(worktree string, repoAllow, extraAllow []string) error {
-	relPath, content, err := defaultAgent.RenderSettings(worktree, repoAllow, extraAllow)
+//
+// It also persists extraAllow into the worktree (see protocol.SaveExtraAllow)
+// so the live PreToolUse hook (argus worker check-tool) can fold it into its
+// own phase-scoped allow check later — that hook runs as a fresh subprocess
+// per Bash call, with no access to this invocation's own --allow flags.
+func WriteSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) error {
+	relPath, content, err := defaultAgent.RenderSettings(worktree, project, baseAllow, extraAllow)
 	if err != nil {
 		return fmt.Errorf("rendering settings: %w", err)
 	}
@@ -66,6 +71,9 @@ func WriteSettings(worktree string, repoAllow, extraAllow []string) error {
 	}
 	if err := os.WriteFile(path, content, 0o644); err != nil { //nolint:gosec // local settings file, not a secret
 		return fmt.Errorf("writing settings file: %w", err)
+	}
+	if err := protocol.SaveExtraAllow(worktree, extraAllow); err != nil {
+		return fmt.Errorf("persisting extra allow flags: %w", err)
 	}
 	return nil
 }
