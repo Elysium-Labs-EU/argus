@@ -116,6 +116,32 @@ func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 	}
 }
 
+// TestBuildPlanBriefStatesResolvedAllowSet is the brief-side acceptance
+// criterion: a worker should read its own sandbox up front from the brief
+// argus already writes, rather than discover it by trial-and-error deny.
+// The stated set must be sourced from the same ResolvedAllowSet
+// settingsFor renders settings.local.json's Allow from, so the two can't
+// drift — a repo's own configured allow entry must show up in both.
+func TestBuildPlanBriefStatesResolvedAllowSet(t *testing.T) {
+	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(make *)"}}}
+	plans, err := BuildPlan([]Worker{
+		{Task: "eos#42", Branch: "feat-x", RepoRoot: "/repo-a"},
+	}, "origin/main", project, nil, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	p := plans[0]
+	if !strings.Contains(p.Brief, "You may run these commands:") {
+		t.Errorf("brief should state the resolved allow-set:\n%s", p.Brief)
+	}
+	if !strings.Contains(p.Brief, "make*") {
+		t.Errorf("brief should name the repo's configured allow entry:\n%s", p.Brief)
+	}
+	if !strings.Contains(p.Brief, "git status") {
+		t.Errorf("brief should name the structural floor's read-only git entries:\n%s", p.Brief)
+	}
+}
+
 func TestWorktreePathDefaultsToDotClaudeWorktrees(t *testing.T) {
 	got, err := WorktreePath("/repo-a", "", "feat-x")
 	if err != nil {

@@ -57,6 +57,22 @@ func ResolvedAllowForPhase(phase protocol.Phase, project protocol.PhaseConfig, b
 	return stripDenyFloor(dedupeStrings(allow))
 }
 
+// ResolvedAllowSet unions every protocol.ConfigurablePhases value's own
+// ResolvedAllowForPhase — the same computation settingsFor bakes into
+// settings.local.json, since that file is written once at session launch and
+// can't itself vary by a worker's current phase. Exported so the worker
+// brief (see briefFor) can state this same set in its own wording, sourced
+// from the identical resolver settingsFor renders from, rather than an
+// independently maintained sentence that could silently drift from what the
+// rendered settings file actually grants.
+func ResolvedAllowSet(project protocol.PhaseConfig, baseAllow, extraAllow []string) []string {
+	var unioned []string
+	for _, p := range protocol.ConfigurablePhases {
+		unioned = append(unioned, ResolvedAllowForPhase(p, project, baseAllow, extraAllow)...)
+	}
+	return dedupeStrings(unioned)
+}
+
 // dedupeStrings returns items with duplicates removed, keeping each value's
 // first occurrence and original relative order.
 func dedupeStrings(items []string) []string {
@@ -182,4 +198,31 @@ func AllowCoversCommand(allow []string, cmd string) bool {
 		}
 	}
 	return false
+}
+
+// AllowSetBrief renders allow (see ResolvedAllowForPhase, ResolvedAllowSet)
+// as a human-readable, comma-separated list of the Bash commands it covers —
+// for a worker-facing message like the check-tool deny reason or the worker
+// brief, where "what Bash command can I run instead" is the question, not
+// the raw Claude Code permission-pattern syntax. Non-Bash entries (e.g.
+// "Edit(<worktree>/**)") name no command a worker could type at a shell
+// prompt, so they're dropped. Returns "(none)" for an allow set with no Bash
+// entries at all, so a caller's sentence never trails off with "here: .".
+func AllowSetBrief(allow []string) string {
+	var cmds []string
+	for _, entry := range allow {
+		be, ok := parseBashEntry(entry)
+		if !ok {
+			continue
+		}
+		cmd := be.prefix
+		if be.wildcarded {
+			cmd += "*"
+		}
+		cmds = append(cmds, cmd)
+	}
+	if len(cmds) == 0 {
+		return "(none)"
+	}
+	return strings.Join(cmds, ", ")
 }

@@ -157,22 +157,18 @@ func checkToolHook() hookMatcher {
 // appends operator-supplied CLI --allow patterns on top of both, for a
 // one-off run.
 //
-// The rendered Allow list unions every protocol.ConfigurablePhases value's
-// own ResolvedAllowForPhase, since this file is read once at session launch
-// and can't itself vary by the worker's current phase — checkToolHook is
-// what actually narrows a live Bash call down to what the *current* phase's
-// own resolved set allows.
+// The rendered Allow list is ResolvedAllowSet's union of every
+// protocol.ConfigurablePhases value's own ResolvedAllowForPhase, since this
+// file is read once at session launch and can't itself vary by the worker's
+// current phase — checkToolHook is what actually narrows a live Bash call
+// down to what the *current* phase's own resolved set allows.
 func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) permissionSettings {
 	glob := worktree + "/**"
 	allow := []string{
 		"Edit(" + glob + ")",
 		"Write(" + glob + ")",
 	}
-	var unioned []string
-	for _, p := range protocol.ConfigurablePhases {
-		unioned = append(unioned, ResolvedAllowForPhase(p, project, baseAllow, extraAllow)...)
-	}
-	allow = append(allow, dedupeStrings(unioned)...)
+	allow = append(allow, ResolvedAllowSet(project, baseAllow, extraAllow)...)
 
 	// Deny wins over allow in Claude Code regardless of pattern specificity
 	// (deny/allow are checked in that order, first match wins), so these

@@ -125,7 +125,12 @@ func evaluateToolGate(cmdStr string, phase protocol.Phase, denied, allowed []str
 		return denyReason(matched, phase), true
 	}
 	if !supervisor.AllowCoversCommand(allowed, trimmed) {
-		return fmt.Sprintf("argus: %q is not in the resolved allow set for phase %q — add it to phases.%s.allow in .argus/config.yml if this repo genuinely needs it", trimmed, phase, phase), true
+		return fmt.Sprintf(
+			"argus: %q is not in the resolved allow set for phase %q.\n"+
+				"Allowed commands here: %s.\n"+
+				"If you genuinely need this command, report `blocked` with it named — do not edit .argus/config.yml, it has no effect from inside a worktree.",
+			trimmed, phase, supervisor.AllowSetBrief(allowed),
+		), true
 	}
 	return "", false
 }

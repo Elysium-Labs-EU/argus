@@ -176,6 +176,44 @@ func TestBashGlobEntries(t *testing.T) {
 	}
 }
 
+func TestResolvedAllowSet_UnionsAcrossPhases(t *testing.T) {
+	project := protocol.PhaseConfig{
+		protocol.PhaseWorking:  {Allow: []string{"Bash(go test*)"}},
+		protocol.PhasePlanning: {Allow: []string{"Bash(go vet*)"}},
+	}
+	got := ResolvedAllowSet(project, []string{"Bash(make *)"}, []string{"Bash(npm ci*)"})
+	for _, want := range []string{"Bash(go test*)", "Bash(go vet*)", "Bash(make *)", "Bash(npm ci*)"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("resolved allow set %v missing %q — must union across every configurable phase, not just one", got, want)
+		}
+	}
+}
+
+func TestResolvedAllowSet_MatchesSettingsForAllow(t *testing.T) {
+	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
+	settings := settingsFor("/tmp/wt", project, []string{"Bash(make *)"}, nil)
+	for _, want := range ResolvedAllowSet(project, []string{"Bash(make *)"}, nil) {
+		if !slices.Contains(settings.Permissions.Allow, want) {
+			t.Errorf("settingsFor's rendered Allow %v missing %q from ResolvedAllowSet — brief and settings file must read the same resolved set", settings.Permissions.Allow, want)
+		}
+	}
+}
+
+func TestAllowSetBrief(t *testing.T) {
+	got := AllowSetBrief([]string{"Bash(go test*)", "Bash(git status)", "Edit(/tmp/**)"})
+	want := "go test*, git status"
+	if got != want {
+		t.Errorf("AllowSetBrief = %q, want %q", got, want)
+	}
+
+	if got := AllowSetBrief(nil); got != "(none)" {
+		t.Errorf("AllowSetBrief(nil) = %q, want %q", got, "(none)")
+	}
+	if got := AllowSetBrief([]string{"Edit(/tmp/**)"}); got != "(none)" {
+		t.Errorf("AllowSetBrief(non-Bash only) = %q, want %q", got, "(none)")
+	}
+}
+
 func TestStripDenyFloor_PassesThroughNonBashEntries(t *testing.T) {
 	allow := []string{"Edit(/tmp/worktree/**)", "Write(/tmp/worktree/**)"}
 	got := stripDenyFloor(allow)
