@@ -38,7 +38,7 @@ func TestSettingsForConfinesToWorktree(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
 	s := settingsFor(wt, nil, nil, nil)
 
-	wantAllow := "Edit(" + wt + "/**)"
+	wantAllow := "Edit(" + absPathPattern(wt+"/**") + ")"
 	if !slices.Contains(s.Permissions.Allow, wantAllow) {
 		t.Errorf("allow missing %q; got %v", wantAllow, s.Permissions.Allow)
 	}

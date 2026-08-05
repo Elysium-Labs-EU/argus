@@ -58,13 +58,25 @@ func PhaseAllowsMutation(phase protocol.Phase) bool {
 	return slices.Contains(mutationPhases, phase)
 }
 
+// absPathPattern renders a filesystem-absolute path as the path segment of a
+// Claude Code Edit/Write permission glob. Claude Code 2.1.220's file-path
+// permission matcher treats a single leading "/" as anchored to the project
+// root, not the filesystem root, so "Edit(/abs/worktree/**)" silently
+// resolves to "<project>/abs/worktree/**" and matches nothing — verified
+// against a live dontAsk session: the single-slash form is denied, a
+// "//"-prefixed form lands. path must already be filesystem-absolute (start
+// with "/"), which every worktree path here does.
+func absPathPattern(path string) string {
+	return "/" + path
+}
+
 // structuralFloorAllow returns the phase-scoped structural floor for phase,
 // in worktree: allPhaseFloor always, plus Edit(worktree)/Write(worktree)
 // only while PhaseAllowsMutation(phase) — see mutationPhases.
 func structuralFloorAllow(phase protocol.Phase, worktree string) []string {
 	floor := slices.Clone(allPhaseFloor)
 	if PhaseAllowsMutation(phase) {
-		glob := worktree + "/**"
+		glob := absPathPattern(worktree + "/**")
 		floor = append(floor, "Edit("+glob+")", "Write("+glob+")")
 	}
 	return floor
