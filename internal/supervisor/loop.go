@@ -1137,6 +1137,17 @@ func createAndPlaceWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) (he
 			return herdr.Worktree{}, fmt.Errorf("nesting worktree pane for %s into workspace %s: %w", p.Task, cfg.ParentWorkspace, err)
 		}
 		wt.RootPaneID = moved.PaneID
+		// The tab PaneMove just created didn't exist at WorktreeCreate time, so
+		// spec.Label above never reached it — it still carries herdr's generic
+		// numeric default. A rename failure is logged, not fatal: the worktree
+		// and pane are already live and correct, and a fleet operator losing a
+		// cosmetic tab label is a far smaller problem than losing an otherwise
+		// working worker over it.
+		if p.Label != "" && moved.TabID != "" {
+			if err := cfg.Client.TabRename(ctx, moved.TabID, p.Label); err != nil {
+				cfg.Log.Fail("tab_rename", p.Task, err)
+			}
+		}
 	}
 	return wt, nil
 }

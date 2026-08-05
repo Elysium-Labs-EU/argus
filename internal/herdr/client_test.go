@@ -307,6 +307,29 @@ func TestWorkspaceClosePropagatesRunnerError(t *testing.T) {
 	}
 }
 
+func TestTabRenameSendsTabRenameCommand(t *testing.T) {
+	var gotArgs []string
+	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"result":{"tab":{"tab_id":"w1:t2","label":"AP-1207"}}}`), nil
+	})
+	if err := c.TabRename(context.Background(), "w1:t2", "AP-1207"); err != nil {
+		t.Fatalf("TabRename: %v", err)
+	}
+	want := []string{"tab", "rename", "w1:t2", "AP-1207"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("TabRename args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestTabRenamePropagatesRunnerError(t *testing.T) {
+	sentinel := errors.New("herdr: no such tab")
+	c := NewWithRunner(fakeRunner("", sentinel))
+	if err := c.TabRename(context.Background(), "w1:t2", "AP-1207"); !errors.Is(err, sentinel) {
+		t.Fatalf("want wrapped runner error, got %v", err)
+	}
+}
+
 func TestAgentWaitBuildsUntilFlagsAndTimeout(t *testing.T) {
 	var gotArgs []string
 	c := NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {

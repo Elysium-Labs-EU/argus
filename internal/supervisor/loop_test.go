@@ -570,6 +570,112 @@ func TestPrepareWorktreeNestsViaPaneMove(t *testing.T) {
 	}
 }
 
+// TestPrepareWorktreeLabelsNestedTab proves the tab-nesting path labels the
+// tab PaneMove creates, not just the top-level workspace WorktreeCreate's own
+// --label reaches (see createAndPlaceWorktree): the tab didn't exist yet at
+// WorktreeCreate time, so it keeps herdr's generic default until this
+// follow-up call runs.
+func TestPrepareWorktreeLabelsNestedTab(t *testing.T) {
+	repo := t.TempDir()
+	var tabRenameArgs []string
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "worktree" && args[1] == "create":
+			return []byte(`{"result":{"root_pane":{"pane_id":"wAP:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		case len(args) >= 2 && args[0] == "pane" && args[1] == "move":
+			return []byte(`{"result":{"move_result":{"pane":{"pane_id":"w3X:p2","tab_id":"w3X:t2"}}}}`), nil
+		case len(args) >= 2 && args[0] == "tab" && args[1] == "rename":
+			tabRenameArgs = args
+			return []byte(`{"result":{"tab":{"tab_id":"w3X:t2","label":"AP-1207"}}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	}
+	cfg := &Config{Client: herdr.NewWithRunner(runner), Base: "main", ParentWorkspace: "w3X"}
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", Label: "AP-1207", RepoRoot: repo}}, "origin/main", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); err != nil {
+		t.Fatalf("prepareWorktree: %v", err)
+	}
+	want := []string{"tab", "rename", "w3X:t2", "AP-1207"}
+	if strings.Join(tabRenameArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("tab rename args: got %v want %v", tabRenameArgs, want)
+	}
+}
+
+// TestPrepareWorktreeSkipsTabRenameWhenLabelEmpty proves a worker with no
+// Label (the plain --tasks fallback, see BuildPlan) skips the rename call
+// entirely rather than sending herdr an empty label.
+func TestPrepareWorktreeSkipsTabRenameWhenLabelEmpty(t *testing.T) {
+	repo := t.TempDir()
+	tabRenameCalled := false
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "worktree" && args[1] == "create":
+			return []byte(`{"result":{"root_pane":{"pane_id":"wAP:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		case len(args) >= 2 && args[0] == "pane" && args[1] == "move":
+			return []byte(`{"result":{"move_result":{"pane":{"pane_id":"w3X:p2","tab_id":"w3X:t2"}}}}`), nil
+		case len(args) >= 2 && args[0] == "tab" && args[1] == "rename":
+			tabRenameCalled = true
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	}
+	cfg := &Config{Client: herdr.NewWithRunner(runner), Base: "main", ParentWorkspace: "w3X"}
+	plans, err := BuildPlan([]Worker{{Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	plans[0].Label = "" // BuildPlan always derives a non-empty default; force the empty case this test targets
+
+	if _, err := prepareWorktree(context.Background(), cfg, &plans[0]); err != nil {
+		t.Fatalf("prepareWorktree: %v", err)
+	}
+	if tabRenameCalled {
+		t.Error("want no tab rename call for a worker with an empty Label")
+	}
+}
+
+// TestPrepareWorktreeTabRenameFailureIsNonFatal proves a TabRename error
+// (e.g. an older herdr with no `tab rename` subcommand) does not fail
+// prepareWorktree: the worktree and pane are already live and correct by
+// this point, and a cosmetic tab label is not worth losing an otherwise
+// working worker over. cfg.Log is left nil to double as proof that the
+// failure path tolerates it (see eventlog.Logger's nil-receiver contract).
+func TestPrepareWorktreeTabRenameFailureIsNonFatal(t *testing.T) {
+	repo := t.TempDir()
+	sentinel := errors.New("herdr: unknown subcommand")
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "worktree" && args[1] == "create":
+			return []byte(`{"result":{"root_pane":{"pane_id":"wAP:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		case len(args) >= 2 && args[0] == "pane" && args[1] == "move":
+			return []byte(`{"result":{"move_result":{"pane":{"pane_id":"w3X:p2","tab_id":"w3X:t2"}}}}`), nil
+		case len(args) >= 2 && args[0] == "tab" && args[1] == "rename":
+			return nil, sentinel
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	}
+	cfg := &Config{Client: herdr.NewWithRunner(runner), Base: "main", ParentWorkspace: "w3X"}
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", Label: "AP-1207", RepoRoot: repo}}, "origin/main", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	wt, err := prepareWorktree(context.Background(), cfg, &plans[0])
+	if err != nil {
+		t.Fatalf("prepareWorktree: got %v, want a TabRename failure to be non-fatal", err)
+	}
+	if wt.RootPaneID != "w3X:p2" {
+		t.Errorf("RootPaneID: got %q, want the moved pane's id even though its tab rename failed", wt.RootPaneID)
+	}
+}
+
 // TestPrepareWorktreeFailsClosedWhenNestingFails proves a PaneMove error
 // surfaces as a hard prepareWorktree error rather than silently leaving the
 // worker in the unrequested top-level workspace WorktreeCreate opened —
