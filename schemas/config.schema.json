@@ -19,8 +19,8 @@
     },
     "launcher": {
       "type": "string",
-      "description": "Command started in each worker pane after cd into its worktree. Empty/unset falls back to argus's own default (claude --permission-mode auto). An explicit --launcher flag on supervise still overrides this.",
-      "examples": ["claude --permission-mode auto", "codex --full-auto"]
+      "description": "Command started in each worker pane after cd into its worktree. Empty/unset falls back to argus's own default (claude --permission-mode dontAsk). An explicit --launcher flag on supervise still overrides this.",
+      "examples": ["claude --permission-mode dontAsk", "codex --full-auto"]
     },
     "forge": {
       "type": "string",
