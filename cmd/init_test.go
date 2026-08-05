@@ -24,7 +24,7 @@ import (
 // Deny/Skip subkeys stay hand-edit-only.
 var initPromptExemptFields = map[string]string{}
 
-const wantConfigFieldCount = 21 // repoconfig.Config's current field count
+const wantConfigFieldCount = 22 // repoconfig.Config's current field count
 
 func writeMarker(t *testing.T, dir, name string) {
 	t.Helper()
@@ -190,11 +190,11 @@ func TestRunInitInteractivePromptsCoreFields(t *testing.T) {
 	cmd.SetErr(&buf)
 	cmd.SetContext(context.Background())
 	// base_branch, allow, 5 phases.*.allow prompts (keep detected),
-	// brief_note (keep detected), max_diff_lines, rework_budget (keep
-	// default), proof_required_paths, always_review_paths, worker_placement
-	// — a representative subset of init's prompts, each edited to a
-	// non-default value.
-	cmd.SetIn(strings.NewReader("main\nBash(make *)\n" + strings.Repeat("\n", 6) + "250\n\nterraform, deploy\nauth\ntab\n"))
+	// brief_note (keep detected), max_diff_lines, rework.budget (keep
+	// default), rework.max_rounds (keep default), proof_required_paths,
+	// always_review_paths, worker_placement — a representative subset of
+	// init's prompts, each edited to a non-default value.
+	cmd.SetIn(strings.NewReader("main\nBash(make *)\n" + strings.Repeat("\n", 6) + "250\n\n\nterraform, deploy\nauth\ntab\n"))
 
 	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
 		t.Fatalf("runInit: %v", err)
@@ -304,12 +304,12 @@ func TestRunInitInteractivePromptWritesForge(t *testing.T) {
 	cmd.SetErr(&buf)
 	cmd.SetContext(context.Background())
 	// base_branch, allow, the 5 phases.*.allow prompts, brief_note,
-	// max_diff_lines, rework_budget, proof_required_paths,
+	// max_diff_lines, rework.budget, rework.max_rounds, proof_required_paths,
 	// always_review_paths, worker_placement, ship_verify_command,
 	// gate_verify_command, worktree_bootstrap_command, review_effort,
 	// launcher, worktree_dir, owner_stale_after, title_prefix_template,
-	// review_note (all bare Enter, 22 prompts), then forge.
-	cmd.SetIn(strings.NewReader(strings.Repeat("\n", 22) + "gitlab\n"))
+	// review_note (all bare Enter, 23 prompts), then forge.
+	cmd.SetIn(strings.NewReader(strings.Repeat("\n", 23) + "gitlab\n"))
 
 	if err := runInit(cmd, &initArgs{repo: dir}); err != nil {
 		t.Fatalf("runInit: %v", err)
@@ -401,15 +401,16 @@ func TestRunInitPromptsSetEveryConfigField(t *testing.T) {
 	cmd.SetContext(context.Background())
 	// One recognizable answer per prompt, in runInit's own order: base_branch,
 	// allow, the 5 phases.*.allow prompts (planning/working/self_test/
-	// awaiting_review/blocked), brief_note, max_diff_lines, rework_budget,
-	// proof_required_paths, always_review_paths, worker_placement,
-	// ship_verify_command, gate_verify_command, worktree_bootstrap_command,
-	// review_effort, launcher, worktree_dir, owner_stale_after,
-	// title_prefix_template, review_note, forge, status_page.
+	// awaiting_review/blocked), brief_note, max_diff_lines, rework.budget,
+	// rework.max_rounds, proof_required_paths, always_review_paths,
+	// worker_placement, ship_verify_command, gate_verify_command,
+	// worktree_bootstrap_command, review_effort, launcher, worktree_dir,
+	// owner_stale_after, title_prefix_template, review_note, forge,
+	// status_page.
 	answers := []string{
 		"develop", "Bash(task *)",
 		"Bash(planning-tool *)", "Bash(working-tool *)", "Bash(self-test-tool *)", "Bash(review-tool *)", "Bash(blocked-tool *)",
-		"custom brief", "250", "6", "terraform", "auth",
+		"custom brief", "250", "6", "4", "terraform", "auth",
 		"tab", "make lint", "make ci", "cp ../.env .env", "high",
 		"codex --full-auto", "..", "45m", "TICKET-{issue}: ", "pay attention", "gitlab",
 		"https://status.example.com",
@@ -440,11 +441,13 @@ func TestRunInitPromptsSetEveryConfigField(t *testing.T) {
 }
 
 // TestRunInitWritesNestedShipAndPhasesShape confirms runInit's Save call
-// emits the current nested ship:/phases: regions end to end — not just that
-// repoconfig.Load can read the fields back (TestRunInitPromptsSetEveryConfigField
-// already covers that), but that the raw file on disk uses the new shape
-// (schemas/config.schema.json) rather than the deprecated flat keys runInit
-// used to write before the region restructure.
+// emits the current nested ship:/rework:/review:/phases: regions end to end —
+// not just that repoconfig.Load can read the fields back
+// (TestRunInitPromptsSetEveryConfigField already covers that), but that the
+// raw file on disk uses the new shape (schemas/config.schema.json) rather
+// than the deprecated flat keys, or the deprecated phases.awaiting_review
+// gate/review cluster location, runInit used to write before the region
+// restructure.
 func TestRunInitWritesNestedShipAndPhasesShape(t *testing.T) {
 	dir := t.TempDir()
 	writeMarker(t, dir, "Makefile")
@@ -456,7 +459,7 @@ func TestRunInitWritesNestedShipAndPhasesShape(t *testing.T) {
 	answers := []string{
 		"develop", "Bash(task *)",
 		"", "", "", "", "",
-		"custom brief", "250", "6", "terraform", "auth",
+		"custom brief", "250", "6", "4", "terraform", "auth",
 		"tab", "make lint", "make ci", "cp ../.env .env", "high",
 		"codex --full-auto", "..", "45m", "TICKET-{issue}: ", "pay attention", "gitlab",
 		"https://status.example.com",
@@ -471,13 +474,21 @@ func TestRunInitWritesNestedShipAndPhasesShape(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	content := string(raw)
-	for _, want := range []string{"\nship:\n", "  verify_command: ", "  title_prefix_template: ", "\nphases:\n", "  working:\n", "    allow:\n", "  awaiting_review:\n", "    gate_verify_command: ", "    max_diff_lines: ", "    review_note: ", "    review_effort: "} {
+	for _, want := range []string{
+		"\nship:\n", "  verify_command: ", "  title_prefix_template: ",
+		"\nrework:\n", "  budget: 6\n", "  max_rounds: 4\n",
+		"\nreview:\n", "  gate_verify_command: ", "  max_diff_lines: ", "  review_note: ", "  review_effort: ",
+		"\nphases:\n", "  working:\n", "    allow:\n",
+	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("saved config = %q, want it to contain %q", content, want)
 		}
 	}
+	if strings.Contains(content, "awaiting_review:") {
+		t.Errorf("saved config = %q, want no phases.awaiting_review block — the gate/review cluster now lives under review:", content)
+	}
 	for line := range strings.SplitSeq(content, "\n") {
-		for _, old := range []string{"ship_verify_command:", "gate_verify_command:", "max_diff_lines:", "proof_required_paths:", "always_review_paths:", "review_note:", "review_effort:", "title_prefix_template:"} {
+		for _, old := range []string{"ship_verify_command:", "gate_verify_command:", "max_diff_lines:", "proof_required_paths:", "always_review_paths:", "review_note:", "review_effort:", "title_prefix_template:", "rework_budget:"} {
 			if strings.HasPrefix(line, old) {
 				t.Errorf("saved config line %q starts with deprecated flat key %q, want only the nested shape", line, old)
 			}
@@ -530,9 +541,9 @@ func TestRunInitYesSkipsConfigCheckOffer(t *testing.T) {
 }
 
 // initPromptAnswers is one bare-Enter answer per interactive prompt (accept the
-// default for all 24 — including the 5 phases.*.allow prompts), so a test
+// default for all 25 — including the 5 phases.*.allow prompts), so a test
 // can append its own answer for the trailing config-check confirm.
-const initPromptAnswers = 24
+const initPromptAnswers = 25
 
 func TestRunInitInlineConfigCheckAcceptedWritesSettings(t *testing.T) {
 	dir := t.TempDir()

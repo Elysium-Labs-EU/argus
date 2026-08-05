@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/schemas/config.schema.json",
   "title": "argus repo configuration",
-  "description": "Configuration schema for .argus/config.yml files. Keys are grouped into three regions by when they actually run: top-level (phase-independent — static repo facts and spawn-time keys), ship: (argus-side actions after a verdict, run by the operator, not a worker phase), and phases: (per-worker-lifecycle-phase keys, either live on every configurable phase — allow/deny/skip — or, for the gate/review cluster, valid only on the terminal awaiting_review phase). Workers launch under --permission-mode dontAsk (default-deny): allow/phases.<name>.allow are what supervisor.ResolvedAllowForPhase actually resolves into each worker's per-phase permission grant, on top of a code-guaranteed structural floor (read-only git, argus worker self-calls) and beneath a code-guaranteed, unremovable deny floor (git commit/push, argus ship/rework/review/supervise) no allow entry can re-grant. All keys are optional; a missing file is equivalent to a zero config, which degrades a worker to structural-floor-only, never wide open. See internal/repoconfig/config.go, internal/repoconfig/yaml.go, and internal/supervisor/permissions.go.",
+  "description": "Configuration schema for .argus/config.yml files. Keys are grouped by when they actually run: top-level (static/spawn facts, phase-independent), phases: (worker permission contexts only — allow/deny/skip per lifecycle phase, nothing else), and one region per argus operation, sibling to each other: ship: (argus-side actions after a verdict), rework: (the rework-loop's own restart budget and per-invocation round ceiling), and review: (the gate/review cluster the reviewer and deterministic gate consult). Workers launch under --permission-mode dontAsk (default-deny): allow/phases.<name>.allow are what supervisor.ResolvedAllowForPhase actually resolves into each worker's per-phase permission grant, on top of a code-guaranteed structural floor (read-only git, argus worker self-calls) and beneath a code-guaranteed, unremovable deny floor (git commit/push, argus ship/rework/review/supervise) no allow entry can re-grant. All keys are optional; a missing file is equivalent to a zero config, which degrades a worker to structural-floor-only, never wide open. A key's superseded flat/relocated form (e.g. top-level rework_budget, or the gate/review cluster under phases.awaiting_review) still parses as a deprecated alias resolving to the identical field — see internal/repoconfig/config.go, internal/repoconfig/yaml.go, and internal/supervisor/permissions.go.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -55,7 +55,7 @@
     },
     "rework_budget": {
       "type": ["integer", "null"],
-      "description": "Restart budget: total rework rounds a worktree may ever be dispatched for, across every separate `argus rework` invocation over its lifetime — distinct from --max-rounds, which only bounds one invocation's own loop. Exceeding it records an unwaivable rework-budget-exceeded verdict instead of dispatching another round. 0 disables the budget; unset/null falls back to rework's own default.",
+      "description": "Deprecated: relocated to rework.budget. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use rework.budget.",
       "minimum": 0,
       "examples": [6, 0]
     },
@@ -82,10 +82,67 @@
         }
       }
     },
+    "rework": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Argus's own rework-loop operation config, sibling to ship:/review: rather than a top-level static fact or a worker phase — rework re-dispatches the same worker back through the existing phases with findings as its brief, so it needs no permission context of its own.",
+      "properties": {
+        "budget": {
+          "type": ["integer", "null"],
+          "description": "Restart budget: total rework rounds a worktree may ever be dispatched for, across every separate `argus rework` invocation over its lifetime — distinct from max_rounds, which only bounds one invocation's own loop. Exceeding it records an unwaivable rework-budget-exceeded verdict instead of dispatching another round. 0 disables the budget; unset/null falls back to rework's own default. (Relocated from the top-level rework_budget, which still works as a deprecated alias.)",
+          "minimum": 0,
+          "examples": [6, 0]
+        },
+        "max_rounds": {
+          "type": ["integer", "null"],
+          "description": "Give up and escalate after this many request-changes rounds within one `argus rework` invocation — distinct from budget, which bounds every invocation's rounds cumulatively over the worktree's lifetime. Unset/null falls back to the --max-rounds flag's own default. An explicit --max-rounds flag still overrides this.",
+          "minimum": 1,
+          "examples": [3, 5]
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The gate/review cluster: config for argus's own gate/review operation, sibling to ship:/rework: rather than smeared onto the worker-permission phases.awaiting_review block it used to live under. Fires once, on a worker reaching a terminal phase, before a verdict is recorded.",
+      "properties": {
+        "gate_verify_command": {
+          "type": "string",
+          "description": "Shell command the gate runs in a worker's worktree once it reaches a terminal phase, before a verdict is recorded. This is also the general-purpose escape hatch for any repo-specific mechanical rule ReviewPolicy has no dedicated field for (max_diff_lines/proof_required_paths/always_review_paths are a closed set): express the rule as a script that exits non-zero on violation and its failure becomes an unwaivable escalation, no argus code change needed. Empty/unset skips this check. (Relocated from phases.awaiting_review.gate_verify_command, itself renamed from verify_command, itself relocated from the top-level gate_verify_command — all old forms still work as deprecated aliases.)",
+          "examples": ["make test", "npm test"]
+        },
+        "max_diff_lines": {
+          "type": ["integer", "null"],
+          "description": "Review gate: diffs larger than this (insertions+deletions) escalate. 0 disables the ceiling; unset/null falls back to the gate's own default. (Relocated from phases.awaiting_review.max_diff_lines, itself relocated from the top-level max_diff_lines — both old forms still work as deprecated aliases.)",
+          "minimum": 0,
+          "examples": [400, 0]
+        },
+        "proof_required_paths": {
+          "type": "array",
+          "description": "Path globs whose changes require real_world_proof in a worker's report before the review gate accepts it. Setting this key entirely replaces argus's own built-in default list rather than merging with it. (Relocated from phases.awaiting_review.proof_required_paths, itself relocated from the top-level proof_required_paths — both old forms still work as deprecated aliases.)",
+          "items": { "type": "string" }
+        },
+        "always_review_paths": {
+          "type": "array",
+          "description": "Path globs that always escalate to human/reviewer attention regardless of diff size. Setting this key entirely replaces argus's own built-in default list rather than merging with it. The one exception is .argus/config.yml itself: it is always checked regardless of this list, since it governs next run's own gate policy and can't be allowed to silently drop out by omission. (Relocated from phases.awaiting_review.always_review_paths, itself relocated from the top-level always_review_paths — both old forms still work as deprecated aliases.)",
+          "items": { "type": "string" }
+        },
+        "review_note": {
+          "type": "string",
+          "description": "Free-text note appended verbatim to the reviewer's prompt. (Relocated from phases.awaiting_review.review_note, itself relocated from the top-level review_note — both old forms still work as deprecated aliases.)",
+          "examples": ["Pay extra attention to internal/supervisor changes."]
+        },
+        "review_effort": {
+          "type": "string",
+          "description": "Reasoning effort for --review. Without this, the review command's own default wins. (Relocated from phases.awaiting_review.review_effort, itself relocated from the top-level review_effort — both old forms still work as deprecated aliases.)",
+          "enum": ["low", "medium", "high", "xhigh", "max"]
+        }
+      }
+    },
     "phases": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Per-worker-lifecycle-phase keys. allow/deny/skip are live rules, checked continuously while a worker reports the given phase, and are valid on every configurable phase (planning, working, self_test, awaiting_review, blocked). The gate/review cluster (gate_verify_command, max_diff_lines, proof_required_paths, always_review_paths, review_note, review_effort) fires once, on entering the terminal awaiting_review phase, and is valid only there — placing one under any other phase is a load-time error naming the phase it belongs to.",
+      "description": "Worker permission contexts only, one nested block per lifecycle phase (planning, working, self_test, awaiting_review, blocked): allow/deny/skip are live rules, checked continuously while a worker reports the given phase. No operation config lives here — the gate/review cluster's canonical home is review: (see the top-level review property). awaiting_review still also accepts the gate/review cluster's old keys (gate_verify_command, max_diff_lines, proof_required_paths, always_review_paths, review_note, review_effort) as a deprecated alias of review.*; placing one under any other phase is a load-time error naming the phase it belongs to.",
       "properties": {
         "planning": { "$ref": "#/definitions/livePhaseBlock" },
         "working": { "$ref": "#/definitions/livePhaseBlock" },
@@ -104,11 +161,11 @@
     },
     "verify_command": {
       "type": "string",
-      "description": "Deprecated: relocated to phases.awaiting_review.gate_verify_command (itself the current name for the older gate_verify_command). Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use phases.awaiting_review.gate_verify_command."
+      "description": "Deprecated: relocated to review.gate_verify_command (itself the current name for the older gate_verify_command). Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use review.gate_verify_command."
     },
     "gate_verify_command": {
       "type": "string",
-      "description": "Deprecated: relocated to phases.awaiting_review.gate_verify_command. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use phases.awaiting_review.gate_verify_command.",
+      "description": "Deprecated: relocated to review.gate_verify_command. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use review.gate_verify_command.",
       "examples": ["make test", "npm test"]
     },
     "worktree_setup_cmd": {
@@ -125,28 +182,28 @@
     },
     "review_note": {
       "type": "string",
-      "description": "Deprecated: relocated to phases.awaiting_review.review_note. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use phases.awaiting_review.review_note.",
+      "description": "Deprecated: relocated to review.review_note. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use review.review_note.",
       "examples": ["Pay extra attention to internal/supervisor changes."]
     },
     "review_effort": {
       "type": "string",
-      "description": "Deprecated: relocated to phases.awaiting_review.review_effort. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use phases.awaiting_review.review_effort.",
+      "description": "Deprecated: relocated to review.review_effort. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use review.review_effort.",
       "enum": ["low", "medium", "high", "xhigh", "max"]
     },
     "max_diff_lines": {
       "type": ["integer", "null"],
-      "description": "Deprecated: relocated to phases.awaiting_review.max_diff_lines. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use phases.awaiting_review.max_diff_lines.",
+      "description": "Deprecated: relocated to review.max_diff_lines. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use review.max_diff_lines.",
       "minimum": 0,
       "examples": [400, 0]
     },
     "proof_required_paths": {
       "type": "array",
-      "description": "Deprecated: relocated to phases.awaiting_review.proof_required_paths. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use phases.awaiting_review.proof_required_paths.",
+      "description": "Deprecated: relocated to review.proof_required_paths. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use review.proof_required_paths.",
       "items": { "type": "string" }
     },
     "always_review_paths": {
       "type": "array",
-      "description": "Deprecated: relocated to phases.awaiting_review.always_review_paths. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use phases.awaiting_review.always_review_paths.",
+      "description": "Deprecated: relocated to review.always_review_paths. Still accepted at the top level — argus prints a one-line migration warning when it's read — but new configs should use review.always_review_paths.",
       "items": { "type": "string" }
     }
   },
@@ -188,40 +245,40 @@
     "awaitingReviewPhaseBlock": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The terminal awaiting_review phase's live allow/deny/skip rules, plus the gate/review cluster that fires once, on entering this phase, before a verdict is recorded — valid only here.",
+      "description": "The terminal awaiting_review phase's live allow/deny/skip rules. Also still accepts the gate/review cluster's old keys here as a deprecated alias of the top-level review: region (see the top-level review property) — new configs should use review.* instead of nesting the cluster under this worker permission phase.",
       "properties": {
         "allow": { "$ref": "#/definitions/livePhaseBlock/properties/allow" },
         "deny": { "$ref": "#/definitions/livePhaseBlock/properties/deny" },
         "skip": { "$ref": "#/definitions/livePhaseBlock/properties/skip" },
         "gate_verify_command": {
           "type": "string",
-          "description": "Shell command the gate runs in a worker's worktree once it reaches this terminal phase, before a verdict is recorded. This is also the general-purpose escape hatch for any repo-specific mechanical rule ReviewPolicy has no dedicated field for (max_diff_lines/proof_required_paths/always_review_paths are a closed set): express the rule as a script that exits non-zero on violation and its failure becomes an unwaivable escalation, no argus code change needed. Empty/unset skips this check. (Renamed from verify_command, relocated from the top-level gate_verify_command — both old flat forms still work as deprecated aliases.)",
+          "description": "Deprecated: relocated to review.gate_verify_command (itself renamed from verify_command, relocated from the top-level gate_verify_command). Still accepted here — argus prints a one-line migration warning when it's read — but new configs should use review.gate_verify_command.",
           "examples": ["make test", "npm test"]
         },
         "max_diff_lines": {
           "type": ["integer", "null"],
-          "description": "Review gate: diffs larger than this (insertions+deletions) escalate. 0 disables the ceiling; unset/null falls back to the gate's own default.",
+          "description": "Deprecated: relocated to review.max_diff_lines. Still accepted here — argus prints a one-line migration warning when it's read — but new configs should use review.max_diff_lines.",
           "minimum": 0,
           "examples": [400, 0]
         },
         "proof_required_paths": {
           "type": "array",
-          "description": "Path globs whose changes require real_world_proof in a worker's report before the review gate accepts it. Setting this key entirely replaces argus's own built-in default list rather than merging with it.",
+          "description": "Deprecated: relocated to review.proof_required_paths. Still accepted here — argus prints a one-line migration warning when it's read — but new configs should use review.proof_required_paths.",
           "items": { "type": "string" }
         },
         "always_review_paths": {
           "type": "array",
-          "description": "Path globs that always escalate to human/reviewer attention regardless of diff size. Setting this key entirely replaces argus's own built-in default list rather than merging with it. The one exception is .argus/config.yml itself: it is always checked regardless of this list, since it governs next run's own gate policy and can't be allowed to silently drop out by omission.",
+          "description": "Deprecated: relocated to review.always_review_paths. Still accepted here — argus prints a one-line migration warning when it's read — but new configs should use review.always_review_paths.",
           "items": { "type": "string" }
         },
         "review_note": {
           "type": "string",
-          "description": "Free-text note appended verbatim to the reviewer's prompt.",
+          "description": "Deprecated: relocated to review.review_note. Still accepted here — argus prints a one-line migration warning when it's read — but new configs should use review.review_note.",
           "examples": ["Pay extra attention to internal/supervisor changes."]
         },
         "review_effort": {
           "type": "string",
-          "description": "Reasoning effort for --review. Without this, the review command's own default wins.",
+          "description": "Deprecated: relocated to review.review_effort. Still accepted here — argus prints a one-line migration warning when it's read — but new configs should use review.review_effort.",
           "enum": ["low", "medium", "high", "xhigh", "max"]
         }
       }

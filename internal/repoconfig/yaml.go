@@ -20,7 +20,7 @@ const configSchemaHeader = "# yaml-language-server: $schema=https://raw.githubus
 // was also renamed, not just relocated (ship_lint/verify_command, whose
 // current names are ship_verify_command/gate_verify_command). newLoc is the
 // dotted path shown in the deprecation warning: the key's actual location
-// under the new ship:/phases: nesting.
+// under the new ship:/rework:/review:/phases: nesting.
 type legacyKey struct {
 	assignAs string
 	newLoc   string
@@ -39,22 +39,25 @@ type legacyKey struct {
 var legacyFlatKeys = map[string]legacyKey{
 	"ship_lint":              {"ship_verify_command", "ship.verify_command"},
 	"ship_verify_command":    {"ship_verify_command", "ship.verify_command"},
-	"verify_command":         {"gate_verify_command", "phases.awaiting_review.gate_verify_command"},
-	"gate_verify_command":    {"gate_verify_command", "phases.awaiting_review.gate_verify_command"},
+	"verify_command":         {"gate_verify_command", "review.gate_verify_command"},
+	"gate_verify_command":    {"gate_verify_command", "review.gate_verify_command"},
 	"worktree_setup_cmd":     {"worktree_bootstrap_command", "worktree_bootstrap_command"},
 	"worktree_setup_command": {"worktree_bootstrap_command", "worktree_bootstrap_command"},
 	"title_prefix_template":  {"title_prefix_template", "ship.title_prefix_template"},
-	"max_diff_lines":         {"max_diff_lines", "phases.awaiting_review.max_diff_lines"},
-	"proof_required_paths":   {"proof_required_paths", "phases.awaiting_review.proof_required_paths"},
-	"always_review_paths":    {"always_review_paths", "phases.awaiting_review.always_review_paths"},
-	"review_note":            {"review_note", "phases.awaiting_review.review_note"},
-	"review_effort":          {"review_effort", "phases.awaiting_review.review_effort"},
+	"max_diff_lines":         {"max_diff_lines", "review.max_diff_lines"},
+	"proof_required_paths":   {"proof_required_paths", "review.proof_required_paths"},
+	"always_review_paths":    {"always_review_paths", "review.always_review_paths"},
+	"review_note":            {"review_note", "review.review_note"},
+	"review_effort":          {"review_effort", "review.review_effort"},
+	"rework_budget":          {"rework_budget", "rework.budget"},
 }
 
-// awaitingReviewOnlyKeys are the gate/review cluster subkeys valid only
-// under phases.awaiting_review: they fire once, on entering the terminal
-// phase, right before a verdict is recorded — unlike allow/deny/skip, which
-// are live on every configurable phase.
+// awaitingReviewOnlyKeys are the gate/review cluster's deprecated subkeys
+// under phases.awaiting_review (canonical location: review.<key>, see
+// parseReviewBlock) — kept parsing for back-compat only. They fire once, on
+// entering the terminal phase, right before a verdict is recorded — unlike
+// allow/deny/skip, which are live on every configurable phase and stay
+// canonical there.
 var awaitingReviewOnlyKeys = []string{
 	"gate_verify_command", "max_diff_lines", "proof_required_paths",
 	"always_review_paths", "review_note", "review_effort",
@@ -62,10 +65,10 @@ var awaitingReviewOnlyKeys = []string{
 
 // encodeYAML renders cfg as the minimal YAML document parseYAML can read
 // back: a leading comment, then region 1's top-level scalars/lists actually
-// set, then a `ship:` block and a `phases:` block for whatever's configured
-// there. Like internal/config's TOML encoder, this is deliberately not a
-// general-purpose YAML encoder. It never emits a deprecated flat/dotted key
-// name — only the current nested shape, regardless of which shape the
+// set, then a `ship:`, `rework:`, `review:`, and `phases:` block for whatever's
+// configured there. Like internal/config's TOML encoder, this is deliberately
+// not a general-purpose YAML encoder. It never emits a deprecated flat/dotted
+// key name — only the current nested shape, regardless of which shape the
 // in-memory Config was originally loaded from.
 func encodeYAML(cfg *Config) string {
 	var b strings.Builder
@@ -95,14 +98,13 @@ func encodeYAML(cfg *Config) string {
 	if cfg.OwnerStaleAfter != "" {
 		fmt.Fprintf(&b, "owner_stale_after: %s\n", quoteYAML(cfg.OwnerStaleAfter))
 	}
-	if cfg.ReworkBudget != nil {
-		fmt.Fprintf(&b, "rework_budget: %d\n", *cfg.ReworkBudget)
-	}
 	writeYAMLList(&b, "allow", cfg.Allow)
 	if cfg.BriefNote != "" {
 		fmt.Fprintf(&b, "brief_note: %s\n", quoteYAML(cfg.BriefNote))
 	}
 	writeShipBlock(&b, cfg)
+	writeReworkBlock(&b, cfg)
+	writeReviewBlock(&b, cfg)
 	writePhasesBlock(&b, cfg)
 	return b.String()
 }
@@ -124,25 +126,81 @@ func writeShipBlock(b *strings.Builder, cfg *Config) {
 	}
 }
 
+// writeReworkBlock appends the `rework:` block — argus's own rework-loop
+// operation config (the cumulative restart budget and one invocation's own
+// round ceiling), sibling to `ship:` rather than a top-level static fact.
+// Writes nothing if neither field is set.
+func writeReworkBlock(b *strings.Builder, cfg *Config) {
+	if cfg.ReworkBudget == nil && cfg.MaxReworkRounds == nil {
+		return
+	}
+	b.WriteString("\nrework:\n")
+	if cfg.ReworkBudget != nil {
+		fmt.Fprintf(b, "  budget: %d\n", *cfg.ReworkBudget)
+	}
+	if cfg.MaxReworkRounds != nil {
+		fmt.Fprintf(b, "  max_rounds: %d\n", *cfg.MaxReworkRounds)
+	}
+}
+
+// writeReviewBlock appends the `review:` block — the gate/review cluster,
+// sibling to `ship:`/`rework:` rather than smeared onto the worker-permission
+// phases.awaiting_review block it used to live under. Writes nothing if
+// reviewBlockLines finds nothing configured.
+func writeReviewBlock(b *strings.Builder, cfg *Config) {
+	lines := reviewBlockLines(cfg)
+	if len(lines) == 0 {
+		return
+	}
+	b.WriteString("\nreview:\n")
+	for _, l := range lines {
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+}
+
+// reviewBlockLines renders the gate/review cluster's configured fields as
+// already-indented (2-space, region-2 depth) YAML lines, shared by
+// writeReviewBlock.
+func reviewBlockLines(cfg *Config) []string {
+	const indent = "  "
+	var lines []string
+	if cfg.GateVerifyCommand != "" {
+		lines = append(lines, fmt.Sprintf("%sgate_verify_command: %s", indent, quoteYAML(cfg.GateVerifyCommand)))
+	}
+	if cfg.MaxDiffLines != nil {
+		lines = append(lines, fmt.Sprintf("%smax_diff_lines: %d", indent, *cfg.MaxDiffLines))
+	}
+	lines = append(lines, indentedYAMLList(indent, "proof_required_paths", cfg.ProofRequiredPaths)...)
+	lines = append(lines, indentedYAMLList(indent, "always_review_paths", cfg.AlwaysReviewPaths)...)
+	if cfg.ReviewNote != "" {
+		lines = append(lines, fmt.Sprintf("%sreview_note: %s", indent, quoteYAML(cfg.ReviewNote)))
+	}
+	if cfg.ReviewEffort != "" {
+		lines = append(lines, fmt.Sprintf("%sreview_effort: %s", indent, quoteYAML(cfg.ReviewEffort)))
+	}
+	return lines
+}
+
 // writePhasesBlock appends the `phases:` block: one nested entry per
-// protocol.ConfigurablePhases value that has anything configured — its live
-// allow/deny/skip policy, plus (awaiting_review only) the gate/review
-// cluster. A phase with nothing configured is omitted entirely, mirroring
-// every other optional key here.
+// protocol.ConfigurablePhases value that has its own live allow/deny/skip
+// policy configured — purely worker-permission contexts now, no operation
+// config (the gate/review cluster moved to its own `review:` region, see
+// writeReviewBlock). A phase with nothing configured is omitted entirely,
+// mirroring every other optional key here.
 func writePhasesBlock(b *strings.Builder, cfg *Config) {
 	bodies := make(map[protocol.Phase][]string, len(protocol.ConfigurablePhases))
 	for _, p := range protocol.ConfigurablePhases {
+		policy, ok := cfg.Phases[p]
+		if !ok {
+			continue
+		}
 		var lines []string
-		if policy, ok := cfg.Phases[p]; ok {
-			if policy.Skip {
-				lines = append(lines, "    skip: true")
-			}
-			lines = append(lines, indentedYAMLList("allow", policy.Allow)...)
-			lines = append(lines, indentedYAMLList("deny", policy.Deny)...)
+		if policy.Skip {
+			lines = append(lines, "    skip: true")
 		}
-		if p == protocol.PhaseAwaitingReview {
-			lines = append(lines, awaitingReviewLines(cfg)...)
-		}
+		lines = append(lines, indentedYAMLList("    ", "allow", policy.Allow)...)
+		lines = append(lines, indentedYAMLList("    ", "deny", policy.Deny)...)
 		if len(lines) > 0 {
 			bodies[p] = lines
 		}
@@ -164,33 +222,11 @@ func writePhasesBlock(b *strings.Builder, cfg *Config) {
 	}
 }
 
-// awaitingReviewLines renders the gate/review cluster's configured fields as
-// already-indented YAML lines, for writePhasesBlock's awaiting_review entry.
-func awaitingReviewLines(cfg *Config) []string {
-	var lines []string
-	if cfg.GateVerifyCommand != "" {
-		lines = append(lines, fmt.Sprintf("    gate_verify_command: %s", quoteYAML(cfg.GateVerifyCommand)))
-	}
-	if cfg.MaxDiffLines != nil {
-		lines = append(lines, fmt.Sprintf("    max_diff_lines: %d", *cfg.MaxDiffLines))
-	}
-	lines = append(lines, indentedYAMLList("proof_required_paths", cfg.ProofRequiredPaths)...)
-	lines = append(lines, indentedYAMLList("always_review_paths", cfg.AlwaysReviewPaths)...)
-	if cfg.ReviewNote != "" {
-		lines = append(lines, fmt.Sprintf("    review_note: %s", quoteYAML(cfg.ReviewNote)))
-	}
-	if cfg.ReviewEffort != "" {
-		lines = append(lines, fmt.Sprintf("    review_effort: %s", quoteYAML(cfg.ReviewEffort)))
-	}
-	return lines
-}
-
-// indentedYAMLList renders a key's "- value" list block at the fixed
-// 4-space indent every phases.<name>.<subkey> line uses, or nothing if
-// items is empty — the nested-block equivalent of writeYAMLList, which only
-// ever writes at zero indentation.
-func indentedYAMLList(key string, items []string) []string {
-	const indent = "    "
+// indentedYAMLList renders a key's "- value" list block at the given indent
+// (4 spaces for phases.<name>.<subkey>, 2 spaces for review.<subkey> — see
+// callers), or nothing if items is empty — the nested-block equivalent of
+// writeYAMLList, which only ever writes at zero indentation.
+func indentedYAMLList(indent, key string, items []string) []string {
 	if len(items) == 0 {
 		return nil
 	}
@@ -394,22 +430,20 @@ func parseYAML(data string) (Config, error) {
 }
 
 // assignTopLevelKey dispatches one top-level "key: value"/"key:" line
-// (already split into key/rest by parseYAML) to whichever region it names:
-// a ship:/phases: block header (parseRegionBlock), a deprecated dotted
-// phase.<name>.<subkey> key (parseDottedPhaseKey), or an ordinary flat
-// scalar/list key, current or deprecated (assignFlatKey). Splitting these
-// three families into their own functions — rather than one large switch —
-// keeps each one's own cyclomatic complexity (and so its CRAP score) low
-// individually, even though the total behavior is unchanged. i is the
-// line's zero-based index in lines, needed by the block-header/dotted-key
+// (already split into key/rest by parseYAML) to whichever region it names: a
+// ship:/rework:/review:/phases: block header (parseRegionBlock), a
+// deprecated dotted phase.<name>.<subkey> key (parseDottedPhaseKey), or an
+// ordinary flat scalar/list key, current or deprecated (assignFlatKey).
+// Splitting these three families into their own functions — rather than one
+// large switch — keeps each one's own cyclomatic complexity (and so its CRAP
+// score) low individually, even though the total behavior is unchanged. i is
+// the line's zero-based index in lines, needed by the block-header/dotted-key
 // cases to locate their own following content; line is i+1, the 1-based
 // line number every error message here uses.
 func assignTopLevelKey(cfg *Config, lines []string, i int, key, rest string) (consumed int, err error) {
 	line := i + 1
 	switch key {
-	case "ship":
-		return parseRegionBlock(cfg, lines, i, key, rest, line)
-	case "phases":
+	case "ship", "rework", "review", "phases":
 		return parseRegionBlock(cfg, lines, i, key, rest, line)
 	}
 	if phase, subkey, ok := parsePhaseKey(key); ok {
@@ -418,18 +452,24 @@ func assignTopLevelKey(cfg *Config, lines []string, i int, key, rest string) (co
 	return assignFlatKey(cfg, lines, i+1, key, rest, line)
 }
 
-// parseRegionBlock handles a top-level "ship:"/"phases:" block-header line:
-// it must carry no inline value (the block's content is its indented body —
-// see parseShipBlock/parsePhasesBlock), and dispatches to the matching
-// block parser.
+// parseRegionBlock handles a top-level "ship:"/"rework:"/"review:"/"phases:"
+// block-header line: it must carry no inline value (the block's content is
+// its indented body — see parseShipBlock/parseReworkBlock/parseReviewBlock/
+// parsePhasesBlock), and dispatches to the matching block parser.
 func parseRegionBlock(cfg *Config, lines []string, i int, key, rest string, line int) (consumed int, err error) {
 	if rest != "" {
 		return 0, fmt.Errorf("config: line %d: %q expects a nested block, not an inline value", line, key)
 	}
-	if key == "ship" {
+	switch key {
+	case "ship":
 		return parseShipBlock(cfg, lines, i+1, 0)
+	case "rework":
+		return parseReworkBlock(cfg, lines, i+1, 0)
+	case "review":
+		return parseReviewBlock(cfg, lines, i+1, 0)
+	default:
+		return parsePhasesBlock(cfg, lines, i+1, 0)
 	}
-	return parsePhasesBlock(cfg, lines, i+1, 0)
 }
 
 // parseDottedPhaseKey handles a deprecated dotted phase.<name>.<subkey>
@@ -517,6 +557,124 @@ func parseShipBlock(cfg *Config, lines []string, start, headerIndent int) (consu
 			cfg.TitlePrefixTemplate = value
 		default:
 			return 0, fmt.Errorf("config: line %d: unrecognized ship key %q", i+1, key)
+		}
+	}
+	return i - start, nil
+}
+
+// parseReworkBlock parses the indented body of a top-level `rework:` key —
+// argus's own rework-loop operation config, sibling to `ship:` rather than a
+// top-level static fact. start is the line after "rework:"; headerIndent is
+// rework:'s own indentation (always 0). An unrecognized subkey is a hard
+// error, the same treatment every other namespace here gives a typo. Returns
+// how many lines belong to the block, for the caller to skip past.
+func parseReworkBlock(cfg *Config, lines []string, start, headerIndent int) (consumed int, err error) {
+	i := start
+	for ; i < len(lines); i++ {
+		raw := lines[i]
+		trimmed := strings.TrimSpace(stripYAMLComment(raw))
+		if trimmed == "" {
+			continue
+		}
+		if indentOf(raw) <= headerIndent {
+			break
+		}
+		key, rest, ok := cutKeyValue(trimmed)
+		if !ok {
+			return 0, fmt.Errorf("config: line %d: expected key: value, got %q", i+1, trimmed)
+		}
+		line := i + 1
+		switch key {
+		case "budget":
+			n, aerr := strconv.Atoi(rest)
+			if aerr != nil {
+				return 0, fmt.Errorf("config: line %d: rework.budget: %w", line, aerr)
+			}
+			cfg.ReworkBudget = &n
+		case "max_rounds":
+			n, aerr := strconv.Atoi(rest)
+			if aerr != nil {
+				return 0, fmt.Errorf("config: line %d: rework.max_rounds: %w", line, aerr)
+			}
+			cfg.MaxReworkRounds = &n
+		default:
+			return 0, fmt.Errorf("config: line %d: unrecognized rework key %q", line, key)
+		}
+	}
+	return i - start, nil
+}
+
+// reviewBlockListFieldFor returns a pointer to cfg's field for one of
+// review:'s two list-shaped keys, or nil for any other key — deliberately
+// narrower than listFieldFor (which also matches "allow", not a review: key)
+// so a stray "allow:" under review: is the unrecognized-key error it should
+// be, not a silent write to cfg.Allow.
+func reviewBlockListFieldFor(cfg *Config, key string) *[]string {
+	switch key {
+	case "proof_required_paths":
+		return &cfg.ProofRequiredPaths
+	case "always_review_paths":
+		return &cfg.AlwaysReviewPaths
+	default:
+		return nil
+	}
+}
+
+// parseReviewBlock parses the indented body of a top-level `review:` key —
+// the gate/review cluster's canonical home, moved off phases.awaiting_review
+// (still accepted there as a deprecated form, see assignAwaitingReviewKey) so
+// an argus operation's config no longer lives on a worker permission phase.
+// start is the line after "review:"; headerIndent is review:'s own
+// indentation (always 0). An unrecognized subkey is a hard error, the same
+// treatment every other namespace here gives a typo. Returns how many lines
+// belong to the block, for the caller to skip past.
+func parseReviewBlock(cfg *Config, lines []string, start, headerIndent int) (consumed int, err error) {
+	i := start
+	for ; i < len(lines); i++ {
+		raw := lines[i]
+		trimmed := strings.TrimSpace(stripYAMLComment(raw))
+		if trimmed == "" {
+			continue
+		}
+		if indentOf(raw) <= headerIndent {
+			break
+		}
+		key, rest, ok := cutKeyValue(trimmed)
+		if !ok {
+			return 0, fmt.Errorf("config: line %d: expected key: value, got %q", i+1, trimmed)
+		}
+		line := i + 1
+		if dst := reviewBlockListFieldFor(cfg, key); dst != nil {
+			if rest != "" {
+				return 0, fmt.Errorf("config: line %d: %q expects a list on following indented lines, not an inline value", line, key)
+			}
+			items, lc, lerr := parseYAMLList(lines, i+1)
+			if lerr != nil {
+				return 0, lerr
+			}
+			*dst = items
+			i += lc
+			continue
+		}
+		value, uerr := unquoteYAML(rest)
+		if uerr != nil {
+			return 0, fmt.Errorf("config: line %d: bad value %q: %w", line, rest, uerr)
+		}
+		switch key {
+		case "gate_verify_command":
+			cfg.GateVerifyCommand = value
+		case "review_note":
+			cfg.ReviewNote = value
+		case "review_effort":
+			cfg.ReviewEffort = value
+		case "max_diff_lines":
+			n, aerr := strconv.Atoi(value)
+			if aerr != nil {
+				return 0, fmt.Errorf("config: line %d: max_diff_lines: %w", line, aerr)
+			}
+			cfg.MaxDiffLines = &n
+		default:
+			return 0, fmt.Errorf("config: line %d: unrecognized review key %q", line, key)
 		}
 	}
 	return i - start, nil
@@ -637,13 +795,21 @@ func parsePhaseSubBlock(cfg *Config, phase protocol.Phase, lines []string, start
 }
 
 // assignAwaitingReviewKey sets one gate/review cluster field
-// (awaitingReviewOnlyKeys) from inside phases.awaiting_review, reusing
-// listFieldFor/assignScalarField's own field dispatch — the same functions
-// that handle these keys' deprecated flat top-level form — so there is
-// exactly one place that knows how to parse each value, however it arrives.
-// consumed is how many extra lines a list-shaped key (proof_required_paths/
-// always_review_paths) read past line, for the caller to skip past.
+// (awaitingReviewOnlyKeys) from inside phases.awaiting_review — a deprecated
+// location now that review: is the canonical one (see parseReviewBlock) —
+// reusing listFieldFor/assignScalarField's own field dispatch, the same
+// functions that handle these keys' deprecated flat top-level form, so there
+// is exactly one place that knows how to parse each value, however it
+// arrives. Records the phases.awaiting_review.<key> -> review.<key>
+// deprecation on every call, since every awaitingReviewOnlyKeys entry is
+// deprecated at this location, unconditionally. consumed is how many extra
+// lines a list-shaped key (proof_required_paths/always_review_paths) read
+// past line, for the caller to skip past.
 func assignAwaitingReviewKey(cfg *Config, key, value string, lines []string, next, line int) (consumed int, err error) {
+	cfg.Deprecated = append(cfg.Deprecated, DeprecatedKeyUse{
+		Old: fmt.Sprintf("phases.awaiting_review.%s", key),
+		New: fmt.Sprintf("review.%s", key),
+	})
 	if dst := listFieldFor(cfg, key); dst != nil {
 		if value != "" {
 			return 0, fmt.Errorf("config: line %d: %q expects a list on following indented lines, not an inline value", line, key)
