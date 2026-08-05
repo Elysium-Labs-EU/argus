@@ -33,23 +33,48 @@ func TestVerifyTestsAcceptsGenuinePass(t *testing.T) {
 	}
 }
 
-// TestVerifyTestsJoinsCmdAndTarget is the regression for the gate silently
-// dropping Target when re-running a worker's claimed pass: "test -f" alone
-// (no path operand) always fails, so this only passes if the re-run actually
-// appends Target to Cmd — matching the go-tool-with-a-package-arg shape
-// (e.g. "go tool fieldalignment" + "./...") this field split exists for.
-func TestVerifyTestsJoinsCmdAndTarget(t *testing.T) {
+// TestVerifyTestsNeverAppendsTargetToCmd is the regression for the gate
+// fabricating a command the worker never wrote: Target is a descriptive
+// label (and, at most, a cwd hint — see status.go's TestRun.Target doc), not
+// an argument. Cmd here requires exactly one positional argument to pass;
+// with Target never appended, it receives zero and must fail — a prior
+// version that joined Cmd and Target into one command line would have
+// received one argument and incorrectly passed.
+func TestVerifyTestsNeverAppendsTargetToCmd(t *testing.T) {
 	wt := t.TempDir()
-	marker := filepath.Join(wt, "marker.txt")
-	if err := os.WriteFile(marker, []byte("x"), 0o600); err != nil {
+	tests := []protocol.TestRun{
+		{Cmd: `f() { [ "$#" -eq 1 ]; }; f`, Target: "marker.txt", Result: protocol.ResultPass},
+	}
+	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
+	if len(mismatches) != 1 {
+		t.Fatalf("mismatches = %v, want 1 entry — Target must never be appended to Cmd", mismatches)
+	}
+}
+
+// TestVerifyTestsFileTargetNotADirRunsCmdVerbatim is the acceptance case for
+// the issue this guards: a worker uses Target exactly as documented (a
+// descriptive label naming what Cmd exercises) — e.g. Cmd "docker buildx
+// build -f docker/Dockerfile .", Target "frontend/docker/Dockerfile" to
+// record which Dockerfile the build used. Target is a single token, isn't a
+// substring of Cmd, isn't comma-separated, and isn't a directory (it's a
+// file), so a prior version's fallback appended it as a second positional
+// path argument. Cmd here takes no arguments, so that append would inflate
+// $# and fail the re-run even though the worker's claimed pass was genuine.
+func TestVerifyTestsFileTargetNotADirRunsCmdVerbatim(t *testing.T) {
+	wt := t.TempDir()
+	dockerDir := filepath.Join(wt, "frontend", "docker")
+	if err := os.MkdirAll(dockerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dockerDir, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	tests := []protocol.TestRun{
-		{Cmd: "test -f", Target: "marker.txt", Result: protocol.ResultPass},
+		{Cmd: `f() { [ "$#" -eq 0 ]; }; f`, Target: "frontend/docker/Dockerfile", Result: protocol.ResultPass},
 	}
 	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
-		t.Fatalf("mismatches = %v, want none — re-run must join Cmd and Target, not run Cmd alone", mismatches)
+		t.Fatalf("mismatches = %v, want none — a file-valued Target must not be appended as a positional argument", mismatches)
 	}
 }
 
@@ -119,9 +144,9 @@ func TestVerifyTestsMakeTargetRunsFromTargetSubdirWhenItExists(t *testing.T) {
 
 // TestVerifyTestsSkipsRedundantTargetAlreadyInCmd is the regression for the
 // doubled-path failure: a worker sometimes folds the path into Cmd directly
-// and also repeats it in Target, and a naive join hands the tool the same
-// path twice. shellArgCount fails unless it receives exactly one argument, so
-// this only passes if the redundant Target is not appended a second time.
+// and also repeats it in Target. Cmd here fails unless it receives exactly
+// one argument, so this only passes if Target is never appended a second
+// time.
 func TestVerifyTestsSkipsRedundantTargetAlreadyInCmd(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
@@ -157,26 +182,26 @@ func TestVerifyTestsRunsFromTargetSubdirWhenItExists(t *testing.T) {
 	}
 }
 
-// TestVerifyTestsSplitsCommaSeparatedTargetIntoOneRunEach is the regression
-// for the multiple-positional-args failure: a worker's Target sometimes
-// lists several comma-separated files mirroring the brief's file list, which
-// a naive join hands to a tool as one command line with several positional
-// args even though the tool (like the real one this mirrors) only accepts a
-// single path. The check function here fails on anything but exactly one arg.
-func TestVerifyTestsSplitsCommaSeparatedTargetIntoOneRunEach(t *testing.T) {
+// TestVerifyTestsSkipsCommaSeparatedTarget is the regression for the
+// multiple-positional-args failure: a worker's Target sometimes lists
+// several comma-separated files mirroring the brief's file list. A prior
+// version split Target on commas and replayed Cmd once per piece as an
+// appended argument; the fix instead never appends Target at all, so Cmd
+// (which takes no arguments) must replay bare and pass exactly once.
+func TestVerifyTestsSkipsCommaSeparatedTarget(t *testing.T) {
 	wt := t.TempDir()
 	tests := []protocol.TestRun{
-		{Cmd: `f() { [ "$#" -eq 1 ] || exit 1; }; f`, Target: "a.txt, b.txt", Result: protocol.ResultPass},
+		{Cmd: `f() { [ "$#" -eq 0 ]; }; f`, Target: "a.txt, b.txt", Result: protocol.ResultPass},
 	}
 	mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
 	if len(mismatches) != 0 {
-		t.Fatalf("mismatches = %v, want none — each comma-separated target must be replayed as its own single-arg run", mismatches)
+		t.Fatalf("mismatches = %v, want none — a comma-separated target must not be split and appended", mismatches)
 	}
 }
 
 // TestVerifyTestsSkipsLabelShapedTarget is the regression for the gate
-// misreading a human-readable Target as a positional argument: Cmd here
-// takes no arguments, so appending the multi-word label would inflate $# and
+// misreading a human-readable, multi-word Target as a positional argument:
+// Cmd here takes no arguments, so appending the label would inflate $# and
 // fail the re-run even though the worker's claimed pass was genuine.
 func TestVerifyTestsSkipsLabelShapedTarget(t *testing.T) {
 	wt := t.TempDir()

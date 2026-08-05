@@ -68,11 +68,22 @@ piping the rest of the status as a JSON body on stdin, in exactly this shape:
       "files_touched": ["path/one.go", "path/two.go"],
       "plan": ["<todo item 1>", "<todo item 2>"],
       "tests": [
-        {"cmd": "make test", "target": "./internal/...", "result": "pass|fail|skipped"}
+        {"cmd": "go test ./internal/protocol/...", "target": "protocol package unit tests", "result": "pass|fail|skipped"}
       ],
       "diff_stat": {"files": 0, "insertions": 0, "deletions": 0}
     }
     JSON
+
+Each ` + "`tests[]`" + ` entry's ` + "`cmd`" + ` must be the exact, fully
+self-contained, copy-paste-runnable command you ran — the gate re-runs it
+byte-for-byte to reproduce a claimed pass, so a paraphrase or a command that
+depends on ` + "`target`" + ` being appended will replay wrong and fail even
+though your real run passed. ` + "`target`" + ` is only a descriptive label
+naming what ` + "`cmd`" + ` exercised (a package, a VM, a service, a
+Dockerfile) — it is never appended to ` + "`cmd`" + `. The one exception: if
+` + "`target`" + ` names a real subdirectory of your worktree (a monorepo
+with one Makefile/go.mod per module), the gate replays ` + "`cmd`" + ` from
+inside that directory instead of the worktree root.
 
 If a task asks you to prove a check catches a regression (deliberately break
 something, confirm it fails, then revert), report that broken run as its own
