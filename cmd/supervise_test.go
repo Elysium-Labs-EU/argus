@@ -68,32 +68,33 @@ func TestFoldIssueSourcesNoop(t *testing.T) {
 	}
 }
 
-// TestMergeFetchedBranchesPartialExplicitBranches pins issue #293: an explicit
+// TestMergeFetchedFieldPartialExplicitBranches pins issue #293: an explicit
 // --branches shorter than the total worker count (covering only earlier
 // manual --tasks workers) used to make foldIssueSources skip merging in the
 // fetched --issues/--jira-issues default branches entirely, because it only
 // merged when in.branches started out completely empty. The issue worker's
 // branch slot must still get its fetched default, not stay missing.
-func TestMergeFetchedBranchesPartialExplicitBranches(t *testing.T) {
+func TestMergeFetchedFieldPartialExplicitBranches(t *testing.T) {
 	branches := []string{"manual-branch"} // covers only the first (manual) worker
 	preCount := 1                         // one manual task already in in.tasks
-	got := mergeFetchedBranches(branches, preCount, []string{"widget-fix-issue-7"})
+	got := mergeFetchedField(branches, preCount, []string{"widget-fix-issue-7"})
 	want := []string{"manual-branch", "widget-fix-issue-7"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("mergeFetchedBranches(%v, %d, ...) = %v, want %v", branches, preCount, got, want)
+		t.Errorf("mergeFetchedField(%v, %d, ...) = %v, want %v", branches, preCount, got, want)
 	}
 }
 
-// TestMergeFetchedBranchesExplicitSlotWins covers the other half: an explicit
-// branch already occupying one of the fetched slots (e.g. --branches given
+// TestMergeFetchedFieldExplicitSlotWins covers the other half: an explicit
+// value already occupying one of the fetched slots (e.g. --branches given
 // for every worker up front, issue workers included) must win over the
-// fetched default at that same position.
-func TestMergeFetchedBranchesExplicitSlotWins(t *testing.T) {
+// fetched default at that same position. Applies identically to --labels
+// (see foldIssueSources), since mergeFetchedField's merge logic is shared.
+func TestMergeFetchedFieldExplicitSlotWins(t *testing.T) {
 	branches := []string{"manual-branch", "explicit-issue-branch"}
-	got := mergeFetchedBranches(branches, 1, []string{"widget-fix-issue-7"})
+	got := mergeFetchedField(branches, 1, []string{"widget-fix-issue-7"})
 	want := []string{"manual-branch", "explicit-issue-branch"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("mergeFetchedBranches(%v, 1, ...) = %v, want %v", branches, got, want)
+		t.Errorf("mergeFetchedField(%v, 1, ...) = %v, want %v", branches, got, want)
 	}
 }
 
@@ -113,13 +114,13 @@ func TestBuildWorkersIssueBranchSurvivesPartialBranches(t *testing.T) {
 	f := &fakeForge{issues: map[int]forge.Issue{
 		7: {Number: 7, Title: "t", Body: strings.Repeat("very long issue body ", 200)},
 	}}
-	fetchedTasks, fetchedBranches, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", in.repo, []int{7}, briefNoteOverride{})
+	fetchedTasks, fetchedBranches, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", in.repo, []int{7}, briefNoteOverride{})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
 	preCount := len(in.tasks)
 	in.tasks = append(in.tasks, fetchedTasks...)
-	in.branches = mergeFetchedBranches(in.branches, preCount, fetchedBranches)
+	in.branches = mergeFetchedField(in.branches, preCount, fetchedBranches)
 
 	client := fakeClient()
 	workers, err := buildWorkers(context.Background(), client, in)
@@ -134,6 +135,48 @@ func TestBuildWorkersIssueBranchSurvivesPartialBranches(t *testing.T) {
 	}
 	if want := "widget-fix-issue-7"; workers[1].Branch != want {
 		t.Errorf("issue worker branch = %q, want %q (fetched default, not a slug of the issue body)", workers[1].Branch, want)
+	}
+}
+
+// TestBuildWorkersIssueLabelSurvivesPartialLabels mirrors
+// TestBuildWorkersIssueBranchSurvivesPartialBranches for the label-by-key
+// fix: an explicit --labels covering only an earlier manual --tasks worker
+// must still leave the issue worker's label as its fetched bare ticket key
+// ("#7"), not empty — a caller scanning `herdr workspace list` needs the key
+// to find this worker, and an empty Label would fall through to BuildPlan's
+// task-derived default instead (the whole class of bug this fix closes).
+func TestBuildWorkersIssueLabelSurvivesPartialLabels(t *testing.T) {
+	in := &workerInput{
+		repo:     "/pinned",
+		tasks:    []string{"manual task for an earlier --tasks worker"},
+		branches: []string{"manual-branch"},
+		labels:   []string{"manual-label"},
+	}
+	f := &fakeForge{issues: map[int]forge.Issue{
+		7: {Number: 7, Title: "t", Body: "b"},
+	}}
+	fetchedTasks, fetchedBranches, fetchedLabels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", in.repo, []int{7}, briefNoteOverride{})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	preCount := len(in.tasks)
+	in.tasks = append(in.tasks, fetchedTasks...)
+	in.branches = mergeFetchedField(in.branches, preCount, fetchedBranches)
+	in.labels = mergeFetchedField(in.labels, preCount, fetchedLabels)
+
+	client := fakeClient()
+	workers, err := buildWorkers(context.Background(), client, in)
+	if err != nil {
+		t.Fatalf("buildWorkers: %v", err)
+	}
+	if len(workers) != 2 {
+		t.Fatalf("want 2 workers, got %d", len(workers))
+	}
+	if workers[0].Label != "manual-label" {
+		t.Errorf("manual worker label: got %q, want manual-label", workers[0].Label)
+	}
+	if want := "#7"; workers[1].Label != want {
+		t.Errorf("issue worker label = %q, want %q (bare fetched ticket key, not empty)", workers[1].Label, want)
 	}
 }
 
@@ -641,36 +684,36 @@ func TestRunSupervisionWorkerRuntimeWithKeySucceeds(t *testing.T) {
 	}
 }
 
-// TestParentWorkspaceDefaultPlacement pins down the original bugfix: with the
-// "workspace" placement default (unchanged current behavior), an explicit
-// --repo must still win outright over HERDR_WORKSPACE_ID auto-detection —
-// nesting there is a fallback for when --repo was left to default, not
-// something an explicit --repo layers on top of.
-func TestParentWorkspaceDefaultPlacement(t *testing.T) {
-	t.Setenv("HERDR_WORKSPACE_ID", "w1M")
-
-	for _, placement := range []string{workerPlacementWorkspace, ""} {
-		if got, err := parentWorkspace(placement, true); err != nil || got != "" {
-			t.Errorf("parentWorkspace(%q, repoExplicit=true) = (%q, %v), want (\"\", nil)", placement, got, err)
-		}
-		if got, err := parentWorkspace(placement, false); err != nil || got != "w1M" {
-			t.Errorf("parentWorkspace(%q, repoExplicit=false) = (%q, %v), want (\"w1M\", nil)", placement, got, err)
+// TestParentWorkspaceDefaultPlacementAlwaysTopLevel pins the fix: the
+// "workspace" placement default now always opens a fresh top-level
+// workspace, regardless of HERDR_WORKSPACE_ID. An earlier revision nested
+// here whenever --repo was left to default — a standing surprise that
+// contradicted the flag's own documented default (see parentWorkspace's
+// docs) — so this proves HERDR_WORKSPACE_ID being set no longer changes the
+// outcome at all for this placement.
+func TestParentWorkspaceDefaultPlacementAlwaysTopLevel(t *testing.T) {
+	for _, ws := range []string{"", "w1M"} {
+		t.Setenv("HERDR_WORKSPACE_ID", ws)
+		for _, placement := range []string{workerPlacementWorkspace, ""} {
+			if got, err := parentWorkspace(placement); err != nil || got != "" {
+				t.Errorf("parentWorkspace(%q) with HERDR_WORKSPACE_ID=%q = (%q, %v), want (\"\", nil)", placement, ws, got, err)
+			}
 		}
 	}
 }
 
 // TestParentWorkspaceTabPlacementForcesNesting proves --worker-placement tab
-// overrides the --repo-implies-no-nesting rule the default placement keeps:
-// this is the whole point of the flag existing (see parentWorkspace's docs).
+// is the only way to nest, unconditionally: this is the whole point of the
+// flag existing (see parentWorkspace's docs).
 func TestParentWorkspaceTabPlacementForcesNesting(t *testing.T) {
 	t.Setenv("HERDR_WORKSPACE_ID", "w1M")
 
-	got, err := parentWorkspace(workerPlacementTab, true)
+	got, err := parentWorkspace(workerPlacementTab)
 	if err != nil {
-		t.Fatalf("parentWorkspace(tab, repoExplicit=true): %v", err)
+		t.Fatalf("parentWorkspace(tab): %v", err)
 	}
 	if got != "w1M" {
-		t.Errorf("parentWorkspace(tab, repoExplicit=true) = %q, want w1M", got)
+		t.Errorf("parentWorkspace(tab) = %q, want w1M", got)
 	}
 }
 
@@ -680,7 +723,7 @@ func TestParentWorkspaceTabPlacementForcesNesting(t *testing.T) {
 func TestParentWorkspaceTabPlacementRequiresEnclosingWorkspace(t *testing.T) {
 	t.Setenv("HERDR_WORKSPACE_ID", "")
 
-	_, err := parentWorkspace(workerPlacementTab, false)
+	_, err := parentWorkspace(workerPlacementTab)
 	if err == nil {
 		t.Fatal("want an error when --worker-placement tab has no HERDR_WORKSPACE_ID to nest into")
 	}
@@ -694,7 +737,7 @@ func TestParentWorkspaceTabPlacementRequiresEnclosingWorkspace(t *testing.T) {
 // other mode: pane-per-worker needs herdr-side support that doesn't exist
 // yet (see the flag's help text).
 func TestParentWorkspacePanePlacementNotImplemented(t *testing.T) {
-	if _, err := parentWorkspace(workerPlacementPane, false); err == nil {
+	if _, err := parentWorkspace(workerPlacementPane); err == nil {
 		t.Fatal("want an error for --worker-placement pane")
 	}
 }
@@ -703,16 +746,19 @@ func TestParentWorkspacePanePlacementNotImplemented(t *testing.T) {
 // --worker-placement value is rejected rather than silently falling back to
 // some default.
 func TestParentWorkspaceUnknownPlacementErrors(t *testing.T) {
-	if _, err := parentWorkspace("bogus", false); err == nil {
+	if _, err := parentWorkspace("bogus"); err == nil {
 		t.Fatal("want an error for an unknown --worker-placement value")
 	}
 }
 
-// TestRunSupervisionSpawnRepoExplicitOmitsWorkspace exercises the actual
-// spawn path end to end: with HERDR_WORKSPACE_ID set (as in every herdr pane)
-// and repoExplicit true, the "worktree create" call argus sends to herdr must
-// never carry --workspace alongside --cwd.
-func TestRunSupervisionSpawnRepoExplicitOmitsWorkspace(t *testing.T) {
+// TestRunSupervisionSpawnDefaultPlacementOmitsWorkspaceFlag exercises the
+// actual spawn path end to end: with the default "workspace" placement and
+// HERDR_WORKSPACE_ID set (as in every herdr pane), the "worktree create" call
+// argus sends to herdr must never carry --workspace alongside --cwd —
+// WorktreeCreate has no such flag at all (see its doc comment), and with the
+// default placement no longer nesting (see parentWorkspace), no PaneMove
+// call should be attempted here either.
+func TestRunSupervisionSpawnDefaultPlacementOmitsWorkspaceFlag(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("HERDR_WORKSPACE_ID", "w1M")
 
@@ -736,16 +782,17 @@ func TestRunSupervisionSpawnRepoExplicitOmitsWorkspace(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
 
-	// The fake runner errors on every herdr call after "worktree create", so
-	// this always returns an error; only the captured args matter here.
-	_ = runSupervision(cmd, client, workers, &superviseOpts{base: "origin/main", repoExplicit: true})
+	// The fake runner errors on every herdr call after "worktree create" (the
+	// next real call is ensureFreshPane's AgentGet), so this always returns an
+	// error; only the captured worktree-create args matter here.
+	_ = runSupervision(cmd, client, workers, &superviseOpts{base: "origin/main"})
 
 	if len(worktreeCreateArgs) == 0 {
 		t.Fatal("worktree create was never called")
 	}
 	for _, a := range worktreeCreateArgs {
 		if a == "--workspace" {
-			t.Fatalf("worktree create got --workspace alongside --cwd with --repo explicit: %v", worktreeCreateArgs)
+			t.Fatalf("worktree create got --workspace alongside --cwd: %v", worktreeCreateArgs)
 		}
 	}
 }
@@ -971,6 +1018,55 @@ func TestSpawnWorkersNoWarningForCleanTasks(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Errorf("want no warning for a clean task list, got %q", buf.String())
+	}
+}
+
+// TestWarnMissingLabelsInDryRunWarnsForUnlabeledWorker covers the --tasks
+// case the fix targets: no --labels entry is a reasonable default (BuildPlan
+// falls back to the task/branch text), but --dry-run should say so up front
+// instead of the operator only discovering it in herdr's own workspace list
+// after the real run.
+func TestWarnMissingLabelsInDryRunWarnsForUnlabeledWorker(t *testing.T) {
+	var buf bytes.Buffer
+	workers := []supervisor.Worker{{Task: "t", Branch: "feat-x"}}
+	warnMissingLabelsInDryRun(&buf, true, false, workers)
+	if !strings.Contains(buf.String(), "feat-x") || !strings.Contains(buf.String(), "no --labels entry") {
+		t.Errorf("want a warning naming the branch, got %q", buf.String())
+	}
+}
+
+// TestWarnMissingLabelsInDryRunSilentWhenLabeled is the control: a worker
+// that already has a Label (explicit --labels, or the bare ticket key an
+// --issues/--jira-issues fetch sets — see foldIssueSources) produces no
+// warning at all.
+func TestWarnMissingLabelsInDryRunSilentWhenLabeled(t *testing.T) {
+	var buf bytes.Buffer
+	workers := []supervisor.Worker{{Task: "t", Branch: "feat-x", Label: "AP-1207"}}
+	warnMissingLabelsInDryRun(&buf, true, false, workers)
+	if buf.Len() != 0 {
+		t.Errorf("want no warning for a labeled worker, got %q", buf.String())
+	}
+}
+
+// TestWarnMissingLabelsInDryRunSkipsWhenNotDryRun proves the warning is
+// dry-run-only noise, not printed on a real spawn.
+func TestWarnMissingLabelsInDryRunSkipsWhenNotDryRun(t *testing.T) {
+	var buf bytes.Buffer
+	workers := []supervisor.Worker{{Task: "t", Branch: "feat-x"}}
+	warnMissingLabelsInDryRun(&buf, false, false, workers)
+	if buf.Len() != 0 {
+		t.Errorf("want no warning outside --dry-run, got %q", buf.String())
+	}
+}
+
+// TestWarnMissingLabelsInDryRunSkipsAttach proves --attach workers (never
+// spawned, so no herdr label is ever derived for them) are skipped outright.
+func TestWarnMissingLabelsInDryRunSkipsAttach(t *testing.T) {
+	var buf bytes.Buffer
+	workers := []supervisor.Worker{{Task: "t", Branch: "feat-x"}}
+	warnMissingLabelsInDryRun(&buf, true, true, workers)
+	if buf.Len() != 0 {
+		t.Errorf("want no warning for --attach workers, got %q", buf.String())
 	}
 }
 

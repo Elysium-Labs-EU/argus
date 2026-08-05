@@ -131,6 +131,7 @@ cannot be disabled by repo config.`,
 			if err != nil {
 				return err
 			}
+			warnMissingLabelsInDryRun(cmd.OutOrStdout(), dryRun, attach, workers)
 
 			// The main repo checkout's own .argus/config.yml (see
 			// internal/repoconfig) — read from the first resolved worker's
@@ -175,7 +176,7 @@ cannot be disabled by repo config.`,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewEffort: resolveReviewEffort(cmd.Flags().Changed("review-effort"), reviewEffort, &rc), reviewConcurrency: reviewConcurrency,
 				policy: policy, gateVerifyCommand: gateVerifyCommand, worktreeBootstrapCmd: worktreeBootstrapCommand,
-				allow: allow, repoAllow: rc.Allow, repoPhases: rc.Phases, credentialEnv: overrides, repoExplicit: repo != "",
+				allow: allow, repoAllow: rc.Allow, repoPhases: rc.Phases, credentialEnv: overrides,
 				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
 				reviewNote:      resolveReviewNote(cmd.Flags().Changed("review-note"), reviewNote, &rc),
 			})
@@ -218,7 +219,7 @@ cannot be disabled by repo config.`,
 	cmd.Flags().StringVar(&workspace, "workspace", "", "with --attach: attach to every herdr pane in this workspace id, using each pane's directory as a worktree")
 	cmd.Flags().StringSliceVar(&worktrees, "worktrees", nil, "with --attach: explicit worktree paths to watch (comma-separated)")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate each worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
-	cmd.Flags().StringVar(&workerPlacement, "worker-placement", workerPlacementWorkspace, "where a spawned worker's pane lands: workspace (default, each worker its own top-level herdr workspace) | tab (nest into HERDR_WORKSPACE_ID as a tab, even with --repo passed explicitly) | pane (not yet supported). Without this flag, this repo's .argus/config.yml worker_placement wins, then this default")
+	cmd.Flags().StringVar(&workerPlacement, "worker-placement", workerPlacementWorkspace, "where a spawned worker's pane lands: workspace (default, always a fresh top-level herdr workspace, regardless of --repo or HERDR_WORKSPACE_ID) | tab (nest into HERDR_WORKSPACE_ID as a tab) | pane (not yet supported). Without this flag, this repo's .argus/config.yml worker_placement wins, then this default. Before this flag's default meant nesting whenever --repo was left unset; the default now always means a top-level workspace, matching what it always said — pass --worker-placement tab if you relied on the old implicit nesting")
 	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist, on top of this repo's .argus/config.yml allow list if any (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a one-off run)")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host when fetching --issues: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
@@ -252,7 +253,6 @@ type superviseOpts struct {
 	dryRun               bool
 	noCredProxy          bool
 	review               bool
-	repoExplicit         bool
 }
 
 // --worker-placement values. workerPlacementPane is accepted so the flag's
@@ -278,15 +278,19 @@ const (
 // into, and silently falling back to a new top-level workspace would make an
 // explicit ask silently no-op.
 //
-// placement "workspace" (including the flag's default, "") keeps the
-// original auto-detect behavior: nesting only when --repo was left to
-// default, since that was the one case it was ever reachable in before this
-// flag existed, and changing that default's behavior out from under existing
-// callers is out of scope here.
-func parentWorkspace(placement string, repoExplicit bool) (string, error) {
-	ws := herdr.CurrentLocation().WorkspaceID
+// placement "workspace" (including the flag's default, "") always opens a
+// fresh top-level workspace, matching what the flag's own help text has
+// always documented. An earlier revision nested here whenever --repo was
+// left to default, coupled to HERDR_WORKSPACE_ID purely because that was the
+// one path this branch was ever reachable from before --worker-placement
+// existed — not a deliberate design, and a standing surprise for any caller
+// who omitted --repo from inside a herdr pane and got an unrequested tab
+// instead of the workspace the help text promised. Nesting now requires
+// --worker-placement tab, unconditionally.
+func parentWorkspace(placement string) (string, error) {
 	switch placement {
 	case workerPlacementTab:
+		ws := herdr.CurrentLocation().WorkspaceID
 		if ws == "" {
 			return "", &ui.UserError{
 				Err:  fmt.Errorf("--worker-placement tab requires HERDR_WORKSPACE_ID"),
@@ -300,10 +304,7 @@ func parentWorkspace(placement string, repoExplicit bool) (string, error) {
 			Hint: "use --worker-placement tab, or the workspace default; a pane-per-worker mode needs herdr-side support to target an already-split pane",
 		}
 	case workerPlacementWorkspace, "":
-		if repoExplicit {
-			return "", nil
-		}
-		return ws, nil
+		return "", nil
 	default:
 		return "", &ui.UserError{
 			Err:  fmt.Errorf("unknown --worker-placement %q", placement),
@@ -414,7 +415,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 	logger, closeLog := openRunLog(cmd, "supervise")
 	defer closeLog()
 
-	parentWS, err := parentWorkspace(o.workerPlacement, o.repoExplicit)
+	parentWS, err := parentWorkspace(o.workerPlacement)
 	if err != nil {
 		return err
 	}
@@ -748,16 +749,18 @@ func warnAnomalousTaskLineLengths(w io.Writer, path string, tasks []string) {
 }
 
 // foldIssueSources turns --issues and --jira-issues into worker briefs and
-// appends them to in.tasks/in.branches, so the operator never hand-writes a
-// task string for an issue that already has a title and body. Generated
-// branches merge into the positional slots the fetched tasks land at (see
-// mergeFetchedBranches), so an explicit --branches shorter than the total
-// worker count — e.g. covering earlier --tasks workers only — still leaves
-// the issue workers with their normal <repo>-fix-issue-N default instead of
-// falling through to defaultBranch's slug of the entire fetched task body.
-// Split out of spawnWorkers to keep each source's fetch-and-fold step
-// independently testable and readable. forgeKindFlag/forgeKindExplicit only
-// matter to the --issues path (see resolveIssueForgeKind).
+// appends them to in.tasks/in.branches/in.labels, so the operator never
+// hand-writes a task string for an issue that already has a title and body.
+// Generated branches and labels merge into the positional slots the fetched
+// tasks land at (see mergeFetchedField), so an explicit --branches/--labels
+// shorter than the total worker count — e.g. covering earlier --tasks
+// workers only — still leaves the issue workers with their normal
+// <repo>-fix-issue-N branch and bare ticket-key label instead of falling
+// through to defaultBranch's slug of the entire fetched task body, or (for
+// the label) BuildPlan's own task-derived fallback. Split out of
+// spawnWorkers to keep each source's fetch-and-fold step independently
+// testable and readable. forgeKindFlag/forgeKindExplicit only matter to the
+// --issues path (see resolveIssueForgeKind).
 func foldIssueSources(ctx context.Context, out io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool, bn briefNoteOverride) error {
 	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
@@ -765,49 +768,52 @@ func foldIssueSources(ctx context.Context, out io.Writer, in *workerInput, issue
 		if err != nil {
 			return err
 		}
-		fetched, brs, err := tasksFromIssues(ctx, out, in.repo, issues, credentialOverrides, kind, bn)
+		fetched, brs, lbls, err := tasksFromIssues(ctx, out, in.repo, issues, credentialOverrides, kind, bn)
 		if err != nil {
 			return err
 		}
 		preCount := len(in.tasks)
 		in.tasks = append(in.tasks, fetched...)
-		in.branches = mergeFetchedBranches(in.branches, preCount, brs)
+		in.branches = mergeFetchedField(in.branches, preCount, brs)
+		in.labels = mergeFetchedField(in.labels, preCount, lbls)
 	}
 	// --jira-issues works the same way but reads from Jira Cloud instead, since
 	// Jira is an issue tracker with no git-host concept to resolve from the
 	// origin remote.
 	if len(jiraIssues) > 0 {
-		fetched, brs, err := jiraTasksFromIssues(ctx, out, in.repo, jiraIssues, jiraSpawn, bn)
+		fetched, brs, lbls, err := jiraTasksFromIssues(ctx, out, in.repo, jiraIssues, jiraSpawn, bn)
 		if err != nil {
 			return err
 		}
 		preCount := len(in.tasks)
 		in.tasks = append(in.tasks, fetched...)
-		in.branches = mergeFetchedBranches(in.branches, preCount, brs)
+		in.branches = mergeFetchedField(in.branches, preCount, brs)
+		in.labels = mergeFetchedField(in.labels, preCount, lbls)
 	}
 	return nil
 }
 
-// mergeFetchedBranches merges a fetched issue source's default branches into
-// in.branches at the positional slots its tasks were just appended at
+// mergeFetchedField merges a fetched issue source's per-worker defaults
+// (branches or labels — the shape is identical for both) into existing at
+// the positional slots its tasks were just appended at
 // (preCount..preCount+len(fetched)), padding with "" as needed rather than
-// only merging when in.branches started out empty. That gate used to mean an
-// explicit --branches covering earlier --tasks workers (so len(in.branches)
+// only merging when existing started out empty. That gate used to mean an
+// explicit --branches covering earlier --tasks workers (so len(existing)
 // != 0) silently dropped the fetched defaults for every --issues/--jira-issues
 // worker after it, leaving buildWorkers to fall through to defaultBranch and
 // slug the entire fetched task body into a branch name. A slot that already
-// holds an explicit branch (from --branches covering that same position) is
-// left untouched, so explicit still wins position-for-position.
-func mergeFetchedBranches(branches []string, preCount int, fetched []string) []string {
-	for len(branches) < preCount+len(fetched) {
-		branches = append(branches, "")
+// holds an explicit value (from --branches/--labels covering that same
+// position) is left untouched, so explicit still wins position-for-position.
+func mergeFetchedField(existing []string, preCount int, fetched []string) []string {
+	for len(existing) < preCount+len(fetched) {
+		existing = append(existing, "")
 	}
-	for i, b := range fetched {
-		if j := preCount + i; branches[j] == "" {
-			branches[j] = b
+	for i, v := range fetched {
+		if j := preCount + i; existing[j] == "" {
+			existing[j] = v
 		}
 	}
-	return branches
+	return existing
 }
 
 // buildWorkers resolves the paired flag slices into concrete workers. In the
@@ -888,6 +894,27 @@ func buildWorkers(ctx context.Context, client herdr.Client, in *workerInput) ([]
 		})
 	}
 	return workers, nil
+}
+
+// warnMissingLabelsInDryRun prints a non-blocking --dry-run notice for every
+// spawn-mode worker with no Label: BuildPlan silently falls through to a
+// task-derived (or branch) label for these (see BuildPlan), so an operator
+// previewing the plan should see that coming rather than discover it only in
+// herdr's own workspace list after the real run. --issues/--jira-issues
+// workers always carry a Label by this point (see foldIssueSources), so this
+// only ever fires for a plain --tasks/--panes worker with no --labels entry
+// — exactly the case the warning is about. --attach workers are never
+// spawned, so no herdr label is ever derived for them; skipped outright.
+func warnMissingLabelsInDryRun(w io.Writer, dryRun, attach bool, workers []supervisor.Worker) {
+	if !dryRun || attach {
+		return
+	}
+	for _, wk := range workers {
+		if wk.Label == "" {
+			_, _ = fmt.Fprintf(w, "%s worker on branch %q has no --labels entry — its herdr workspace label will fall back to the task/branch text\n",
+				ui.LabelWarning.Render("○"), wk.Branch)
+		}
+	}
 }
 
 // paneCwds resolves the current directory of each named pane from herdr. It only
@@ -982,10 +1009,10 @@ func at(s []string, i int) string {
 // each issue and renders it into a worker brief. It works for GitHub, GitLab, and
 // Codeberg/Gitea-family hosts without extra flags, plus a self-hosted GitLab or
 // Gitea/Forgejo host when kind says which shape it is.
-func tasksFromIssues(ctx context.Context, out io.Writer, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind, bn briefNoteOverride) (tasks, branches []string, err error) {
+func tasksFromIssues(ctx context.Context, out io.Writer, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind, bn briefNoteOverride) (tasks, branches, labels []string, err error) {
 	f, owner, name, err := resolveForge(ctx, repoPath, credentialOverrides, kind)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	return issuesToTasks(ctx, out, f, owner, name, repoPath, issues, bn)
 }
@@ -1119,24 +1146,28 @@ func issueStatusPageConfigDefault(ctx context.Context, repoPath string) string {
 	return rc.StatusPage
 }
 
-// issuesToTasks renders each issue into a worker brief and a default branch
-// name. It takes the forge as a parameter so it is testable without a
-// network. repoPath resolves this repo's optional brief_note (see
-// repoBriefNote) — argus itself supplies no toolchain-flavored text of its
-// own when no config is present, only the fixed "don't commit" invariant.
-func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, name, repoPath string, issues []int, bn briefNoteOverride) (tasks, branches []string, err error) {
+// issuesToTasks renders each issue into a worker brief, a default branch
+// name, and a bare ticket-key label ("#<n>") — the herdr-visible identifier
+// a fleet operator scanning `herdr workspace list` can pick this worker out
+// by, instead of BuildPlan's task-derived (or branch) fallback. It takes the
+// forge as a parameter so it is testable without a network. repoPath
+// resolves this repo's optional brief_note (see repoBriefNote) — argus
+// itself supplies no toolchain-flavored text of its own when no config is
+// present, only the fixed "don't commit" invariant.
+func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, name, repoPath string, issues []int, bn briefNoteOverride) (tasks, branches, labels []string, err error) {
 	tail := fixedBriefTail(repoBriefNote(out, repoPath, bn))
 	for _, n := range issues {
 		iss, ferr := f.FetchIssue(ctx, owner, name, n)
 		if ferr != nil {
-			return nil, nil, fmt.Errorf("fetching issue #%d: %w", n, ferr)
+			return nil, nil, nil, fmt.Errorf("fetching issue #%d: %w", n, ferr)
 		}
 		tasks = append(tasks, fmt.Sprintf(
 			"Fix %s/%s issue #%d: %s\n\n%s\n\n%s",
 			owner, name, n, iss.Title, iss.Body, tail))
 		branches = append(branches, fmt.Sprintf("%s-fix-issue-%d", name, n))
+		labels = append(labels, fmt.Sprintf("#%d", n))
 	}
-	return tasks, branches, nil
+	return tasks, branches, labels, nil
 }
 
 // jiraIssueFetcher is the subset of *jira.Client that jiraIssuesToTasks needs
@@ -1160,10 +1191,10 @@ type jiraSpawnClient interface {
 // JIRA_API_TOKEN and fetches each key. Unlike tasksFromIssues this does not go
 // through internal/forge or the origin remote: Jira is an issue tracker, not a
 // git host, so there is no owner/repo or PR concept to resolve.
-func jiraTasksFromIssues(ctx context.Context, out io.Writer, repoPath string, keys []string, jiraSpawn jiraSpawnOpts, bn briefNoteOverride) (tasks, branches []string, err error) {
+func jiraTasksFromIssues(ctx context.Context, out io.Writer, repoPath string, keys []string, jiraSpawn jiraSpawnOpts, bn briefNoteOverride) (tasks, branches, labels []string, err error) {
 	c, err := jira.NewFromEnv(nil)
 	if err != nil {
-		return nil, nil, &ui.UserError{
+		return nil, nil, nil, &ui.UserError{
 			Err:  err,
 			Hint: "set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN, or write them to a JSON config file at $JIRA_CONFIG_FILE or ~/.argus/jira.json, to fetch --jira-issues",
 		}
@@ -1186,49 +1217,52 @@ func repoBranchPrefix(ctx context.Context, repoPath string) string {
 	return filepath.Base(repoPath)
 }
 
-// jiraIssuesToTasks renders each Jira issue into a worker brief and a default
-// branch name, mirroring issuesToTasks for the git-forge issue pipeline. It
-// also runs the optional pre-spawn Jira hook (jiraSpawn) before a worker for
-// that issue starts, so the ticket shows a claimed signal on the board for
-// its whole worker lifetime rather than only after ship's post-ship hook
-// runs (see postShipJira in cmd/ship.go). Unlike that post-ship hook, a
-// failure here aborts the spawn instead of degrading to a warning — the PR
-// doesn't exist yet, so there is still something to protect: an operator
-// finding out the claim never took before workers pile onto an
-// apparently-unclaimed ticket. repoPath resolves this repo's optional
-// brief_note the same way issuesToTasks does.
-func jiraIssuesToTasks(ctx context.Context, out io.Writer, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts, bn briefNoteOverride) (tasks, branches []string, err error) {
+// jiraIssuesToTasks renders each Jira issue into a worker brief, a default
+// branch name, and a bare ticket-key label (the Jira key itself, e.g.
+// "AP-1207" — already the bare form issuesToTasks has to synthesize with a
+// leading "#" for a numeric issue), mirroring issuesToTasks for the
+// git-forge issue pipeline. It also runs the optional pre-spawn Jira hook
+// (jiraSpawn) before a worker for that issue starts, so the ticket shows a
+// claimed signal on the board for its whole worker lifetime rather than only
+// after ship's post-ship hook runs (see postShipJira in cmd/ship.go). Unlike
+// that post-ship hook, a failure here aborts the spawn instead of degrading
+// to a warning — the PR doesn't exist yet, so there is still something to
+// protect: an operator finding out the claim never took before workers pile
+// onto an apparently-unclaimed ticket. repoPath resolves this repo's
+// optional brief_note the same way issuesToTasks does.
+func jiraIssuesToTasks(ctx context.Context, out io.Writer, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts, bn briefNoteOverride) (tasks, branches, labels []string, err error) {
 	tail := fixedBriefTail(repoBriefNote(out, repoPath, bn))
 
 	var callerAccountID string
 	if jiraSpawn.assignToCaller {
 		callerAccountID, err = c.Myself(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("resolving caller's Jira account for --jira-assign-on-spawn: %w", err)
+			return nil, nil, nil, fmt.Errorf("resolving caller's Jira account for --jira-assign-on-spawn: %w", err)
 		}
 	}
 
 	for _, key := range keys {
 		iss, ferr := c.FetchIssue(ctx, key)
 		if ferr != nil {
-			return nil, nil, fmt.Errorf("fetching jira issue %s: %w", key, ferr)
+			return nil, nil, nil, fmt.Errorf("fetching jira issue %s: %w", key, ferr)
 		}
 		if jiraSpawn.assignToCaller {
 			if aerr := c.Assign(ctx, key, callerAccountID); aerr != nil {
-				return nil, nil, fmt.Errorf("assigning jira issue %s to caller: %w", key, aerr)
+				return nil, nil, nil, fmt.Errorf("assigning jira issue %s to caller: %w", key, aerr)
 			}
 		}
 		if jiraSpawn.transition != "" {
 			if terr := c.Transition(ctx, key, jiraSpawn.transition); terr != nil {
-				return nil, nil, fmt.Errorf("transitioning jira issue %s to %q: %w", key, jiraSpawn.transition, terr)
+				return nil, nil, nil, fmt.Errorf("transitioning jira issue %s to %q: %w", key, jiraSpawn.transition, terr)
 			}
 		}
 		tasks = append(tasks, fmt.Sprintf(
 			"Fix Jira issue %s: %s\n\n%s\n\n%s",
 			key, iss.Title, iss.Body, tail))
 		branches = append(branches, fmt.Sprintf("%s-fix-%s", branchPrefix, strings.ToLower(key)))
+		labels = append(labels, key)
 	}
-	return tasks, branches, nil
+	return tasks, branches, labels, nil
 }
 
 // validBranch accepts only branch names safe to embed in a worktree path and a

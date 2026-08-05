@@ -244,6 +244,19 @@ func (c Client) WorkspaceClose(ctx context.Context, workspaceID string) error {
 	return err
 }
 
+// TabRename sets tab tabID's display label, wrapping `herdr tab rename
+// <tab_id> <label>` (confirmed directly against a real herdr: `tab rename`
+// takes the tab id followed by the label text and returns the updated
+// tab_info in the usual envelope). WorktreeCreate's own --label only ever
+// reaches the fresh top-level workspace it creates itself (see
+// WorktreeSpec.Label) — a pane PaneMove nests into an existing workspace as
+// a new tab keeps herdr's generic numeric default until this is called
+// separately, since the tab doesn't exist yet at WorktreeCreate time.
+func (c Client) TabRename(ctx context.Context, tabID, label string) error {
+	_, err := c.run(ctx, "tab", "rename", tabID, label)
+	return err
+}
+
 // AgentGet reports the agent herdr currently tracks for target (a pane id),
 // and whether one exists at all. ok is false with a nil error when herdr's
 // "agent_not_found" tells us the pane has no live agent — a bare shell
