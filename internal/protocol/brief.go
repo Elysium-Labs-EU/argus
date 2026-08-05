@@ -5,10 +5,12 @@ import (
 	"strings"
 )
 
-// AskGatedCommands are the Bash command prefixes settingsFor's Ask list gates
-// for every worker's worktree (internal/supervisor/agentadapter.go): argus
-// runs these itself once a report lands, rather than let a worker publish
-// argus's own commit before a verdict exists. Every brief-rendering function
+// AskGatedCommands are the Bash command prefixes a worker's brief warns it
+// never to run itself: argus runs these (git commit/push) once a report
+// lands, rather than let a worker publish argus's own commit before a verdict
+// exists. The worktree's own permission floor denies them outright
+// (internal/supervisor/agentadapter.go); this slice exists so the brief's
+// wording is driven from the same source. Every brief-rendering function
 // pulls its "do not run these yourself" sentence from this one slice via
 // NeverRunBrief instead of hand-authoring its own version of the warning —
 // otherwise a brief's wording and the worktree's actual permission grant are
