@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/forge"
+	"github.com/Elysium-Labs-EU/argus/internal/jira"
 	"github.com/Elysium-Labs-EU/argus/internal/permission"
 	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
@@ -35,9 +36,11 @@ Two checks are hard prerequisites — herdr and the worker launcher (claude) on
 PATH — because nothing runs without them; a hard failure exits non-zero. The
 rest are soft: a forge token (needed for ship and supervise --issues, not a
 basic run), the Bash allowlist entry argus needs to run without a per-call
-approval prompt, and this repo's .argus/config.yml. A soft failure prints a
-warning and its fix hint but does not change the exit code, so doctor stays
-green on a box that can supervise locally without ever opening a PR.`,
+approval prompt, this repo's .argus/config.yml, and — only once something is
+configured at all — Jira credential health (needed for --jira-issues, not a
+basic run; see docs/jira.md). A soft failure prints a warning and its fix
+hint but does not change the exit code, so doctor stays green on a box that
+can supervise locally without ever opening a PR.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runDoctor(cmd, &doctorArgs{repo: repo})
 		},
@@ -52,10 +55,12 @@ green on a box that can supervise locally without ever opening a PR.`,
 // or a git remote on the box. A nil boundary field falls back to the real
 // implementation in withDefaults; tests set them to drive each pass/fail path.
 type doctorArgs struct {
-	lookPath     func(string) (string, error)
-	resolveRepo  func(ctx context.Context, worktree string) (host, owner, name string, err error)
-	tokenForHost func(host string) string
-	repo         string
+	lookPath       func(string) (string, error)
+	resolveRepo    func(ctx context.Context, worktree string) (host, owner, name string, err error)
+	tokenForHost   func(host string) string
+	jiraConfigured func() bool
+	jiraNewClient  func() (jiraWhoamier, error)
+	repo           string
 }
 
 func (a *doctorArgs) withDefaults() {
@@ -77,6 +82,12 @@ func (a *doctorArgs) withDefaults() {
 			overrides, _ := resolveCredentialOverrides(nil)
 			return forge.TokenForHost(host, overrides)
 		}
+	}
+	if a.jiraConfigured == nil {
+		a.jiraConfigured = jira.Configured
+	}
+	if a.jiraNewClient == nil {
+		a.jiraNewClient = newJiraFromEnv
 	}
 }
 
@@ -106,6 +117,9 @@ func runDoctor(cmd *cobra.Command, a *doctorArgs) error {
 		checkForgeToken(cmd.Context(), a, repoRoot),
 		checkAllowlist(repoRoot),
 		checkRepoConfig(repoRoot),
+	}
+	if a.jiraConfigured() {
+		results = append(results, checkJiraCredential(cmd.Context(), a.jiraNewClient))
 	}
 
 	hardFailures := 0
@@ -173,6 +187,23 @@ func checkAllowlist(repoRoot string) checkResult {
 		r.ok = true
 		r.detail = strings.Join(matches, ", ")
 	}
+	return r
+}
+
+// checkJiraCredential reports Jira credential health via the same live GET
+// /rest/api/3/myself check `argus jira check` runs, using the shared
+// checkJiraCredentials classifier (see cmd/jira.go). Only called once
+// a.jiraConfigured() is true: doctor stays silent about a tool an operator
+// never set up, the same way checkForgeToken only fires once a git remote
+// resolves. Soft: Jira credentials are only needed for --jira-issues and the
+// post-spawn assign/transition hooks, not a basic run.
+func checkJiraCredential(ctx context.Context, newClient func() (jiraWhoamier, error)) checkResult {
+	r := checkResult{name: "Jira credentials", hint: "argus jira check"}
+	result := checkJiraCredentials(ctx, newClient)
+	if result.category == jiraOK {
+		r.ok = true
+	}
+	r.detail = result.detail
 	return r
 }
 
