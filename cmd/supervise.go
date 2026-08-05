@@ -184,7 +184,7 @@ cannot be disabled by repo config.`,
 	}
 
 	cmd.Flags().IntSliceVar(&issues, "issues", nil, "issue numbers to fetch from the repo's forge and turn into worker briefs (branch defaults to <repo>-fix-issue-<n>)")
-	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to <repo>-fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json")
+	cmd.Flags().StringSliceVar(&jiraIssues, "jira-issues", nil, "Jira issue keys (e.g. PROJ-123) to fetch and turn into worker briefs (branch defaults to <repo>-fix-<key>); requires JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, or a JSON config file (see jira.Config) at $JIRA_CONFIG_FILE or ~/.argus/jira.json — run `argus jira setup` to create one interactively, or `argus jira check` to validate one; "+jiraScopeSummary)
 	cmd.Flags().BoolVar(&jiraAssignOnSpawn, "jira-assign-on-spawn", false, "with --jira-issues: assign each issue to the caller (the account owning the configured Jira credentials) at spawn time, before the worker starts")
 	cmd.Flags().StringVar(&jiraTransitionOnSpawn, "jira-transition-on-spawn", "", "with --jira-issues: transition name or ID to move each issue to at spawn time (e.g. \"In Progress\"); unset skips this step")
 	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "task/issue per worker (comma-separated, CSV-quoted); drives worker count in the default mode. An unquoted comma inside one brief is read as another task, not an error — wrap the whole brief in CSV quotes (--tasks '\"brief, with a comma\"') or use --tasks-file for punctuation-heavy free text")

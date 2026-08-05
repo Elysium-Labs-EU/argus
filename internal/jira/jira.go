@@ -65,6 +65,56 @@ type Config struct {
 	BaseURL  string `json:"base_url"`
 	Email    string `json:"email"`
 	APIToken string `json:"api_token"`
+	// CreatedAt is an RFC3339 timestamp `argus jira setup` stamps at write
+	// time. It is a hint, not an authoritative expiry: Atlassian's API
+	// tokens don't expose a real expiry over the API, so this is only ever
+	// "how old is this credential", not "when does it die". Optional —
+	// hand-authored or pre-existing config files have no such field.
+	CreatedAt string `json:"created_at,omitempty"`
+}
+
+// Configured reports whether NewFromEnv has anything to try at all: either
+// the three JIRA_* env vars are all set, or a config file exists at the
+// resolved path (see configFilePath) — regardless of whether that file's
+// content actually parses. `argus doctor` uses this to decide whether to run
+// a live credential check at all, so it stays silent about a tool an
+// operator never set up, the same way its forge-token check only fires once
+// a git remote resolves to a host.
+func Configured() bool {
+	if os.Getenv("JIRA_BASE_URL") != "" && os.Getenv("JIRA_EMAIL") != "" && os.Getenv("JIRA_API_TOKEN") != "" {
+		return true
+	}
+	path, err := configFilePath()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
+	return err == nil
+}
+
+// DefaultConfigPath exports configFilePath for callers that need to know
+// where NewFromEnv will read from — and where `argus jira setup` should
+// write to — before any Client exists yet.
+func DefaultConfigPath() (string, error) {
+	return configFilePath()
+}
+
+// SaveConfig writes cfg to path as JSON with 0600 permissions, creating the
+// parent directory if needed. It is the only writer `argus jira setup` uses,
+// matching the 0600 credential-file convention internal/config.Save already
+// uses for ~/.argus/config.toml.
+func SaveConfig(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ") // #nosec G117 -- cfg *is* the on-disk credential file (0600, ~/.argus/jira.json); persisting api_token here is the point, not a secret-in-log leak
+	if err != nil {
+		return fmt.Errorf("encoding config: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("writing config file: %w", err)
+	}
+	return nil
 }
 
 // NewFromEnv builds a Client from JIRA_BASE_URL, JIRA_EMAIL, and
@@ -256,7 +306,7 @@ func (c *Client) FetchIssue(ctx context.Context, key string) (forge.Issue, error
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return forge.Issue{}, fmt.Errorf("jira returned %s: %s", resp.Status, apiMessage(body))
+		return forge.Issue{}, &APIError{StatusCode: resp.StatusCode, Prefix: "jira", Status: resp.Status, Message: apiMessage(body)}
 	}
 
 	var iss issueResponse
@@ -390,6 +440,40 @@ func (c *Client) Myself(ctx context.Context) (string, error) {
 	return me.AccountID, nil
 }
 
+// WhoamiResult is what `argus jira check` reports on success: the
+// authenticated account, and the api.atlassian.com/ex/jira/{cloudId} base
+// the client actually resolved and used — so tenant resolution (site ->
+// cloudId) is confirmed too, not just the credentials.
+type WhoamiResult struct {
+	AccountID   string
+	DisplayName string
+	APIBase     string
+}
+
+// Whoami performs the same live GET /rest/api/3/myself as Myself, through
+// the real resolve+auth+tenant path every other call already exercises, and
+// returns both the resolved account and the resolved API base. It exists
+// so `argus jira check` can validate credentials with the same honesty as an
+// actual dispatch — not a "--dry-run"-shaped check that only verifies fields
+// are non-empty.
+func (c *Client) Whoami(ctx context.Context) (WhoamiResult, error) {
+	base, err := c.resolvedBase(ctx)
+	if err != nil {
+		return WhoamiResult{}, err
+	}
+	var me struct {
+		AccountID   string `json:"accountId"`
+		DisplayName string `json:"displayName"`
+	}
+	if err := c.readJSON(ctx, base+"/rest/api/3/myself", &me); err != nil {
+		return WhoamiResult{}, err
+	}
+	if me.AccountID == "" {
+		return WhoamiResult{}, fmt.Errorf("myself response had no accountId")
+	}
+	return WhoamiResult{AccountID: me.AccountID, DisplayName: me.DisplayName, APIBase: base}, nil
+}
+
 // readJSON performs an authenticated GET and decodes a 2xx JSON body into
 // out, turning a non-2xx response into a clear error carrying Jira's message
 // (see apiMessage). It is the shared GET path Transition's lookup uses;
@@ -413,7 +497,7 @@ func (c *Client) readJSON(ctx context.Context, url string, out any) error {
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("GET %s returned %s: %s", url, resp.Status, apiMessage(body))
+		return &APIError{StatusCode: resp.StatusCode, Prefix: "GET " + url, Status: resp.Status, Message: apiMessage(body)}
 	}
 	return json.Unmarshal(body, out)
 }
@@ -442,7 +526,7 @@ func (c *Client) write(ctx context.Context, method, url string, payload []byte) 
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s returned %s: %s", method, url, resp.Status, apiMessage(body))
+		return &APIError{StatusCode: resp.StatusCode, Prefix: method + " " + url, Status: resp.Status, Message: apiMessage(body)}
 	}
 	return nil
 }
@@ -465,6 +549,37 @@ func numberFromKey(key string) int {
 		return 0
 	}
 	return n
+}
+
+// APIError is a non-2xx response from any Jira Cloud call, carrying the raw
+// status code and Jira's own error message so a caller — `argus jira check`,
+// or the credential-health check `argus doctor` folds in — can classify a
+// failure (dead token vs missing scope vs something else) instead of
+// re-parsing a formatted string. Error() is the same formatted text every
+// caller already saw before APIError existed, plus authHint's guidance on
+// 401/403.
+type APIError struct {
+	Prefix     string
+	Status     string
+	Message    string
+	StatusCode int
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("%s returned %s: %s%s", e.Prefix, e.Status, e.Message, authHint(e.StatusCode))
+}
+
+// authHint appends actionable guidance to a 401/403 APIError. It cannot
+// assert which cause applies — a dead token, a mismatched email, and a
+// missing scope all surface as the same bare status, and Jira's own error
+// body for an OAuth-shaped 401 is typically empty (see the package doc) — so
+// it lists the likely causes and points at the command that actually
+// distinguishes them via a live check.
+func authHint(status int) string {
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return ""
+	}
+	return " — likely cause: the API token is expired/revoked, the configured email doesn't match the token owner, or the token is missing a scope this call needs; run `argus jira check` to narrow it down"
 }
 
 // apiMessage pulls Jira's error-message shape out of a non-2xx body, falling

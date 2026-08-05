@@ -50,6 +50,7 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(workerCmd)
 	rootCmd.AddCommand(completionCmd)
+	rootCmd.AddCommand(jiraCmd)
 }
 
 // completionCmd is a package-level var (like configCmd, systemUpdateCmd, ...)

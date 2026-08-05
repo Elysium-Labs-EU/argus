@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/Elysium-Labs-EU/argus/internal/jira"
 )
 
 // runDoctorArgs drives runDoctor with a throwaway command carrying buf as its
@@ -58,10 +60,11 @@ func TestDoctorAllChecksPass(t *testing.T) {
 	writeRepoConfig(t, repo)
 
 	out, err := runDoctorArgs(t, &doctorArgs{
-		repo:         repo,
-		lookPath:     found,
-		resolveRepo:  func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
-		tokenForHost: func(string) string { return "tok" },
+		repo:           repo,
+		lookPath:       found,
+		resolveRepo:    func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
+		tokenForHost:   func(string) string { return "tok" },
+		jiraConfigured: func() bool { return false },
 	})
 	if err != nil {
 		t.Fatalf("expected no error when every check passes, got %v", err)
@@ -85,10 +88,11 @@ func TestDoctorHardFailBothBinariesMissing(t *testing.T) {
 	writeRepoConfig(t, repo)
 
 	out, err := runDoctorArgs(t, &doctorArgs{
-		repo:         repo,
-		lookPath:     notFound,
-		resolveRepo:  func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
-		tokenForHost: func(string) string { return "tok" },
+		repo:           repo,
+		lookPath:       notFound,
+		resolveRepo:    func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
+		tokenForHost:   func(string) string { return "tok" },
+		jiraConfigured: func() bool { return false },
 	})
 	if err == nil {
 		t.Fatal("expected a non-nil error when hard prerequisites fail")
@@ -115,8 +119,9 @@ func TestDoctorOneHardFail(t *testing.T) {
 			}
 			return "", errors.New("not found")
 		},
-		resolveRepo:  func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
-		tokenForHost: func(string) string { return "tok" },
+		resolveRepo:    func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
+		tokenForHost:   func(string) string { return "tok" },
+		jiraConfigured: func() bool { return false },
 	})
 	if err == nil || !strings.Contains(err.Error(), "1 hard prerequisite check(s) failed") {
 		t.Fatalf("expected exactly one hard failure, got %v", err)
@@ -134,7 +139,8 @@ func TestDoctorSoftFailuresKeepExitZero(t *testing.T) {
 		lookPath:    found,
 		resolveRepo: func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
 		// token empty: forge-token check fails soft.
-		tokenForHost: func(string) string { return "" },
+		tokenForHost:   func(string) string { return "" },
+		jiraConfigured: func() bool { return false },
 	})
 	if err != nil {
 		t.Fatalf("soft failures must not change the exit code, got %v", err)
@@ -158,7 +164,8 @@ func TestDoctorForgeTokenNoRemote(t *testing.T) {
 		resolveRepo: func(context.Context, string) (string, string, string, error) {
 			return "", "", "", errors.New("no git remote")
 		},
-		tokenForHost: func(string) string { return "tok" },
+		tokenForHost:   func(string) string { return "tok" },
+		jiraConfigured: func() bool { return false },
 	})
 	if err != nil {
 		t.Fatalf("a missing remote is a soft failure, got %v", err)
@@ -174,10 +181,11 @@ func TestDoctorAllowlistAndConfigPass(t *testing.T) {
 	writeRepoConfig(t, repo)
 
 	out, err := runDoctorArgs(t, &doctorArgs{
-		repo:         repo,
-		lookPath:     found,
-		resolveRepo:  func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
-		tokenForHost: func(string) string { return "tok" },
+		repo:           repo,
+		lookPath:       found,
+		resolveRepo:    func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
+		tokenForHost:   func(string) string { return "tok" },
+		jiraConfigured: func() bool { return false },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +222,7 @@ func TestDoctorAllowlistCheckReportsParseError(t *testing.T) {
 func TestDoctorDefaultsWired(t *testing.T) {
 	a := &doctorArgs{}
 	a.withDefaults()
-	if a.lookPath == nil || a.resolveRepo == nil || a.tokenForHost == nil {
+	if a.lookPath == nil || a.resolveRepo == nil || a.tokenForHost == nil || a.jiraConfigured == nil || a.jiraNewClient == nil {
 		t.Fatal("withDefaults left a boundary nil")
 	}
 	// A non-git temp dir makes the default resolveRepo return an error.
@@ -224,6 +232,97 @@ func TestDoctorDefaultsWired(t *testing.T) {
 	// An unknown host with no configured credential resolves to no token.
 	if tok := a.tokenForHost("doctor.invalid.example"); tok != "" {
 		t.Errorf("expected no token for an unknown host, got %q", tok)
+	}
+	// No JIRA_* env vars and no real ~/.argus/jira.json in a test environment.
+	t.Setenv("JIRA_BASE_URL", "")
+	t.Setenv("JIRA_EMAIL", "")
+	t.Setenv("JIRA_API_TOKEN", "")
+	t.Setenv("JIRA_CONFIG_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
+	if a.jiraConfigured() {
+		t.Error("expected the default jiraConfigured to report false with nothing set")
+	}
+}
+
+// TestDoctorJiraConfiguredHealthy covers a working Jira credential folding a
+// passing line into doctor's checklist.
+func TestDoctorJiraConfiguredHealthy(t *testing.T) {
+	repo := t.TempDir()
+	writeAllowlist(t, repo)
+	writeRepoConfig(t, repo)
+
+	out, err := runDoctorArgs(t, &doctorArgs{
+		repo:           repo,
+		lookPath:       found,
+		resolveRepo:    func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
+		tokenForHost:   func(string) string { return "tok" },
+		jiraConfigured: func() bool { return true },
+		jiraNewClient: func() (jiraWhoamier, error) {
+			return &fakeJiraWhoamier{who: jira.WhoamiResult{AccountID: "acc-1", DisplayName: "Dev", APIBase: "https://api.atlassian.com/ex/jira/cloud-1"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("a healthy Jira credential must not fail doctor, got %v", err)
+	}
+	if !strings.Contains(out, "✓ Jira credentials") || !strings.Contains(out, "Dev (acc-1)") {
+		t.Errorf("expected a passing Jira credentials line, got:\n%s", out)
+	}
+}
+
+// TestDoctorJiraConfiguredUnhealthy covers a dead Jira token folding a soft
+// (non-exit-code-changing) warning into doctor's checklist, pointing at
+// `argus jira check`.
+func TestDoctorJiraConfiguredUnhealthy(t *testing.T) {
+	repo := t.TempDir()
+	writeAllowlist(t, repo)
+	writeRepoConfig(t, repo)
+
+	out, err := runDoctorArgs(t, &doctorArgs{
+		repo:           repo,
+		lookPath:       found,
+		resolveRepo:    func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
+		tokenForHost:   func(string) string { return "tok" },
+		jiraConfigured: func() bool { return true },
+		jiraNewClient: func() (jiraWhoamier, error) {
+			return &fakeJiraWhoamier{err: &jira.APIError{StatusCode: 401, Prefix: "jira", Status: "401 Unauthorized"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("a dead Jira token is a soft failure, got %v", err)
+	}
+	if !strings.Contains(out, "! Jira credentials") {
+		t.Errorf("expected a soft warning for the dead Jira token, got:\n%s", out)
+	}
+	if !strings.Contains(out, "argus jira check") {
+		t.Errorf("expected the fix hint to point at argus jira check, got:\n%s", out)
+	}
+}
+
+// TestDoctorJiraNotConfiguredNoLine covers doctor staying silent about Jira
+// entirely when nothing is configured — no extra line, passing or failing.
+func TestDoctorJiraNotConfiguredNoLine(t *testing.T) {
+	repo := t.TempDir()
+	writeAllowlist(t, repo)
+	writeRepoConfig(t, repo)
+
+	out, err := runDoctorArgs(t, &doctorArgs{
+		repo:           repo,
+		lookPath:       found,
+		resolveRepo:    func(context.Context, string) (string, string, string, error) { return "github.com", "o", "n", nil },
+		tokenForHost:   func(string) string { return "tok" },
+		jiraConfigured: func() bool { return false },
+		jiraNewClient: func() (jiraWhoamier, error) {
+			t.Fatal("jiraNewClient must not be called when jiraConfigured is false")
+			return nil, errors.New("unreachable")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not a bare "Jira" substring check: t.TempDir() embeds this test's own
+	// name in its path, and that name itself contains "Jira" — checkRepoConfig's
+	// passing detail line below would false-positive on that.
+	if strings.Contains(out, "Jira credentials") {
+		t.Errorf("expected no Jira credentials line when unconfigured, got:\n%s", out)
 	}
 }
 

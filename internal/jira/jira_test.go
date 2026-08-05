@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -670,6 +671,20 @@ func TestFetchIssueTransportError(t *testing.T) {
 	}
 }
 
+// TestFetchIssueBuildRequestError covers FetchIssue's own request-building
+// failure — distinct from resolvedBase's internal request (see
+// TestFetchCloudIDBuildRequestError) — by using the already-resolved-base
+// escape hatch (see TestFetchIssueSkipsResolutionForAlreadyResolvedBaseURL)
+// so no network call is needed to reach it: a key with a control character
+// makes url.Parse fail when FetchIssue builds its own GET request.
+func TestFetchIssueBuildRequestError(t *testing.T) {
+	c := New(apiAtlassianPrefix+"cloud-1", "dev@example.com", "secret-token", nil)
+	_, err := c.FetchIssue(context.Background(), "BAD\nKEY")
+	if err == nil || !strings.Contains(err.Error(), "building request") {
+		t.Errorf("want build-request error, got %v", err)
+	}
+}
+
 func TestFetchIssueMalformedJSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
@@ -835,6 +850,262 @@ func TestNumberFromKey(t *testing.T) {
 		if got := numberFromKey(tc.key); got != tc.want {
 			t.Errorf("numberFromKey(%q) = %d, want %d", tc.key, got, tc.want)
 		}
+	}
+}
+
+// TestAPIErrorAuthHint covers a 401/403 APIError carrying actionable
+// guidance (a likely-cause list plus the literal `argus jira check`),
+// distinct from any other status code, which carries none.
+func TestAPIErrorAuthHint(t *testing.T) {
+	tests := []struct {
+		status   int
+		wantHint bool
+	}{
+		{http.StatusUnauthorized, true},
+		{http.StatusForbidden, true},
+		{http.StatusNotFound, false},
+		{http.StatusInternalServerError, false},
+	}
+	for _, tc := range tests {
+		e := &APIError{StatusCode: tc.status, Prefix: "jira", Status: "status", Message: "boom"}
+		got := e.Error()
+		hasHint := strings.Contains(got, "argus jira check")
+		if hasHint != tc.wantHint {
+			t.Errorf("status %d: Error() = %q, want hint=%v", tc.status, got, tc.wantHint)
+		}
+		if !strings.Contains(got, "boom") {
+			t.Errorf("status %d: Error() = %q, want original message preserved", tc.status, got)
+		}
+	}
+}
+
+// TestFetchIssueSurfaces401WithGuidance covers FetchIssue's own non-2xx path
+// (distinct from readJSON/write, which TestMyselfSurfacesAPIError and
+// TestCommentSurfacesAPIError already cover) wrapping a 401 as an *APIError
+// with the same actionable guidance.
+func TestFetchIssueSurfaces401WithGuidance(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	_, err := c.FetchIssue(context.Background(), "PROJ-1")
+	if err == nil || !strings.Contains(err.Error(), "argus jira check") {
+		t.Fatalf("want actionable 401 guidance, got %v", err)
+	}
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want 401", apiErr.StatusCode)
+	}
+}
+
+// TestWhoami covers the happy path: resolvedBase runs, GET /myself decodes
+// accountId and displayName, and the resolved API base comes back too.
+func TestWhoami(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/myself", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accountId":"acc-1","displayName":"Dev Person"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	who, err := c.Whoami(context.Background())
+	if err != nil {
+		t.Fatalf("Whoami: %v", err)
+	}
+	if who.AccountID != "acc-1" || who.DisplayName != "Dev Person" {
+		t.Errorf("who = %+v", who)
+	}
+	wantBase := srv.URL + "/ex/jira/" + fakeCloudID
+	if who.APIBase != wantBase {
+		t.Errorf("APIBase = %q, want %q", who.APIBase, wantBase)
+	}
+}
+
+// TestWhoamiSurfacesAPIError covers a 401 from /myself surfacing as a typed
+// *APIError callers can classify (see cmd/jira.go's checkJiraCredentials).
+func TestWhoamiSurfacesAPIError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/myself", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	_, err := c.Whoami(context.Background())
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want 401", apiErr.StatusCode)
+	}
+}
+
+// TestWhoamiSurfacesMissingAccountID mirrors TestMyselfSurfacesMissingAccountID.
+func TestWhoamiSurfacesMissingAccountID(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_edge/tenant_info", tenantInfoHandler(new(int)))
+	mux.HandleFunc("/ex/jira/"+fakeCloudID+"/rest/api/3/myself", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"displayName":"Dev"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	withMockAtlassianAPI(t, srv.URL)
+
+	c := New(srv.URL, "dev@example.com", "secret-token", nil)
+	if _, err := c.Whoami(context.Background()); err == nil {
+		t.Error("want error when myself response has no accountId")
+	}
+}
+
+// TestWhoamiResolvedBaseError covers Whoami returning early when
+// resolvedBase itself fails, same as Comment/Assign/Myself.
+func TestWhoamiResolvedBaseError(t *testing.T) {
+	c := New("http://example.com\n", "dev@example.com", "secret-token", nil)
+	_, err := c.Whoami(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "resolving cloud id") {
+		t.Errorf("want resolvedBase error, got %v", err)
+	}
+}
+
+// TestConfigured covers every combination Configured branches on: all three
+// env vars set, a config file present (valid or not — Configured doesn't
+// parse it), and neither.
+func TestConfigured(t *testing.T) {
+	t.Run("env vars set", func(t *testing.T) {
+		t.Setenv("JIRA_BASE_URL", "https://acme.atlassian.net")
+		t.Setenv("JIRA_EMAIL", "dev@example.com")
+		t.Setenv("JIRA_API_TOKEN", "secret")
+		noConfigFile(t)
+		if !Configured() {
+			t.Error("want Configured() true with all env vars set")
+		}
+	})
+
+	t.Run("config file present", func(t *testing.T) {
+		t.Setenv("JIRA_BASE_URL", "")
+		t.Setenv("JIRA_EMAIL", "")
+		t.Setenv("JIRA_API_TOKEN", "")
+		path := writeConfigFile(t, Config{BaseURL: "https://acme.atlassian.net", Email: "a@b.com", APIToken: "t"})
+		t.Setenv(configPathEnvVar, path)
+		if !Configured() {
+			t.Error("want Configured() true with a config file present")
+		}
+	})
+
+	t.Run("neither", func(t *testing.T) {
+		t.Setenv("JIRA_BASE_URL", "")
+		t.Setenv("JIRA_EMAIL", "")
+		t.Setenv("JIRA_API_TOKEN", "")
+		noConfigFile(t)
+		if Configured() {
+			t.Error("want Configured() false with nothing set")
+		}
+	})
+
+	// configFilePath itself failing (os.UserHomeDir with no $HOME) is a
+	// distinct branch from "no config file at the resolved path".
+	t.Run("configFilePath unresolvable", func(t *testing.T) {
+		t.Setenv("JIRA_BASE_URL", "")
+		t.Setenv("JIRA_EMAIL", "")
+		t.Setenv("JIRA_API_TOKEN", "")
+		t.Setenv(configPathEnvVar, "")
+		t.Setenv("HOME", "")
+		if Configured() {
+			t.Error("want Configured() false when configFilePath itself errors")
+		}
+	})
+}
+
+// TestSaveConfigAndDefaultConfigPath covers SaveConfig writing 0600 JSON that
+// round-trips through readConfigFile via NewFromEnv, and DefaultConfigPath
+// matching configFilePath.
+func TestSaveConfigAndDefaultConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jira.json")
+	t.Setenv(configPathEnvVar, path)
+	t.Setenv("JIRA_BASE_URL", "")
+	t.Setenv("JIRA_EMAIL", "")
+	t.Setenv("JIRA_API_TOKEN", "")
+
+	got, err := DefaultConfigPath()
+	if err != nil {
+		t.Fatalf("DefaultConfigPath: %v", err)
+	}
+	if got != path {
+		t.Errorf("DefaultConfigPath() = %q, want %q", got, path)
+	}
+
+	cfg := Config{BaseURL: "https://acme.atlassian.net", Email: "dev@example.com", APIToken: "secret-token", CreatedAt: "2026-08-05T00:00:00Z"}
+	if saveErr := SaveConfig(path, cfg); saveErr != nil {
+		t.Fatalf("SaveConfig: %v", saveErr)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat written config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("file mode = %o, want 0600", perm)
+	}
+
+	c, err := NewFromEnv(nil)
+	if err != nil {
+		t.Fatalf("NewFromEnv after SaveConfig: %v", err)
+	}
+	if c.baseURL != cfg.BaseURL || c.email != cfg.Email || c.token != cfg.APIToken {
+		t.Errorf("round-tripped client = %+v, want fields from %+v", c, cfg)
+	}
+}
+
+// TestSaveConfigMkdirAllError covers the parent-directory-creation failure:
+// a path component that already exists as a regular file can never become a
+// directory.
+func TestSaveConfigMkdirAllError(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("writing blocker file: %v", err)
+	}
+	path := filepath.Join(blocker, "jira.json")
+
+	err := SaveConfig(path, Config{BaseURL: "https://acme.atlassian.net", Email: "a@b.com", APIToken: "t"})
+	if err == nil || !strings.Contains(err.Error(), "creating config directory") {
+		t.Errorf("want a config-directory error, got %v", err)
+	}
+}
+
+// TestSaveConfigWriteFileError covers the write itself failing (a read-only
+// target directory) after MkdirAll has already succeeded (or no-opped, since
+// the directory exists).
+func TestSaveConfigWriteFileError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // let t.TempDir() clean up afterward
+	path := filepath.Join(dir, "jira.json")
+
+	err := SaveConfig(path, Config{BaseURL: "https://acme.atlassian.net", Email: "a@b.com", APIToken: "t"})
+	if err == nil || !strings.Contains(err.Error(), "writing config file") {
+		t.Errorf("want a write-config error, got %v", err)
 	}
 }
 

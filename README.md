@@ -162,6 +162,8 @@ argus fleet   --repo /path/to/project                                    # phase
 | `argus stats` | Aggregate run logs into escalation rate, review parse fail rate, and tokens per task |
 | `argus config check` | Check (and optionally fix) the Bash allow/deny entries argus itself needs |
 | `argus config set` | Persist a `credential.<name>` override so it doesn't need repeating via `--credential-env` |
+| `argus jira setup` | Interactively write `~/.argus/jira.json` and validate it |
+| `argus jira check` | Validate Jira credentials with a live `GET /rest/api/3/myself` |
 
 Pass `--debug` on `supervise`, `review`, `ship`, `rebase`, `rework`, `tend`, `worktree prune`, `worker answer`, or `worker steer` — the commands that actually write a run log — to tee that log to stderr as it runs. It always persists under `~/.argus/runs` either way.
 
@@ -171,7 +173,7 @@ Beyond the worker agent, argus plugs into:
 
 * **herdr**, the terminal multiplexer argus drives (through its CLI only) to host worker panes.
 * **Forges**, auto-detected from the git remote, for `ship` and `--issues`: GitHub, GitLab (`gitlab.com`), and Codeberg. A self hosted host (GitLab, Gitea, or Forgejo) can't be told apart by hostname alone, so it's refused until you pass `--forge gitlab` or `--forge gitea` (or set the `forge` key in `.argus/config.yml`).
-* **Jira Cloud.** `argus supervise --jira-issues PROJ-123,...` turns issue keys into worker briefs. Add `--jira-assign-on-spawn` and/or `--jira-transition-on-spawn "In Progress"` to claim each ticket for the caller and move it into an in-progress-shaped status before its worker starts. Needs `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`, or a `~/.argus/jira.json` config file.
+* **Jira Cloud.** `argus supervise --jira-issues PROJ-123,...` turns issue keys into worker briefs. Add `--jira-assign-on-spawn` and/or `--jira-transition-on-spawn "In Progress"` to claim each ticket for the caller and move it into an in-progress-shaped status before its worker starts. Needs `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`, or a `~/.argus/jira.json` config file — run `argus jira setup` to create one interactively (prints the token-creation link and minimal scopes) and `argus jira check` to validate one before a real dispatch hits it; a Jira line also folds into `argus doctor` once something is configured. See [`docs/jira.md`](docs/jira.md) for the exact minimal scopes and how a dead-token/missing-scope/misconfig 401 is told apart.
 * **A Claude Code skill.** A bundled skill at `.claude/skills/argus/` teaches Claude Code to drive `supervise`, `review`, and `ship` for you. Copy it to `~/.claude/skills/argus/` to use it in any repo.
 
 ## Development
