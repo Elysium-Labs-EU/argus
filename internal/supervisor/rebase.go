@@ -272,7 +272,7 @@ func VerifyPushLanded(ctx context.Context, worktree, branch string) error {
 
 // rebaseGitCommands is the single source for the exact git command lines a
 // rebase worker needs: RebaseBrief renders them into the worker's task text,
-// and RebaseExtraAllow grants exactly the same two strings as Bash
+// and RebasePhaseAllow grants exactly the same two strings as Bash
 // permission-allow entries, so the instruction and the permission can never
 // drift apart the way a rebase dispatch once drifted for git push itself
 // (see AskGatedCommands's doc comment).
@@ -324,23 +324,27 @@ decision only the supervisor can make.
 %s`, branch, base, cmds[0], cmds[1], protocol.NeverRunBrief(protocol.AskGatedCommands), protocol.WriterBrief("origin/"+base))
 }
 
-// RebaseExtraAllow returns the Bash permission-allow entries covering
-// exactly the git commands RebaseBrief instructs the rebase worker to run
-// for base — no more. dispatchRebaseWorker grants these into the worktree's
-// own extraAllow (see GrantExtraAllow) as part of the rebase dispatch
-// itself, rather than requiring an operator to hand-add them to a repo's
-// .argus/config.yml: this is argus's own operation, not something every
-// working-phase worker in the repo should be able to run. The rebase worker
-// starts in the empty/initial phase (status.json has no Phase until its
-// first report — see dispatchRebaseWorker), not "working", so this must
-// reach the worker independent of phase; extraAllow is exactly that
-// mechanism (see ResolvedAllowForPhase).
-func RebaseExtraAllow(base string) []string {
+// RebasePhaseAllow returns the Bash permission-allow entries the `rebase`
+// phase grants on top of the structural floor: exactly the git commands
+// RebaseBrief instructs the rebase worker to run for base, plus the repo's
+// own configured verify command (shipVerifyCommand, or gateVerifyCommand if
+// that's unset — either confirms the merge, so either is granted whenever
+// set) — no more. cmd/worker_check_tool.go's runWorkerCheckTool computes
+// this live, from the worktree's own status.Base and its repo's config, and
+// folds it into ResolvedAllowForPhase's extraAllow only while the worker is
+// actually reporting protocol.PhaseRebase — dispatchRebaseWorker itself
+// grants nothing statically, unlike the blanket extraAllow injection this
+// replaced, which reached every phase because the rebase worker used to run
+// in the ungoverned Phase(""), not a phase any resolution could target.
+func RebasePhaseAllow(base, shipVerifyCommand, gateVerifyCommand string) []string {
 	cmds := rebaseGitCommands(base)
-	return []string{
-		"Bash(" + cmds[0] + ")",
-		"Bash(" + cmds[1] + ")",
+	allow := []string{"Bash(" + cmds[0] + ")", "Bash(" + cmds[1] + ")"}
+	for _, verify := range []string{shipVerifyCommand, gateVerifyCommand} {
+		if verify != "" {
+			allow = append(allow, "Bash("+verify+")")
+		}
 	}
+	return dedupeStrings(allow)
 }
 
 // InvalidateStatus removes a worktree's status and verdict files, if present,
@@ -412,10 +416,13 @@ func isStale(path string, since time.Time) bool {
 // single-worker analog of the supervise watch loop, for commands like rebase
 // and rework that dispatch one worker.
 //
-// A status.json with an empty Phase is also treated as not yet seen: a real
-// worker report always sets Phase, so an empty one can only be the
-// dispatcher's own pre-dispatch bookkeeping write (recording Base right
-// after InvalidateStatus so a worker's later report can carry it forward)
+// A status.json with an empty Phase, or exactly protocol.PhaseRebase, is
+// also treated as not yet seen: a real worker report never sets either value
+// (PhaseRebase is dispatch-stamped only — see internal/protocol/transition.go
+// — and a worker report can only ever move out of it, never into or within
+// it), so both can only be dispatchRebaseWorker's own pre-dispatch
+// bookkeeping write (recording Base and Phase: PhaseRebase right after
+// InvalidateStatus so a worker's later report can carry Base forward)
 // landing inside staleTolerance of since and so not caught by the mtime
 // check above.
 //
@@ -437,7 +444,7 @@ func WaitForStatus(ctx context.Context, client herdr.Client, paneID, worktree st
 		case <-ctx.Done():
 			return last, hasFile, nil
 		case <-timer.C:
-			if s, err := protocol.Load(path); err == nil && s.Phase != "" && !isStale(path, since) {
+			if s, err := protocol.Load(path); err == nil && s.Phase != "" && s.Phase != protocol.PhaseRebase && !isStale(path, since) {
 				last = s
 				hasFile = true
 				if protocol.IsTerminal(s.Phase) {

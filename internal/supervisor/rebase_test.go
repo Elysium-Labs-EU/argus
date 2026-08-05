@@ -799,111 +799,63 @@ func TestRebaseBriefDoesNotInstructGitAdd(t *testing.T) {
 	}
 }
 
-// TestRebaseExtraAllowMatchesBriefCommands is the regression test for the
-// dontAsk-era rebase deadlock: the rebase worker's resolved allow set (the
-// structural floor plus RebaseExtraAllow, exactly as GrantExtraAllow injects
-// it — see dispatchRebaseWorker) must cover every git command RebaseBrief
-// actually instructs, in every phase a fresh rebase worker could report,
-// including the empty/initial phase status.json carries before the worker's
-// first report — and must never widen far enough to cover git commit/push.
-func TestRebaseExtraAllowMatchesBriefCommands(t *testing.T) {
+// TestRebasePhaseAllowMatchesBriefCommands is the regression test for the
+// dontAsk-era rebase deadlock: the rebase phase's own resolved allow set
+// (the structural floor plus RebasePhaseAllow, exactly as
+// cmd/worker_check_tool.go's runWorkerCheckTool folds it into extraAllow —
+// see loadCurrentPhase) must cover every git command RebaseBrief actually
+// instructs, plus the repo's configured verify command when set, and must
+// never widen far enough to cover git commit/push. Unlike the blanket
+// extraAllow injection this replaced, the grant only needs to be checked
+// against the rebase phase now — every other phase simply never receives it
+// (see TestResolvedAllowForPhase_RebaseGetsGitFetchMergeAndVerify).
+func TestRebasePhaseAllowMatchesBriefCommands(t *testing.T) {
 	base := "main"
 	brief := RebaseBrief("feat-x", base)
-	extra := RebaseExtraAllow(base)
+	extra := RebasePhaseAllow(base, "make ci", "")
+
+	if !slices.Contains(extra, "Bash(make ci)") {
+		t.Fatalf("RebasePhaseAllow with shipVerifyCommand set should grant it: %v", extra)
+	}
 
 	for _, cmd := range rebaseGitCommands(base) {
 		if !strings.Contains(brief, cmd) {
 			t.Fatalf("test setup: RebaseBrief does not actually instruct %q:\n%s", cmd, brief)
 		}
-		for _, phase := range append([]protocol.Phase{protocol.Phase("")}, protocol.ConfigurablePhases...) {
-			allow := ResolvedAllowForPhase(phase, nil, nil, extra)
-			if !AllowCoversCommand(allow, cmd) {
-				t.Errorf("phase %q: resolved allow set does not cover rebase-brief command %q: %v", phase, cmd, allow)
-			}
+		allow := ResolvedAllowForPhase(protocol.PhaseRebase, "/tmp/wt", nil, nil, extra)
+		if !AllowCoversCommand(allow, cmd) {
+			t.Errorf("resolved rebase allow set does not cover rebase-brief command %q: %v", cmd, allow)
 		}
 	}
 
-	for _, phase := range append([]protocol.Phase{protocol.Phase("")}, protocol.ConfigurablePhases...) {
-		allow := ResolvedAllowForPhase(phase, nil, nil, extra)
+	for _, phase := range allReportedAndRebasePhases {
+		allow := ResolvedAllowForPhase(phase, "/tmp/wt", nil, nil, extra)
 		for _, denied := range []string{"git commit -m x", "git push origin feat-x"} {
 			if AllowCoversCommand(allow, denied) {
-				t.Errorf("phase %q: RebaseExtraAllow must never cover %q, got allow %v", phase, denied, allow)
+				t.Errorf("phase %q: RebasePhaseAllow must never cover %q, got allow %v", phase, denied, allow)
 			}
 		}
 	}
 }
 
-// TestGrantExtraAllowUnionsWithExisting confirms GrantExtraAllow adds new
-// commands on top of a worktree's already-persisted extraAllow (e.g. the
-// operator --allow flags its original spawn wrote) instead of discarding
-// them, and dedupes rather than accumulating duplicates across repeated
-// calls (a rebase run dispatched more than once against the same worktree).
-func TestGrantExtraAllowUnionsWithExisting(t *testing.T) {
-	wt := t.TempDir()
-	if err := protocol.SaveExtraAllow(wt, []string{"Bash(npm ci*)"}); err != nil {
-		t.Fatalf("seeding existing extra allow: %v", err)
+// TestRebasePhaseAllowFallsBackToGateVerifyCommand confirms a repo that only
+// sets gate_verify_command (not ship.verify_command) still gets it granted —
+// either configured command confirms the merge, so either is honored.
+func TestRebasePhaseAllowFallsBackToGateVerifyCommand(t *testing.T) {
+	got := RebasePhaseAllow("main", "", "make test && make lint")
+	if !slices.Contains(got, "Bash(make test && make lint)") {
+		t.Errorf("RebasePhaseAllow should grant gateVerifyCommand when shipVerifyCommand is unset: %v", got)
 	}
+}
 
-	if err := GrantExtraAllow(wt, []string{"Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)"}); err != nil {
-		t.Fatalf("GrantExtraAllow: %v", err)
-	}
-	// Calling it again (as a second `argus rebase` invocation against the
-	// same worktree would) must not duplicate entries.
-	if err := GrantExtraAllow(wt, []string{"Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)"}); err != nil {
-		t.Fatalf("GrantExtraAllow (second call): %v", err)
-	}
-
-	got, err := protocol.LoadExtraAllow(wt)
-	if err != nil {
-		t.Fatalf("LoadExtraAllow: %v", err)
-	}
-	want := []string{"Bash(npm ci*)", "Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)"}
+// TestRebasePhaseAllowNoVerifyCommandConfigured confirms a repo with neither
+// verify command configured still gets exactly the two git commands — no
+// stray empty-string Bash entry.
+func TestRebasePhaseAllowNoVerifyCommandConfigured(t *testing.T) {
+	got := RebasePhaseAllow("main", "", "")
+	want := []string{"Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)"}
 	if !slices.Equal(got, want) {
-		t.Errorf("extraAllow after grant = %v, want %v", got, want)
-	}
-}
-
-// TestGrantExtraAllowLoadErrorPropagates confirms a failure reading the
-// worktree's existing extraAllow (a directory sitting at extra_allow.json's
-// path here, so protocol.LoadExtraAllow's os.ReadFile refuses) is wrapped
-// and returned rather than silently proceeding to overwrite it.
-func TestGrantExtraAllowLoadErrorPropagates(t *testing.T) {
-	wt := t.TempDir()
-	if err := os.MkdirAll(protocol.ExtraAllowPath(wt), 0o755); err != nil {
-		t.Fatalf("seeding unreadable extra_allow.json: %v", err)
-	}
-
-	err := GrantExtraAllow(wt, []string{"Bash(git fetch origin main)"})
-	if err == nil || !strings.Contains(err.Error(), "loading existing extra allow") {
-		t.Fatalf("want a wrapped load error, got %v", err)
-	}
-}
-
-// TestGrantExtraAllowSaveErrorPropagates confirms a failure persisting the
-// merged extraAllow is wrapped and returned. extra_allow.json's parent
-// directory is pre-created (so Load's os.ReadFile fails open with
-// fs.ErrNotExist on the still-missing file, same as any fresh worktree) but
-// stripped of write permission (so Save's own os.MkdirAll no-ops against the
-// already-existing dir while its os.WriteFile is refused) — the only way to
-// reach GrantExtraAllow's Save error branch without also tripping Load's,
-// since both read and write the same path.
-func TestGrantExtraAllowSaveErrorPropagates(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: permission bits aren't enforced, can't provoke a write-permission failure")
-	}
-	wt := t.TempDir()
-	dir := filepath.Join(wt, ".claude", "argus")
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o750) }) // let t.TempDir()'s own cleanup remove it
-
-	err := GrantExtraAllow(wt, []string{"Bash(git fetch origin main)"})
-	if err == nil || !strings.Contains(err.Error(), "granting") {
-		t.Fatalf("want a wrapped save error, got %v", err)
+		t.Errorf("RebasePhaseAllow with no verify command = %v, want %v", got, want)
 	}
 }
 

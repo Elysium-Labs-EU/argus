@@ -21,7 +21,7 @@ import (
 var noAllow []string
 
 func TestEvaluateToolGate(t *testing.T) {
-	floorAllow := supervisor.ResolvedAllowForPhase(protocol.PhasePlanning, nil, nil, nil)
+	floorAllow := supervisor.ResolvedAllowForPhase(protocol.PhasePlanning, "/tmp/wt", nil, nil, nil)
 
 	if _, blocked := evaluateToolGate("git commit -m foo", protocol.PhasePlanning, protocol.DeniedInPhase(protocol.PhasePlanning), noAllow); !blocked {
 		t.Error("evaluateToolGate(git commit, planning) = not blocked, want blocked")
@@ -94,7 +94,7 @@ func TestEvaluateToolGate_AllowScoping(t *testing.T) {
 	// listed as an alternative, so it reaches for `make ci`/`make build`
 	// instead of concluding make is denied too and self-blocking — the exact
 	// wasted-round failure this fixes.
-	makeOnlyAllow := supervisor.ResolvedAllowForPhase(protocol.PhaseWorking, nil, []string{"Bash(make *)"}, nil)
+	makeOnlyAllow := supervisor.ResolvedAllowForPhase(protocol.PhaseWorking, "/tmp/wt", nil, []string{"Bash(make *)"}, nil)
 	goDeniedReason, blocked := evaluateToolGate("go build ./...", protocol.PhaseWorking, denied, makeOnlyAllow)
 	if !blocked {
 		t.Error("evaluateToolGate(go build, working, make-only allow) = not blocked, want blocked")
@@ -104,7 +104,7 @@ func TestEvaluateToolGate_AllowScoping(t *testing.T) {
 	}
 
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
-	workingAllow := supervisor.ResolvedAllowForPhase(protocol.PhaseWorking, project, nil, nil)
+	workingAllow := supervisor.ResolvedAllowForPhase(protocol.PhaseWorking, "/tmp/wt", project, nil, nil)
 	if _, blocked := evaluateToolGate("go test ./...", protocol.PhaseWorking, denied, workingAllow); blocked {
 		t.Error("evaluateToolGate(go test, working, phases.working.allow) = blocked, want not blocked")
 	}
@@ -113,7 +113,7 @@ func TestEvaluateToolGate_AllowScoping(t *testing.T) {
 	// not carry the working-only entry along — the caller (runWorkerCheckTool)
 	// is what keeps a live check phase-scoped, by always resolving allow
 	// against the worker's *current* phase, never a stale or unrelated one.
-	planningAllow := supervisor.ResolvedAllowForPhase(protocol.PhasePlanning, project, nil, nil)
+	planningAllow := supervisor.ResolvedAllowForPhase(protocol.PhasePlanning, "/tmp/wt", project, nil, nil)
 	if _, blocked := evaluateToolGate("go test ./...", protocol.PhasePlanning, protocol.DeniedInPhase(protocol.PhasePlanning), planningAllow); !blocked {
 		t.Error("evaluateToolGate(go test, planning, phases.working.allow only) = not blocked, want blocked (must not leak across phases)")
 	}
@@ -182,16 +182,43 @@ func TestRunWorkerCheckTool(t *testing.T) {
 		}
 	})
 
-	t.Run("passes when no status.json yet", func(t *testing.T) {
+	t.Run("no status.json yet resolves as planning, not a fail-open blind spot", func(t *testing.T) {
 		exitCode = 0
 		wt := newWorktree(t, "")
+		// git commit is denied in every phase, including planning — a missing
+		// status.json must not fail open the way Phase("") used to.
 		stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":"git commit -m x"}}`, wt))
 		var stderr bytes.Buffer
 		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
 			t.Fatalf("runWorkerCheckTool: %v", err)
 		}
+		if exitCode != 2 {
+			t.Errorf("exit code = %d, want 2 — no status.json resolves as planning, and planning still denies commit/push", exitCode)
+		}
+
+		exitCode = 0
+		// A command outside the structural floor (and no repo config to grant
+		// it) must also be denied, the same as an explicit planning report —
+		// not silently allowed because the file happens to be missing.
+		stdin = strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":"npm publish"}}`, wt))
+		stderr.Reset()
+		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+			t.Fatalf("runWorkerCheckTool: %v", err)
+		}
+		if exitCode != 2 {
+			t.Errorf("exit code = %d, want 2 — no status.json resolves as planning, which never grants npm publish", exitCode)
+		}
+
+		exitCode = 0
+		// The structural floor itself must still resolve — a missing
+		// status.json is planning, not zero enforcement in either direction.
+		stdin = strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":"git status"}}`, wt))
+		stderr.Reset()
+		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+			t.Fatalf("runWorkerCheckTool: %v", err)
+		}
 		if exitCode != 0 {
-			t.Errorf("exit code = %d, want 0", exitCode)
+			t.Errorf("exit code = %d, want 0 — git status is in the all-phase structural floor", exitCode)
 		}
 	})
 
@@ -264,14 +291,16 @@ func TestRunWorkerCheckTool(t *testing.T) {
 // real PreToolUse hook entrypoint (runWorkerCheckTool, the exact function
 // `argus worker check-tool` runs) against a worktree shaped exactly like a
 // freshly dispatched rebase worker — no .argus/config.yml (a default,
-// unmigrated repo, so the operator never hand-added anything), status.json
-// with no Phase set (the empty/initial phase dispatchRebaseWorker leaves a
-// worktree in before the worker's first report), and extraAllow persisted
-// via the real supervisor.GrantExtraAllow(worktree, supervisor.RebaseExtraAllow(base))
-// call dispatchRebaseWorker itself makes. It confirms both of RebaseBrief's
-// instructed git commands pass, git commit/push stay denied, and the
-// structural floor's git ls-files entry (every worker brief's shared
-// diff_stat instruction) also passes.
+// unmigrated repo, so the operator never hand-added anything) and
+// status.json stamped Phase: PhaseRebase with Base set, exactly as
+// dispatchRebaseWorker now leaves a worktree before the worker's first
+// report. Unlike the mechanism this replaced, no extraAllow is persisted at
+// all — runWorkerCheckTool computes the grant live, from cur.Base, every
+// call. It confirms both of RebaseBrief's instructed git commands pass, git
+// commit/push stay denied, the structural floor's git ls-files entry (every
+// worker brief's shared diff_stat instruction) also passes, and — since
+// rebase is excluded from mutationPhases — Edit/Write is still denied even
+// though the worker is actively resolving a conflict.
 func TestRunWorkerCheckToolRebaseDispatchAllowsFetchMergeDeniesCommitPush(t *testing.T) {
 	origExit := osExit
 	t.Cleanup(func() { osExit = origExit })
@@ -282,11 +311,8 @@ func TestRunWorkerCheckToolRebaseDispatchAllowsFetchMergeDeniesCommitPush(t *tes
 	initGitDirAt(t, repo)
 	// No repoconfig.Save call: this repo's .argus/config.yml stays entirely
 	// absent, the default/unmigrated state the acceptance criteria require.
-	if err := protocol.Write(protocol.StatusPath(repo), &protocol.Status{Base: "main"}); err != nil {
-		t.Fatalf("seeding empty-phase status: %v", err)
-	}
-	if err := supervisor.GrantExtraAllow(repo, supervisor.RebaseExtraAllow("main")); err != nil {
-		t.Fatalf("GrantExtraAllow: %v", err)
+	if err := protocol.Write(protocol.StatusPath(repo), &protocol.Status{Base: "main", Phase: protocol.PhaseRebase}); err != nil {
+		t.Fatalf("seeding rebase-phase status: %v", err)
 	}
 
 	run := func(t *testing.T, cmd string) int {
@@ -310,17 +336,111 @@ func TestRunWorkerCheckToolRebaseDispatchAllowsFetchMergeDeniesCommitPush(t *tes
 			t.Errorf("cmd %q: exit code = %d, want 2 (denied — argus ship commits/pushes, not the worker)", cmd, got)
 		}
 	}
+
+	exitCode = 0
+	stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_name":"Edit","tool_input":{"file_path":"conflict.go"}}`, repo))
+	var stderr bytes.Buffer
+	if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+		t.Fatalf("runWorkerCheckTool(Edit): %v", err)
+	}
+	if exitCode != 2 {
+		t.Errorf("Edit during rebase: exit code = %d, want 2 — rebase is not a mutation phase (resolution happens via git merge, not the Edit tool)", exitCode)
+	}
 }
 
-func TestLoadProjectPolicy(t *testing.T) {
-	t.Run("not a git repo fails open to zero values", func(t *testing.T) {
-		phases, allow := loadProjectPolicy(context.Background(), t.TempDir())
-		if phases != nil || allow != nil {
-			t.Errorf("loadProjectPolicy(non-git dir) = (%v, %v), want (nil, nil)", phases, allow)
+// TestRunWorkerCheckToolRebaseDispatchGrantsConfiguredVerifyCommand confirms
+// the rebase phase also grants whichever of the repo's ship_verify_command/
+// gate_verify_command is configured, so the worker can actually confirm the
+// merge RebaseBrief instructs it to re-verify — falling back to
+// gate_verify_command when ship_verify_command is unset.
+func TestRunWorkerCheckToolRebaseDispatchGrantsConfiguredVerifyCommand(t *testing.T) {
+	origExit := osExit
+	t.Cleanup(func() { osExit = origExit })
+	var exitCode int
+	osExit = func(code int) { exitCode = code }
+
+	repo := t.TempDir()
+	initGitDirAt(t, repo)
+	if err := repoconfig.Save(repoconfig.Path(repo), &repoconfig.Config{
+		Phases: protocol.PhaseConfig{protocol.PhaseAwaitingReview: {}},
+	}); err != nil {
+		t.Fatalf("Save config: %v", err)
+	}
+	// Set gate_verify_command directly, since repoconfig.Save's encoder only
+	// writes it under phases.awaiting_review — this test only cares that
+	// runWorkerCheckTool reads it back and grants it during rebase.
+	cfg, err := repoconfig.Load(repoconfig.Path(repo))
+	if err != nil {
+		t.Fatalf("Load config: %v", err)
+	}
+	cfg.GateVerifyCommand = "make ci"
+	if err := repoconfig.Save(repoconfig.Path(repo), &cfg); err != nil {
+		t.Fatalf("Save config with gate_verify_command: %v", err)
+	}
+	if err := protocol.Write(protocol.StatusPath(repo), &protocol.Status{Base: "main", Phase: protocol.PhaseRebase}); err != nil {
+		t.Fatalf("seeding rebase-phase status: %v", err)
+	}
+
+	stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":"make ci"}}`, repo))
+	var stderr bytes.Buffer
+	if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+		t.Fatalf("runWorkerCheckTool: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("exit code = %d, want 0 — the rebase phase should grant the repo's configured gate_verify_command: %s", exitCode, stderr.String())
+	}
+}
+
+// TestRunWorkerCheckToolMutationGate exercises the Edit/Write live gate
+// directly: mutation is denied outside working/self_test and allowed inside
+// them, regardless of what the static settings.local.json Allow list — which
+// can't itself narrow by phase — says.
+func TestRunWorkerCheckToolMutationGate(t *testing.T) {
+	origExit := osExit
+	t.Cleanup(func() { osExit = origExit })
+	var exitCode int
+	osExit = func(code int) { exitCode = code }
+
+	run := func(t *testing.T, phase protocol.Phase, toolName string) int {
+		t.Helper()
+		wt := t.TempDir()
+		if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Phase: phase}); err != nil {
+			t.Fatalf("writing status: %v", err)
+		}
+		exitCode = 0
+		stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_name":%q,"tool_input":{"file_path":"x.go"}}`, wt, toolName))
+		var stderr bytes.Buffer
+		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+			t.Fatalf("runWorkerCheckTool: %v", err)
+		}
+		return exitCode
+	}
+
+	denyPhases := []protocol.Phase{protocol.PhasePlanning, protocol.PhaseAwaitingReview, protocol.PhaseBlocked, protocol.PhaseRebase}
+	allowPhases := []protocol.Phase{protocol.PhaseWorking, protocol.PhaseSelfTest}
+	for _, tool := range []string{"Edit", "Write"} {
+		for _, p := range denyPhases {
+			if got := run(t, p, tool); got != 2 {
+				t.Errorf("%s during %q: exit code = %d, want 2", tool, p, got)
+			}
+		}
+		for _, p := range allowPhases {
+			if got := run(t, p, tool); got != 0 {
+				t.Errorf("%s during %q: exit code = %d, want 0", tool, p, got)
+			}
+		}
+	}
+}
+
+func TestLoadProjectConfig(t *testing.T) {
+	t.Run("not a git repo fails open to a zero Config", func(t *testing.T) {
+		cfg := loadProjectConfig(context.Background(), t.TempDir())
+		if cfg.Phases != nil || cfg.Allow != nil {
+			t.Errorf("loadProjectConfig(non-git dir) = %+v, want a zero Config", cfg)
 		}
 	})
 
-	t.Run("malformed config.yml fails open to zero values", func(t *testing.T) {
+	t.Run("malformed config.yml fails open to a zero Config", func(t *testing.T) {
 		repo := t.TempDir()
 		initGitDirAt(t, repo)
 		if err := os.MkdirAll(filepath.Dir(repoconfig.Path(repo)), 0o755); err != nil {
@@ -329,27 +449,31 @@ func TestLoadProjectPolicy(t *testing.T) {
 		if err := os.WriteFile(repoconfig.Path(repo), []byte("not: [valid\nallow"), 0o600); err != nil {
 			t.Fatalf("seeding malformed config: %v", err)
 		}
-		phases, allow := loadProjectPolicy(context.Background(), repo)
-		if phases != nil || allow != nil {
-			t.Errorf("loadProjectPolicy(malformed config) = (%v, %v), want (nil, nil)", phases, allow)
+		cfg := loadProjectConfig(context.Background(), repo)
+		if cfg.Phases != nil || cfg.Allow != nil {
+			t.Errorf("loadProjectConfig(malformed config) = %+v, want a zero Config", cfg)
 		}
 	})
 
-	t.Run("valid config resolves phases and allow", func(t *testing.T) {
+	t.Run("valid config resolves phases, allow, and verify commands", func(t *testing.T) {
 		repo := t.TempDir()
 		initGitDirAt(t, repo)
 		if err := repoconfig.Save(repoconfig.Path(repo), &repoconfig.Config{
-			Allow:  []string{"Bash(make *)"},
-			Phases: protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}},
+			Allow:             []string{"Bash(make *)"},
+			Phases:            protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}},
+			ShipVerifyCommand: "make ci",
 		}); err != nil {
 			t.Fatalf("Save config: %v", err)
 		}
-		phases, allow := loadProjectPolicy(context.Background(), repo)
-		if len(allow) != 1 || allow[0] != "Bash(make *)" {
-			t.Errorf("allow = %v, want the configured top-level allow", allow)
+		cfg := loadProjectConfig(context.Background(), repo)
+		if len(cfg.Allow) != 1 || cfg.Allow[0] != "Bash(make *)" {
+			t.Errorf("Allow = %v, want the configured top-level allow", cfg.Allow)
 		}
-		if got := phases[protocol.PhaseWorking].Allow; len(got) != 1 || got[0] != "Bash(go test*)" {
-			t.Errorf("phases.working.allow = %v, want the configured entry", got)
+		if got := cfg.Phases[protocol.PhaseWorking].Allow; len(got) != 1 || got[0] != "Bash(go test*)" {
+			t.Errorf("Phases[working].Allow = %v, want the configured entry", got)
+		}
+		if cfg.ShipVerifyCommand != "make ci" {
+			t.Errorf("ShipVerifyCommand = %q, want %q", cfg.ShipVerifyCommand, "make ci")
 		}
 	})
 }

@@ -690,13 +690,13 @@ func TestDetectRepoConfigResolvedAllowIsPhaseScoped(t *testing.T) {
 			cfg := detectRepoConfig(context.Background(), dir)
 
 			for _, p := range []protocol.Phase{protocol.PhaseWorking, protocol.PhaseSelfTest} {
-				resolved := supervisor.ResolvedAllowForPhase(p, cfg.Phases, cfg.Allow, nil)
+				resolved := supervisor.ResolvedAllowForPhase(p, "/tmp/wt", cfg.Phases, cfg.Allow, nil)
 				if !slices.Contains(resolved, c.want) {
 					t.Errorf("resolved allow for phase %q = %v, want it to contain %q", p, resolved, c.want)
 				}
 			}
 			for _, p := range []protocol.Phase{protocol.PhasePlanning, protocol.PhaseAwaitingReview, protocol.PhaseBlocked} {
-				resolved := supervisor.ResolvedAllowForPhase(p, cfg.Phases, cfg.Allow, nil)
+				resolved := supervisor.ResolvedAllowForPhase(p, "/tmp/wt", cfg.Phases, cfg.Allow, nil)
 				if slices.Contains(resolved, c.want) {
 					t.Errorf("resolved allow for phase %q = %v, want it to NOT contain %q (structural-floor-only)", p, resolved, c.want)
 				}

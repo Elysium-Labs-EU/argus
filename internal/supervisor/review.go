@@ -90,7 +90,7 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 		// ready to judge
 	case protocol.PhaseBlocked:
 		reasons = append(reasons, "worker blocked: "+blockedText(s))
-	case protocol.PhasePlanning, protocol.PhaseWorking, protocol.PhaseSelfTest:
+	case protocol.PhasePlanning, protocol.PhaseWorking, protocol.PhaseSelfTest, protocol.PhaseRebase:
 		reasons = append(reasons, "worker not ready for review (phase "+string(s.Phase)+")")
 	default:
 		reasons = append(reasons, "unknown phase "+string(s.Phase))

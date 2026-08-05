@@ -4,7 +4,6 @@ import "testing"
 
 func TestIsLegalTransition(t *testing.T) {
 	legal := []struct{ cur, next Phase }{
-		{"", PhasePlanning},
 		{PhasePlanning, PhasePlanning},
 		{PhasePlanning, PhaseWorking},
 		{PhaseWorking, PhaseSelfTest},
@@ -15,6 +14,8 @@ func TestIsLegalTransition(t *testing.T) {
 		{PhaseAwaitingReview, PhaseWorking},
 		{PhaseAwaitingReview, PhaseBlocked},
 		{PhaseBlocked, PhaseWorking},
+		{PhaseRebase, PhaseAwaitingReview},
+		{PhaseRebase, PhaseBlocked},
 	}
 	for _, tc := range legal {
 		if !IsLegalTransition(tc.cur, tc.next) {
@@ -23,8 +24,9 @@ func TestIsLegalTransition(t *testing.T) {
 	}
 
 	illegal := []struct{ cur, next Phase }{
-		{"", PhaseWorking},                   // must start at planning
-		{"", PhaseDone},                      // done is never a worker move
+		{"", PhasePlanning},                  // Phase("") has no legal move at all: a missing status.json resolves
+		{"", PhaseWorking},                   // as planning at the call sites that read it (see loadCurrentPhase),
+		{"", PhaseDone},                      // it is never itself a value IsLegalTransition is asked to move from
 		{PhasePlanning, PhaseDone},           // straight to done from planning
 		{PhasePlanning, PhaseAwaitingReview}, // skips working/self_test
 		{PhaseWorking, PhaseAwaitingReview},  // skips self_test
@@ -34,7 +36,13 @@ func TestIsLegalTransition(t *testing.T) {
 		{PhaseAwaitingReview, PhaseAwaitingReview}, // no self-loop
 		{PhaseBlocked, PhaseAwaitingReview},
 		{PhaseBlocked, PhaseDone},
-		{PhaseDone, PhaseWorking}, // done has no legal exit at all
+		{PhaseDone, PhaseWorking},    // done has no legal exit at all
+		{PhaseRebase, PhaseRebase},   // no self-loop: argus stamps it once, at dispatch
+		{PhaseRebase, PhaseWorking},  // rebase is a dead end besides awaiting_review/blocked
+		{PhaseRebase, PhasePlanning}, // rebase never falls back into the normal lifecycle
+		{"", PhaseRebase},            // rebase is dispatch-stamped, never entered via a worker report
+		{PhaseWorking, PhaseRebase},  // no phase can request its way into rebase
+		{PhaseBlocked, PhaseRebase},
 	}
 	for _, tc := range illegal {
 		if IsLegalTransition(tc.cur, tc.next) {

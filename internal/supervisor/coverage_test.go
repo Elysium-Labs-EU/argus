@@ -199,6 +199,32 @@ func TestWaitForStatusIgnoresStaleStatus(t *testing.T) {
 	}
 }
 
+// TestWaitForStatusIgnoresRebaseBookkeepingStub confirms dispatchRebaseWorker's
+// own pre-dispatch write — Base and Phase: PhaseRebase, stamped right after
+// InvalidateStatus so a worker's later report can carry Base forward — is
+// never mistaken for the worker's real report, even though it now carries a
+// real (non-empty) Phase instead of the old Phase(""). PhaseRebase itself is
+// the tell: no worker report can ever write it (see
+// internal/protocol/transition.go), so a status.json read back with exactly
+// that Phase can only be this bookkeeping write.
+func TestWaitForStatusIgnoresRebaseBookkeepingStub(t *testing.T) {
+	wt := t.TempDir()
+	since := time.Now()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Base: "main", Phase: protocol.PhaseRebase}); err != nil {
+		t.Fatalf("seeding rebase bookkeeping stub: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, seen, err := WaitForStatus(ctx, herdr.Client{}, "", wt, 5*time.Millisecond, since, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if seen {
+		t.Fatal("WaitForStatus should not treat the rebase bookkeeping stub as the worker's own report")
+	}
+}
+
 // TestWaitForStatusAcceptsLyingUpdatedAt verifies the rebase call site's
 // fix: WaitForStatus must judge freshness by the status file's
 // mtime, not the worker's self-reported UpdatedAt. A worker that writes a

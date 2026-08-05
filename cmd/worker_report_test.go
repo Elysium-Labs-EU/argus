@@ -61,7 +61,8 @@ func gitPlainRepo(t *testing.T) string {
 
 func TestRunWorkerReportRejectsIllegalTransition(t *testing.T) {
 	wt := t.TempDir()
-	// No prior status.json: cur.Phase is "", so only planning is legal.
+	// No prior status.json: cur resolves as planning (see runWorkerReport's
+	// os.ErrNotExist branch), so only planning/working are legal.
 	err := runWorkerReport(wt, protocol.PhaseAwaitingReview, &protocol.Status{}, fixedNow(time.Now()))
 	if err == nil {
 		t.Fatal("want an error for an illegal first transition, got nil")
@@ -71,6 +72,33 @@ func TestRunWorkerReportRejectsIllegalTransition(t *testing.T) {
 	}
 	if _, loadErr := protocol.Load(protocol.StatusPath(wt)); loadErr == nil {
 		t.Error("status.json should not have been written for a rejected transition")
+	}
+}
+
+// TestRunWorkerReportMissingStatusResolvesAsPlanning is the acceptance test
+// for eliminating Phase(""): a worker's very first report, against a
+// worktree with no status.json at all, is legal exactly when it would be
+// legal from an explicit planning report — the self-loop planning ->
+// planning, or (once plan evidence exists) planning -> working — and illegal
+// otherwise, the same as any other phase's own transition rules.
+func TestRunWorkerReportMissingStatusResolvesAsPlanning(t *testing.T) {
+	wt := t.TempDir()
+	// planning -> planning (self-loop) is legal from a resolved-as-planning
+	// missing file, same as from a real planning report.
+	if err := runWorkerReport(wt, protocol.PhasePlanning, &protocol.Status{Task: "t"}, fixedNow(time.Now())); err != nil {
+		t.Fatalf("first planning report against a missing status.json rejected: %v", err)
+	}
+
+	wt2 := t.TempDir()
+	// planning -> working is illegal without plan evidence — a missing file
+	// carries no Plan, so RequiresPlanEvidence must still fire exactly as it
+	// would for an explicit empty planning report.
+	err := runWorkerReport(wt2, protocol.PhaseWorking, &protocol.Status{Task: "t"}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error moving straight to working from a missing status.json with no plan evidence, got nil")
+	}
+	if !strings.Contains(err.Error(), "no plan/todo evidence") {
+		t.Errorf("error = %q, want it to mention missing plan evidence", err.Error())
 	}
 }
 
@@ -245,7 +273,10 @@ func TestRunWorkerReportFullLegalSequence(t *testing.T) {
 // report must not clobber it back to empty.
 func TestRunWorkerReportPreservesBaseAcrossReports(t *testing.T) {
 	wt := t.TempDir()
-	seed := protocol.Status{Base: "develop"}
+	// Base-only, Phase: planning mirrors the real pre-dispatch bookkeeping
+	// write provisionWorktree makes before a worker's first report (see
+	// internal/supervisor/loop.go).
+	seed := protocol.Status{Base: "develop", Phase: protocol.PhasePlanning}
 	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
 		t.Fatalf("seeding status: %v", err)
 	}
@@ -281,7 +312,7 @@ func TestRunWorkerReportPreservesBaseAcrossReports(t *testing.T) {
 // title of its own must not wipe out one already on file.
 func TestRunWorkerReportPreservesTitleWhenReportOmitsIt(t *testing.T) {
 	wt := t.TempDir()
-	seed := protocol.Status{Title: "feat: interactive shell-completion installer for argus completion"}
+	seed := protocol.Status{Title: "feat: interactive shell-completion installer for argus completion", Phase: protocol.PhasePlanning}
 	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
 		t.Fatalf("seeding status: %v", err)
 	}
@@ -303,7 +334,7 @@ func TestRunWorkerReportPreservesTitleWhenReportOmitsIt(t *testing.T) {
 // report that does name a new title is a deliberate retitle and must win.
 func TestRunWorkerReportOverwritesTitleWhenReportSetsIt(t *testing.T) {
 	wt := t.TempDir()
-	seed := protocol.Status{Title: "feat: old title"}
+	seed := protocol.Status{Title: "feat: old title", Phase: protocol.PhasePlanning}
 	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
 		t.Fatalf("seeding status: %v", err)
 	}

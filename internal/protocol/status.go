@@ -25,6 +25,13 @@ const (
 	PhaseAwaitingReview Phase = "awaiting_review"
 	PhaseDone           Phase = "done"
 	PhaseBlocked        Phase = "blocked"
+	// PhaseRebase is stamped by argus itself when it dispatches a worker to
+	// resolve a post-merge conflict (see supervisor.RebasePhaseAllow) — never
+	// reported by a worker's own `argus worker report`, the same way
+	// PhaseDone never is. Before this existed, a rebase dispatch ran with no
+	// phase at all (Phase("")), so its git fetch/merge grant had to be
+	// injected blanket, reaching every phase instead of just this one.
+	PhaseRebase Phase = "rebase"
 )
 
 // Result is the outcome of a single test a worker ran.

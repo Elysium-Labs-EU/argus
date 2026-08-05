@@ -287,18 +287,17 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	// the spawn path. opts.base is already a bare branch name from
 	// ResolveBase; trimmed defensively in case a caller passed --base
 	// explicitly as "origin/main".
+	//
+	// Phase is stamped rebase, not left empty: the worker check-tool hook
+	// resolves cmd/worker_check_tool.go's runWorkerCheckTool live off this
+	// same Base/Phase pair to compute supervisor.RebasePhaseAllow's git
+	// fetch/merge + verify-command grant — no separate GrantExtraAllow call
+	// is needed here any more, since that grant now reaches the worker
+	// through its own governed phase instead of a blanket, phase-independent
+	// extraAllow injection.
 	baseBranch := strings.TrimPrefix(opts.base, "origin/")
-	if werr := protocol.Write(protocol.StatusPath(opts.worktree), &protocol.Status{Base: baseBranch}); werr != nil {
+	if werr := protocol.Write(protocol.StatusPath(opts.worktree), &protocol.Status{Base: baseBranch, Phase: protocol.PhaseRebase}); werr != nil {
 		return fmt.Errorf("recording base branch before rebase dispatch: %w", werr)
-	}
-	// Granted before the brief is written: the worker check-tool hook denies
-	// git fetch/merge by default under the dontAsk permission model (only
-	// read-only git plumbing is in the structural floor), and the rebase
-	// worker starts in the empty/initial phase, so a repo's own
-	// .argus/config.yml phases.working.allow — even if migrated — would not
-	// cover this dispatch. See supervisor.RebaseExtraAllow.
-	if gerr := supervisor.GrantExtraAllow(opts.worktree, supervisor.RebaseExtraAllow(opts.base)); gerr != nil {
-		return fmt.Errorf("granting rebase worker its own brief's git commands: %w", gerr)
 	}
 	if werr := supervisor.WriteBrief(opts.worktree, supervisor.RebaseBrief(branch, opts.base)); werr != nil {
 		return werr
@@ -561,7 +560,14 @@ func renderRebaseOutcome(out io.Writer, branch string, status *protocol.Status) 
 		_, _ = fmt.Fprintf(out, "%s %s rebased and ready (%s)\n", ui.LabelSuccess.Render("✓"), branch, status.Phase)
 	case protocol.PhaseBlocked:
 		_, _ = fmt.Fprintf(out, "%s %s rebase blocked: %s\n", ui.LabelError.Render("✗"), branch, status.BlockedReason)
-	case protocol.PhasePlanning, protocol.PhaseWorking, protocol.PhaseSelfTest:
+	case protocol.PhasePlanning, protocol.PhaseWorking, protocol.PhaseSelfTest, protocol.PhaseRebase:
+		// PhaseRebase itself never actually reaches here: WaitForStatus only
+		// returns seen=true once it has read a phase other than PhaseRebase
+		// or "" (see its own doc comment) — this case exists purely so the
+		// exhaustive linter's switch coverage matches every protocol.Phase
+		// value, the same defensive completeness the pre-existing planning/
+		// working/self_test cases already had for a status this function
+		// otherwise never expects to see.
 		_, _ = fmt.Fprintf(out, "%s %s rebase still %s\n", ui.LabelWarning.Render("○"), branch, status.Phase)
 	default:
 		_, _ = fmt.Fprintf(out, "%s %s rebase phase %s\n", ui.LabelWarning.Render("○"), branch, status.Phase)

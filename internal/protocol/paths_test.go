@@ -7,7 +7,7 @@ import (
 
 func TestIsTerminal(t *testing.T) {
 	terminal := []Phase{PhaseAwaitingReview, PhaseDone, PhaseBlocked}
-	nonTerminal := []Phase{PhasePlanning, PhaseWorking, PhaseSelfTest, Phase("")}
+	nonTerminal := []Phase{PhasePlanning, PhaseWorking, PhaseSelfTest, PhaseRebase, Phase("")}
 	for _, p := range terminal {
 		if !IsTerminal(p) {
 			t.Errorf("IsTerminal(%q) = false, want true", p)

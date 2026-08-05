@@ -7,7 +7,12 @@ import (
 
 // ConfigurablePhases are the phases a worker report or a repo's phase policy
 // may name. PhaseDone is excluded, same as reportablePhases always excluded
-// it — only argus's own ship path ever sets it.
+// it — only argus's own ship path ever sets it. PhaseRebase is excluded too,
+// for a different reason: it is argus-stamped at dispatch time, never
+// reported by a worker and never configurable via .argus/config.yml — its
+// own grant (see supervisor.RebasePhaseAllow) is computed live from the
+// worktree's recorded base and the repo's already-configured verify
+// command, not something an operator writes phases.rebase.allow for.
 var ConfigurablePhases = []Phase{PhasePlanning, PhaseWorking, PhaseSelfTest, PhaseAwaitingReview, PhaseBlocked}
 
 // PhasePolicy is one repo's configured additions for a single phase: Deny

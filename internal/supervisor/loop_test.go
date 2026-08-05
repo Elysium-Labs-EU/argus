@@ -118,10 +118,12 @@ func TestBuildPlanDerivesWorktreeAndBrief(t *testing.T) {
 
 // TestBuildPlanBriefStatesResolvedAllowSet is the brief-side acceptance
 // criterion: a worker should read its own sandbox up front from the brief
-// argus already writes, rather than discover it by trial-and-error deny.
-// The stated set must be sourced from the same ResolvedAllowSet
-// settingsFor renders settings.local.json's Allow from, so the two can't
-// drift — a repo's own configured allow entry must show up in both.
+// argus already writes, phase by phase, rather than discover the current
+// phase's narrower set by trial-and-error deny. The stated set must be
+// sourced from the same ResolvedAllowForPhase settingsFor's static Allow
+// list and the live check-tool hook both resolve from, so a repo's own
+// configured allow entry — scoped to the one phase it was configured for —
+// must show up in that phase's line and no other.
 func TestBuildPlanBriefStatesResolvedAllowSet(t *testing.T) {
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(make *)"}}}
 	plans, err := BuildPlan([]Worker{
@@ -131,11 +133,14 @@ func TestBuildPlanBriefStatesResolvedAllowSet(t *testing.T) {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 	p := plans[0]
-	if !strings.Contains(p.Brief, "You may run these commands:") {
-		t.Errorf("brief should state the resolved allow-set:\n%s", p.Brief)
+	if !strings.Contains(p.Brief, "Allowed commands depend on your current phase") {
+		t.Errorf("brief should state the per-phase resolved allow-set:\n%s", p.Brief)
 	}
-	if !strings.Contains(p.Brief, "make*") {
-		t.Errorf("brief should name the repo's configured allow entry:\n%s", p.Brief)
+	if !strings.Contains(p.Brief, "working: ") || !strings.Contains(p.Brief, "make*") {
+		t.Errorf("brief should name the repo's configured allow entry on the working line:\n%s", p.Brief)
+	}
+	if strings.Contains(p.Brief, "planning: ") && strings.Contains(lineFor(p.Brief, "planning"), "make*") {
+		t.Errorf("phases.working.allow leaked into the planning line:\n%s", p.Brief)
 	}
 	if !strings.Contains(p.Brief, "git status") {
 		t.Errorf("brief should name the structural floor's read-only git entries:\n%s", p.Brief)

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,9 +35,14 @@ func newWorkerCheckToolCmd() *cobra.Command {
 
 // preToolUseInput is the subset of Claude Code's PreToolUse hook stdin JSON
 // this command needs. CWD is a worker's worktree root, doubling as the
-// worktree path protocol.StatusPath needs.
+// worktree path protocol.StatusPath needs. ToolName distinguishes a Bash
+// call (gated on its literal command line) from an Edit/Write call (gated
+// purely on whether the current phase allows mutation at all — see
+// supervisor.PhaseAllowsMutation) — checkToolHooks registers this same
+// command for all three tool names.
 type preToolUseInput struct {
 	CWD       string `json:"cwd"`
+	ToolName  string `json:"tool_name"`
 	ToolInput struct {
 		Command string `json:"command"`
 	} `json:"tool_input"`
@@ -48,8 +54,10 @@ type preToolUseInput struct {
 // returning an error (which would exit 1 through main.go's own rendering
 // instead of raw stderr).
 //
-// Malformed input and a worktree with no status.json yet both fail open —
-// nothing to enforce before a worker's first report. A repo's own
+// Malformed input fails open — nothing to enforce. A worktree with no
+// status.json yet resolves as protocol.PhasePlanning (see loadCurrentPhase):
+// a worker's very first actions are planning, not an ungoverned blind spot
+// with nothing to enforce, the way Phase("") used to be. A repo's own
 // .argus/config.yml is resolved from the main checkout (via supervisor.
 // RepoRoot), never the worktree itself — a worker editing its own worktree's
 // tracked copy has no effect here, the same way it has no effect on ship/
@@ -61,23 +69,44 @@ func runWorkerCheckTool(ctx context.Context, stdin io.Reader, stderr io.Writer) 
 	if err := json.NewDecoder(stdin).Decode(&in); err != nil {
 		return nil //nolint:nilerr // malformed hook payload fails open — nothing to enforce, not a real failure
 	}
-	if in.ToolInput.Command == "" || in.CWD == "" {
+	if in.CWD == "" {
 		return nil
 	}
 
-	cur, err := protocol.Load(protocol.StatusPath(in.CWD))
+	cur, err := loadCurrentPhase(in.CWD)
 	if err != nil {
-		return nil //nolint:nilerr // no status.json yet (worker hasn't reported) fails open — nothing to enforce
+		return nil //nolint:nilerr // status.json exists but is unreadable/corrupt — nothing this hook can diagnose, fails open
 	}
 
-	projectPhases, baseAllow := loadProjectPolicy(ctx, in.CWD)
-	// A worktree WriteSettings never provisioned (e.g. --attach) or a read
-	// failure both resolve to nil — the same "no extra flags" fail-open
-	// stance loadProjectPolicy takes for an unresolvable repo config.
-	extraAllow, _ := protocol.LoadExtraAllow(in.CWD)
+	if in.ToolName == "Edit" || in.ToolName == "Write" {
+		if supervisor.PhaseAllowsMutation(cur.Phase) {
+			return nil
+		}
+		_, _ = fmt.Fprintln(stderr, mutationDenyReason(cur.Phase))
+		osExit(2)
+		return nil
+	}
 
-	denied := protocol.ResolvedDenyForPhase(cur.Phase, projectPhases)
-	allowed := supervisor.ResolvedAllowForPhase(cur.Phase, projectPhases, baseAllow, extraAllow)
+	if in.ToolInput.Command == "" {
+		return nil
+	}
+
+	cfg := loadProjectConfig(ctx, in.CWD)
+	// A worktree WriteSettings never provisioned (e.g. --attach) resolves to
+	// a zero repoconfig.Config — the same "no extra flags" fail-open stance
+	// loadProjectConfig takes for an unresolvable repo config.
+	extraAllow, _ := protocol.LoadExtraAllow(in.CWD)
+	if cur.Phase == protocol.PhaseRebase {
+		// The rebase phase's own grant is computed live, here, from this
+		// worktree's own recorded Base and its repo's configured verify
+		// command — never persisted or blanket-injected — so it reaches the
+		// worker only while it is actually reporting rebase, not every
+		// phase the way the extraAllow injection this replaced once did.
+		extraAllow = append(slices.Clone(extraAllow), supervisor.RebasePhaseAllow(cur.Base, cfg.ShipVerifyCommand, cfg.GateVerifyCommand)...)
+	}
+
+	denied := protocol.ResolvedDenyForPhase(cur.Phase, cfg.Phases)
+	allowed := supervisor.ResolvedAllowForPhase(cur.Phase, in.CWD, cfg.Phases, cfg.Allow, extraAllow)
 	reason, blocked := evaluateToolGate(in.ToolInput.Command, cur.Phase, denied, allowed)
 	if !blocked {
 		return nil
@@ -87,24 +116,57 @@ func runWorkerCheckTool(ctx context.Context, stdin io.Reader, stderr io.Writer) 
 	return nil
 }
 
-// loadProjectPolicy resolves a repo's own .argus/config.yml phases policy
-// and top-level allow list from the trusted main checkout for worktree —
-// never the worktree itself, so a worker editing its own tracked copy has no
-// effect here (same trust boundary ship/rework/review's own config reads
-// already enforce). An unresolvable repo root or config file fails open to
-// zero values: no project policy layered on top of the structural floor and
-// deny floor, not a hard error — the same stance runWorkerCheckTool already
-// took before this was split out.
-func loadProjectPolicy(ctx context.Context, worktree string) (protocol.PhaseConfig, []string) {
+// loadCurrentPhase resolves worktree's current Phase for the check-tool
+// gate. A real status.json is trusted as-is. A worktree with no status.json
+// at all has never had a worker report — which is exactly what "planning"
+// means (a fresh worker's first actions, before its first report, already
+// are planning; see internal/protocol/transition.go) — so it resolves the
+// same as an explicit planning report rather than as the ungoverned
+// Phase("") blind spot that used to fail open unconditionally here. Any
+// other Load failure (a corrupt or unreadable file) is returned as an error
+// instead: there is nothing about that case this function can respond to
+// beyond letting the caller's own fail-open stance handle it.
+func loadCurrentPhase(worktree string) (protocol.Status, error) {
+	cur, err := protocol.Load(protocol.StatusPath(worktree))
+	if err == nil {
+		return cur, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return protocol.Status{Phase: protocol.PhasePlanning}, nil
+	}
+	return protocol.Status{}, err
+}
+
+// mutationDenyReason renders the block message for an Edit/Write call
+// during a phase that doesn't allow mutation (see
+// supervisor.PhaseAllowsMutation) — the Edit/Write counterpart to
+// denyReason's Bash-command messages.
+func mutationDenyReason(phase protocol.Phase) string {
+	return fmt.Sprintf(
+		"argus: file edits are denied during phase %q — only working and self_test allow mutating tracked files.\n"+
+			"If you genuinely need to edit a file here, report `blocked` and explain why.",
+		phase,
+	)
+}
+
+// loadProjectConfig resolves a repo's own .argus/config.yml from the
+// trusted main checkout for worktree — never the worktree itself, so a
+// worker editing its own tracked copy has no effect here (same trust
+// boundary ship/rework/review's own config reads already enforce). An
+// unresolvable repo root or config file fails open to a zero Config: no
+// project policy layered on top of the structural floor and deny floor, not
+// a hard error — the same stance runWorkerCheckTool already took before
+// this was split out.
+func loadProjectConfig(ctx context.Context, worktree string) repoconfig.Config {
 	repoRoot, err := supervisor.RepoRoot(ctx, worktree)
 	if err != nil {
-		return nil, nil
+		return repoconfig.Config{}
 	}
 	cfg, err := repoconfig.Load(repoconfig.Path(repoRoot))
 	if err != nil {
-		return nil, nil
+		return repoconfig.Config{}
 	}
-	return cfg.Phases, cfg.Allow
+	return cfg
 }
 
 // evaluateToolGate is runWorkerCheckTool's pure decision: given the literal

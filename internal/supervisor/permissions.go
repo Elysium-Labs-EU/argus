@@ -1,16 +1,17 @@
 package supervisor
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
-// structuralFloorAllow are the Claude Code permission-allow entries
-// guaranteed granted in every phase, regardless of repo config: read-only
-// git (enough to inspect the working tree) and a worker's own status
-// self-calls. Nothing here is ever written into .argus/config.yml as data —
+// allPhaseFloor are the Claude Code permission-allow entries guaranteed
+// granted in every phase, regardless of repo config: read-only git (enough
+// to inspect the working tree) and a worker's own status self-calls.
+// Nothing here is ever written into .argus/config.yml as data —
 // ResolvedAllowForPhase unions it in from code every time, so a hand-edited
 // or missing config file can never narrow a worker's actual floor. init
 // documents it as a comment instead (see repoconfig's encodeYAML), for
@@ -22,10 +23,11 @@ import (
 // the worker to run `git ls-files --others --exclude-standard` to compute
 // diff_stat's untracked-file count — an argus-authored instruction handed to
 // every worker, in every phase, not something scoped to one dispatch path
-// the way RebaseExtraAllow is. Denying it by default would repeat the same
-// brief-instructs-a-command-nothing-grants gap the rebase dispatch hit, just
-// for every worker's routine status report instead of one operation.
-var structuralFloorAllow = []string{
+// the way RebasePhaseAllow is. Denying it by default would repeat the same
+// brief-instructs-a-command-nothing-grants gap the rebase dispatch used to
+// hit, just for every worker's routine status report instead of one
+// operation.
+var allPhaseFloor = []string{
 	"Bash(git status*)",
 	"Bash(git diff*)",
 	"Bash(git log*)",
@@ -35,20 +37,55 @@ var structuralFloorAllow = []string{
 	"Bash(argus worker steer*)",
 }
 
+// mutationPhases are the only phases in which a worker is actually building
+// its change, so Edit/Write(worktree) is the only structural-floor grant
+// that isn't blanket — every other phase (planning, awaiting_review,
+// blocked, rebase) is read/report-only, no repo config can extend it. Rebase
+// is deliberately excluded: RebaseBrief has the worker resolve conflicts by
+// re-running git merge, not by using the Edit/Write tools, so it stays on
+// the rebase phase's own narrower grant (see RebasePhaseAllow).
+var mutationPhases = []protocol.Phase{protocol.PhaseWorking, protocol.PhaseSelfTest}
+
+// PhaseAllowsMutation reports whether phase is one of mutationPhases — the
+// live check-tool hook's answer to "is this worker allowed to Edit/Write at
+// all right now," independent of which file. The static settings.local.json
+// Allow list can't itself narrow Edit/Write by phase (it's rendered once, at
+// session launch, before any phase transition happens — see settingsFor's
+// own doc comment), so this is enforced live, the same way a Bash command's
+// phase-scoping is: by the PreToolUse hook re-checking the worktree's
+// current status.json on every call instead of trusting the static file.
+func PhaseAllowsMutation(phase protocol.Phase) bool {
+	return slices.Contains(mutationPhases, phase)
+}
+
+// structuralFloorAllow returns the phase-scoped structural floor for phase,
+// in worktree: allPhaseFloor always, plus Edit(worktree)/Write(worktree)
+// only while PhaseAllowsMutation(phase) — see mutationPhases.
+func structuralFloorAllow(phase protocol.Phase, worktree string) []string {
+	floor := slices.Clone(allPhaseFloor)
+	if PhaseAllowsMutation(phase) {
+		glob := worktree + "/**"
+		floor = append(floor, "Edit("+glob+")", "Write("+glob+")")
+	}
+	return floor
+}
+
 // ResolvedAllowForPhase computes the Claude Code permission-allow entries a
-// worker reporting phase gets: the structural floor, union baseAllow (a
-// repo's phase-independent .argus/config.yml allow list), union project's
-// own materialized allow for phase, union extraAllow (operator --allow
-// flags, flat across every phase), minus any entry that could authorize a
-// DenyFloor command — subtracted last, so nothing upstream of this call can
-// re-grant ship/rework/review/supervise or git commit/push by putting a
-// wide-enough Bash pattern under any phase's allow list. Order is
-// first-seen-wins deduped, not sorted, so a caller's own ordering intent
-// (floor first, most-specific config last) survives into the rendered
-// settings file.
-func ResolvedAllowForPhase(phase protocol.Phase, project protocol.PhaseConfig, baseAllow, extraAllow []string) []string {
-	allow := make([]string, 0, len(structuralFloorAllow)+len(baseAllow)+len(extraAllow))
-	allow = append(allow, structuralFloorAllow...)
+// worker reporting phase, in worktree, gets: the phase-scoped structural
+// floor, union baseAllow (a repo's phase-independent .argus/config.yml allow
+// list), union project's own materialized allow for phase, union extraAllow
+// (operator --allow flags plus, for the rebase phase, argus's own live
+// RebasePhaseAllow grant — see cmd/worker_check_tool.go), minus any entry
+// that could authorize a DenyFloor command — subtracted last, so nothing
+// upstream of this call can re-grant ship/rework/review/supervise or git
+// commit/push by putting a wide-enough Bash pattern under any phase's allow
+// list. Order is first-seen-wins deduped, not sorted, so a caller's own
+// ordering intent (floor first, most-specific config last) survives into the
+// rendered settings file.
+func ResolvedAllowForPhase(phase protocol.Phase, worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) []string {
+	floor := structuralFloorAllow(phase, worktree)
+	allow := make([]string, 0, len(floor)+len(baseAllow)+len(extraAllow))
+	allow = append(allow, floor...)
 	allow = append(allow, baseAllow...)
 	if policy, ok := project[phase]; ok {
 		allow = append(allow, policy.Allow...)
@@ -58,17 +95,24 @@ func ResolvedAllowForPhase(phase protocol.Phase, project protocol.PhaseConfig, b
 }
 
 // ResolvedAllowSet unions every protocol.ConfigurablePhases value's own
-// ResolvedAllowForPhase — the same computation settingsFor bakes into
-// settings.local.json, since that file is written once at session launch and
-// can't itself vary by a worker's current phase. Exported so the worker
-// brief (see briefFor) can state this same set in its own wording, sourced
-// from the identical resolver settingsFor renders from, rather than an
-// independently maintained sentence that could silently drift from what the
-// rendered settings file actually grants.
-func ResolvedAllowSet(project protocol.PhaseConfig, baseAllow, extraAllow []string) []string {
+// ResolvedAllowForPhase for worktree — the same computation settingsFor
+// bakes into settings.local.json, since that file is written once at
+// session launch and can't itself vary by a worker's current phase (the
+// live PreToolUse hook is what actually narrows a call back down to the
+// worker's current phase — see checkToolHook/PhaseAllowsMutation).
+// protocol.ConfigurablePhases deliberately excludes protocol.PhaseRebase:
+// this union backs a normal dispatch's static settings file and worker
+// brief, neither of which should preemptively advertise argus's own
+// rebase-dispatch mechanics to a worker that was never dispatched to
+// rebase. Exported so the worker brief (see briefFor) can state each
+// phase's own set in its own wording, sourced from the identical resolver
+// settingsFor renders from, rather than an independently maintained
+// sentence that could silently drift from what the rendered settings file
+// actually grants.
+func ResolvedAllowSet(project protocol.PhaseConfig, baseAllow, extraAllow []string, worktree string) []string {
 	var unioned []string
 	for _, p := range protocol.ConfigurablePhases {
-		unioned = append(unioned, ResolvedAllowForPhase(p, project, baseAllow, extraAllow)...)
+		unioned = append(unioned, ResolvedAllowForPhase(p, worktree, project, baseAllow, extraAllow)...)
 	}
 	return dedupeStrings(unioned)
 }
@@ -225,4 +269,27 @@ func AllowSetBrief(allow []string) string {
 		return "(none)"
 	}
 	return strings.Join(cmds, ", ")
+}
+
+// PhaseAllowBrief renders, for every protocol.ConfigurablePhases value, that
+// phase's own ResolvedAllowForPhase as one line — the worker-brief-facing
+// counterpart to AllowSetBrief's single-phase sentence (see
+// cmd/worker_check_tool.go's deny message), so briefFor can state a worker's
+// actual per-phase sandbox instead of the blanket union every phase used to
+// advertise regardless of what that phase's own live resolution actually
+// allowed. Edit/Write is called out by name rather than folded into
+// AllowSetBrief's Bash-only list (AllowSetBrief drops non-Bash entries
+// entirely), since whether a worker may edit files at all is exactly the
+// thing that now varies by phase.
+func PhaseAllowBrief(project protocol.PhaseConfig, baseAllow, extraAllow []string, worktree string) string {
+	var b strings.Builder
+	for _, p := range protocol.ConfigurablePhases {
+		allow := ResolvedAllowForPhase(p, worktree, project, baseAllow, extraAllow)
+		mutation := "no file edits"
+		if PhaseAllowsMutation(p) {
+			mutation = "file edits allowed"
+		}
+		fmt.Fprintf(&b, "  %s: %s (%s)\n", p, AllowSetBrief(allow), mutation)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
