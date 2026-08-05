@@ -120,8 +120,8 @@ outcome instead of retrying forever.`,
 	cmd.Flags().StringVar(&launcher, "launcher", supervisor.DefaultLauncher, "command started in the worker pane if it has no live agent")
 	cmd.Flags().StringVar(&workerRuntime, "worker-runtime", "", "isolate the rework worker with the argus-runtime-<name> adapter on PATH (see docs/worker-runtime-protocol.md); default none runs unwrapped as today")
 	cmd.Flags().DurationVar(&interval, "interval", 15*time.Second, "status poll cadence")
-	cmd.Flags().IntVar(&maxRounds, "max-rounds", supervisor.DefaultMaxReworkRounds, "give up and escalate after this many request-changes rounds")
-	cmd.Flags().IntVar(&maxReworkBudget, "max-rework-budget", supervisor.DefaultMaxReworkBudget, "restart budget: total rework rounds this worktree may ever be dispatched for, across every separate `argus rework` invocation (unlike --max-rounds, which only bounds this one invocation's own loop); 0 disables. Without this flag, this repo's .argus/config.yml rework_budget wins, then this default")
+	cmd.Flags().IntVar(&maxRounds, "max-rounds", supervisor.DefaultMaxReworkRounds, "give up and escalate after this many request-changes rounds. Without this flag, this repo's .argus/config.yml rework.max_rounds wins, then this default")
+	cmd.Flags().IntVar(&maxReworkBudget, "max-rework-budget", supervisor.DefaultMaxReworkBudget, "restart budget: total rework rounds this worktree may ever be dispatched for, across every separate `argus rework` invocation (unlike --max-rounds, which only bounds this one invocation's own loop); 0 disables. Without this flag, this repo's .argus/config.yml rework.budget wins (rework_budget still works as a deprecated alias), then this default")
 	cmd.Flags().StringVar(&reviewModel, "review-model", "", "model for the review (default: claude's default)")
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for the review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
 	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
@@ -375,12 +375,13 @@ func escalateReworkBudgetExceeded(out io.Writer, worktree string, findings []str
 }
 
 // buildReworkConfig assembles runRework's per-round supervisor.Config:
-// resolving the repo root, loading its repoconfig, resolving and validating
-// the gate/review base ref, defaulting the reviewer, and reading $HOME —
-// split out so this one-time setup doesn't inflate runRework's own
-// branching. The returned int is the resolved rework restart budget (see
-// resolveMaxReworkBudget) — not part of supervisor.Config since it governs
-// runRework's own loop, not anything the gate/reviewer consult.
+// resolving the repo root, loading its repoconfig, resolving opts.maxRounds
+// against rework.max_rounds, resolving and validating the gate/review base
+// ref, defaulting the reviewer, and reading $HOME — split out so this
+// one-time setup doesn't inflate runRework's own branching. The returned int
+// is the resolved rework restart budget (see resolveMaxReworkBudget) — not
+// part of supervisor.Config since it governs runRework's own loop, not
+// anything the gate/reviewer consult.
 func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, reviewer supervisor.Reviewer, logger *eventlog.Logger) (*supervisor.Config, string, int, error) {
 	repoRoot, err := supervisor.RepoRoot(ctx, opts.worktree)
 	if err != nil {
@@ -431,6 +432,22 @@ func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, rev
 		GateVerifyCommand: resolveGateVerifyCommand(opts.gateVerifyCmdExplicit, opts.gateVerifyCmd, &rc),
 	}
 	budget := resolveMaxReworkBudget(opts.maxReworkBudgetExplicit, opts.maxReworkBudget, &rc)
+
+	// Resolved last (rather than left as whatever prepareReworkRun's own
+	// flag-only default check set) so a repo's rework.max_rounds can override
+	// the flag default, the same config-can-override-a-flag-default shape
+	// every other key in this function gets — and last so a config/base/home/
+	// gate-policy problem earlier in this function surfaces as that specific
+	// error, not masked by this check. opts.maxRounds is mutated in place so
+	// runReworkLoop's for loop and the --dry-run preview (renderReworkPlan)
+	// both see the config-resolved value, not the raw flag.
+	opts.maxRounds = resolveMaxReworkRounds(opts.maxRoundsExplicit, opts.maxRounds, &rc)
+	if opts.maxRounds <= 0 {
+		return nil, "", 0, &ui.UserError{
+			Err:  fmt.Errorf("max_rounds must be positive, got %d", opts.maxRounds),
+			Hint: "set rework.max_rounds in .argus/config.yml (or pass --max-rounds) to a positive integer",
+		}
+	}
 	return cfg, repoRoot, budget, nil
 }
 

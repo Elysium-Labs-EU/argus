@@ -6,7 +6,11 @@
 # sets on every run instead of trusting them to stay in sync by hand. Dotted
 # phase.<name>.<subkey> keys live under the schema's patternProperties (a
 # literal property per phase name would be 10 near-identical blocks), so
-# schema_keys below also pulls the trailing subkey out of each pattern.
+# schema_keys below also pulls the trailing subkey out of each pattern. The
+# ship:/rework:/review: operation regions are themselves nested objects, not
+# top-level schema properties, so schema_keys also pulls each region's own
+# subkeys in directly — a canonical-only key with no flat top-level alias
+# (e.g. rework.budget, rework.max_rounds) has no other way to appear here.
 set -euo pipefail
 
 TARGET="${1:-.}"
@@ -22,7 +26,13 @@ schema_keys="$(python3 -c '
 import json, sys
 with open(sys.argv[1]) as f:
     doc = json.load(f)
-keys = set(doc.get("properties", {}))
+top_level = doc.get("properties", {})
+keys = set(top_level)
+# ship:/rework:/review: are nested objects: their own subkeys never appear
+# as top-level schema properties, only inside the properties nested under
+# each region.
+for region in ("ship", "rework", "review"):
+    keys.update(top_level.get(region, {}).get("properties", {}))
 # patternProperties keys are regexes, not literal names — a dotted phase
 # policy key (phase.<name>.skip/deny) always ends in \.<subkey>$, so the
 # trailing segment is the same literal subkey yaml.go switches on.

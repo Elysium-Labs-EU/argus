@@ -456,7 +456,7 @@ func TestLoadDeprecatedKeyUseRecorded(t *testing.T) {
 	}
 	want := []DeprecatedKeyUse{
 		{Old: "ship_lint", New: "ship.verify_command"},
-		{Old: "verify_command", New: "phases.awaiting_review.gate_verify_command"},
+		{Old: "verify_command", New: "review.gate_verify_command"},
 		{Old: "worktree_setup_cmd", New: "worktree_bootstrap_command"},
 	}
 	if !reflect.DeepEqual(got.Deprecated, want) {
@@ -491,7 +491,7 @@ func TestLoadIntermediateWorktreeSetupCommandNameStillParses(t *testing.T) {
 func TestLoadDeprecatedEmptyWhenOnlyNewNamesUsed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
-	content := "worktree_bootstrap_command: \"cp ../.env .env\"\n\nship:\n  verify_command: \"make ci\"\n\nphases:\n  awaiting_review:\n    gate_verify_command: \"make lint\"\n"
+	content := "worktree_bootstrap_command: \"cp ../.env .env\"\n\nship:\n  verify_command: \"make ci\"\n\nreview:\n  gate_verify_command: \"make lint\"\n"
 	if err := writeFile(path, content); err != nil {
 		t.Fatalf("writeFile: %v", err)
 	}

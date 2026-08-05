@@ -26,46 +26,68 @@ brief_note: "Add a focused test and keep task frontend:ci green. Follow the repo
 
 All keys are optional; a missing file is equivalent to an empty one.
 
-## Shape: three regions
+## Shape: three region kinds
 
-Every key lives in one of three regions, grouped by *when it actually runs*,
+Every key lives in one of three region *kinds*, grouped by *what it configures*,
 and the schema (`schemas/config.schema.json`) enforces per-region/per-phase
 validity at load — a key in the wrong place is a load-time error naming
 where it belongs, not a silent no-op.
 
-- **Top-level** — static repo facts and spawn-time keys that don't vary by
-  worker phase: `base_branch`, `worker_placement`, `forge`, `status_page`,
-  `worktree_dir`, `owner_stale_after`, `rework_budget`,
-  `worktree_bootstrap_command`, `launcher`, `allow`, `brief_note`.
-- **`ship:`** — argus-side actions that run after a worker is `done` and a
-  verdict is recorded, initiated by the operator, not a worker phase:
-  `verify_command`, `title_prefix_template`.
-- **`phases:`** — per-worker-lifecycle-phase keys, one nested block per
+- **Top-level (static/spawn)** — static repo facts and spawn-time keys that
+  don't vary by worker phase and aren't tied to any one argus operation:
+  `base_branch`, `worker_placement`, `forge`, `status_page`, `worktree_dir`,
+  `owner_stale_after`, `worktree_bootstrap_command`, `launcher`, `allow`,
+  `brief_note`.
+- **`phases:`** — worker permission contexts, *only*: one nested block per
   phase name (`planning`, `working`, `self_test`, `awaiting_review`,
-  `blocked`). `allow`/`deny`/`skip` are live rules checked continuously
-  while a worker reports that phase, valid on every phase; the gate/review
-  cluster (`gate_verify_command`, `max_diff_lines`, `proof_required_paths`,
-  `always_review_paths`, `review_note`, `review_effort`) fires once, on
-  entering the terminal `awaiting_review` phase, and is valid only there.
+  `blocked`), each holding just that phase's own live `allow`/`deny`/`skip`
+  rules, checked continuously while a worker reports that phase. No
+  operation config lives here.
+- **Operation regions, one per argus operation, sibling to each other** —
+  each argus operation (something *argus itself* does around a verdict, with
+  no worker permissions involved) gets its own region for its own config:
+  - **`ship:`** — `verify_command`, `title_prefix_template`.
+  - **`rework:`** — `budget` (the cross-invocation restart budget),
+    `max_rounds` (one invocation's own dispatch-and-judge loop ceiling).
+  - **`review:`** — the gate/review cluster: `gate_verify_command`,
+    `max_diff_lines`, `proof_required_paths`, `always_review_paths`,
+    `review_note`, `review_effort`. It fires once, on a worker reaching a
+    terminal phase, before a verdict is recorded — but it is argus's own
+    gate/review operation config, not a worker permission, so it is not
+    nested under `phases:` despite firing at a phase transition.
+
+  rework is deliberately not a worker-permission phase: it re-dispatches the
+  same worker back through the existing phases with findings as its brief,
+  needing identical permissions to a normal worker, so it has no phase of
+  its own to nest config under — `rework:` is its own operation region for
+  exactly that reason.
 
 ```yaml
 ship:
   verify_command: "make ci"          # was ship_verify_command
 
+rework:
+  budget: 6                          # was the top-level rework_budget
+  max_rounds: 5                      # was --max-rounds only, no config equivalent
+
+review:
+  gate_verify_command: "make ci"     # was phases.awaiting_review.gate_verify_command
+  max_diff_lines: 800
+  review_note: "Pay extra attention to internal/supervisor changes."
+  review_effort: high
+
 phases:
   working:
     deny: ["docker push"]
-  awaiting_review:
-    gate_verify_command: "make ci"   # was the top-level gate_verify_command
-    max_diff_lines: 800
-    review_note: "Pay extra attention to internal/supervisor changes."
-    review_effort: high
 ```
 
 The flat/dotted forms these keys used before this shape existed
-(`ship_verify_command`, `gate_verify_command`, `phase.<name>.deny`, the flat
-review-policy keys) keep parsing for one transition — each emits a one-line
-deprecation warning pointing at its new nested location, never a hard break.
+(`ship_verify_command`, `gate_verify_command`, `rework_budget`,
+`phase.<name>.deny`, the flat review-policy keys, and the gate/review
+cluster's own former home under `phases.awaiting_review`) keep parsing for
+one transition — each emits a one-line deprecation warning pointing at its
+new region, never a hard break, and resolves to the identical effective
+setting.
 
 ## Keys
 
@@ -120,20 +142,20 @@ deprecation warning pointing at its new nested location, never a hard break.
   diff-counting guidance that mirrors `MeasureDiff`'s own untracked-file
   handling) always follow it — those are argus's own pipeline invariants, not
   something a repo can opt out of.
-- **`phases.awaiting_review.gate_verify_command`** — a shell command the gate
-  re-runs inside a worker's worktree once it reaches the terminal
-  `awaiting_review` phase (e.g. `"make lint"`, `"golangci-lint run"`),
-  closing the gap where a diff earns a clean gate verdict and then fails at
-  `ship`'s `git commit` because the repo's own pre-commit hooks ran a check
-  the gate never reproduced. A non-zero exit (after one retry, to absorb
-  shared-machine flakiness — see `RunGateVerifyCommand`) is an unwaivable
-  escalation: no reviewer verdict can approve past it, the same treatment a
-  reproduced test-claim mismatch gets. Precedence: an explicit
-  `--gate-verify-command` flag (`--verify-cmd` still works as a deprecated
-  alias), then this key, then unset (no command runs — today's prior
-  behavior). Unset by default; a repo owner opts in. The flat top-level
-  `gate_verify_command` (and its older alias `verify_command`) still parses
-  as a deprecated form of this key.
+- **`review.gate_verify_command`** — a shell command the gate re-runs inside
+  a worker's worktree once it reaches a terminal phase (e.g. `"make lint"`,
+  `"golangci-lint run"`), closing the gap where a diff earns a clean gate
+  verdict and then fails at `ship`'s `git commit` because the repo's own
+  pre-commit hooks ran a check the gate never reproduced. A non-zero exit
+  (after one retry, to absorb shared-machine flakiness — see
+  `RunGateVerifyCommand`) is an unwaivable escalation: no reviewer verdict
+  can approve past it, the same treatment a reproduced test-claim mismatch
+  gets. Precedence: an explicit `--gate-verify-command` flag
+  (`--verify-cmd` still works as a deprecated alias), then this key, then
+  unset (no command runs — today's prior behavior). Unset by default; a
+  repo owner opts in. The old `phases.awaiting_review.gate_verify_command`
+  location, and the flat top-level `gate_verify_command` (and its older
+  alias `verify_command`), still parse as deprecated forms of this key.
 - **`worktree_bootstrap_command`** — a shell command run once, synchronously, inside
   a freshly created worktree, right after `git worktree add` succeeds and
   before the worker's agent is spawned (see `RunWorktreeBootstrapCommand`). Use this
@@ -161,11 +183,11 @@ deprecation warning pointing at its new nested location, never a hard break.
   config-able, since baking either into a repo-committed file would mean
   every session claims the same lease identity or silently bypasses every
   mismatch for every developer — this key is a repo-wide policy choice, the
-  same shape as `max_diff_lines`.
-- **`rework_budget`** — the restart budget for `argus rework`: the total
+  same shape as `review.max_diff_lines`.
+- **`rework.budget`** — the restart budget for `argus rework`: the total
   number of rework rounds a worktree may ever be dispatched for, across every
-  separate `rework` invocation over its lifetime — distinct from `rework`'s
-  own `--max-rounds`, which only bounds one invocation's internal loop.
+  separate `rework` invocation over its lifetime — distinct from
+  `rework.max_rounds`, which only bounds one invocation's internal loop.
   Without this ceiling, a supervisor that keeps re-invoking `rework` after
   each invocation's own rounds are exhausted can loop the same worker
   indefinitely. Exceeding the budget records an unwaivable
@@ -174,7 +196,19 @@ deprecation warning pointing at its new nested location, never a hard break.
   escalation so a report shows *why* it needed a human. `0` disables the
   budget entirely (unbounded, the prior behavior); unset falls back to
   `supervisor.DefaultMaxReworkBudget`. Precedence: an explicit
-  `--max-rework-budget` flag, then this key, then the built-in default.
+  `--max-rework-budget` flag, then this key, then the built-in default. The
+  flat top-level `rework_budget` still parses as a deprecated form of this
+  key.
+- **`rework.max_rounds`** — give up and escalate after this many
+  request-changes rounds within *one* `argus rework` invocation — distinct
+  from `rework.budget`'s cross-invocation cumulative ceiling. Until this key
+  existed, this was configurable only via the `--max-rounds` flag, with no
+  repo-wide default. Precedence: an explicit `--max-rounds` flag, then this
+  key, then the built-in default (`supervisor.DefaultMaxReworkRounds`, 3). A
+  resolved value of 0 or less (from either source) is a load-time error, not
+  silently swapped for the default — unlike `rework.budget`, `0` has no
+  "disabled" meaning here, since a loop that runs zero rounds can never
+  dispatch a worker at all.
 
 ## Worker permissions: `dontAsk` and the per-phase allow set
 

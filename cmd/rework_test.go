@@ -238,7 +238,7 @@ func TestBuildReworkConfigResolvesBaseFromRepoConfig(t *testing.T) {
 	writeReworkRepoConfig(t, dir, "base_branch: \"develop\"\n")
 	updateRefOriginBranch(t, dir, "develop")
 
-	cfg, _, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{worktree: dir, base: "origin/main"}, &fakeReviewer{}, reworkLogger())
+	cfg, _, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{worktree: dir, base: "origin/main", maxRounds: supervisor.DefaultMaxReworkRounds}, &fakeReviewer{}, reworkLogger())
 	if err != nil {
 		t.Fatalf("buildReworkConfig: %v", err)
 	}
@@ -300,6 +300,63 @@ func TestBuildReworkConfigPropagatesGatePolicyError(t *testing.T) {
 	}
 }
 
+// TestBuildReworkConfigResolvesMaxRoundsFromRepoConfig proves rework.max_rounds
+// overrides opts.maxRounds when --max-rounds wasn't explicitly passed — the
+// per-invocation loop ceiling, distinct from ReworkBudget's own cross-invocation
+// restart budget.
+func TestBuildReworkConfigResolvesMaxRoundsFromRepoConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	writeReworkRepoConfig(t, dir, "rework:\n  max_rounds: 7\n")
+
+	opts := &reworkOpts{worktree: dir, maxRounds: supervisor.DefaultMaxReworkRounds}
+	_, _, _, err := buildReworkConfig(context.Background(), io.Discard, opts, &fakeReviewer{}, reworkLogger())
+	if err != nil {
+		t.Fatalf("buildReworkConfig: %v", err)
+	}
+	if opts.maxRounds != 7 {
+		t.Errorf("opts.maxRounds = %d, want 7 from .argus/config.yml rework.max_rounds", opts.maxRounds)
+	}
+}
+
+// TestBuildReworkConfigExplicitMaxRoundsFlagWinsOverRepoConfig proves an
+// explicit --max-rounds flag is not overridden by rework.max_rounds, the same
+// explicit-flag-wins precedence every other resolver in cmd/gatepolicy.go
+// gives its own source.
+func TestBuildReworkConfigExplicitMaxRoundsFlagWinsOverRepoConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	writeReworkRepoConfig(t, dir, "rework:\n  max_rounds: 7\n")
+
+	opts := &reworkOpts{worktree: dir, maxRounds: 2, maxRoundsExplicit: true}
+	_, _, _, err := buildReworkConfig(context.Background(), io.Discard, opts, &fakeReviewer{}, reworkLogger())
+	if err != nil {
+		t.Fatalf("buildReworkConfig: %v", err)
+	}
+	if opts.maxRounds != 2 {
+		t.Errorf("opts.maxRounds = %d, want the explicit --max-rounds value 2, not repo config's 7", opts.maxRounds)
+	}
+}
+
+// TestBuildReworkConfigRejectsNonPositiveResolvedMaxRounds proves a
+// rework.max_rounds of 0 (or negative) is a hard error naming the bad value —
+// unlike ReworkBudget, 0 has no "disabled" meaning for max_rounds, since a
+// loop that runs zero rounds can never dispatch a worker at all.
+func TestBuildReworkConfigRejectsNonPositiveResolvedMaxRounds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	writeReworkRepoConfig(t, dir, "rework:\n  max_rounds: 0\n")
+
+	opts := &reworkOpts{worktree: dir, maxRounds: supervisor.DefaultMaxReworkRounds}
+	_, _, _, err := buildReworkConfig(context.Background(), io.Discard, opts, &fakeReviewer{}, reworkLogger())
+	if err == nil {
+		t.Fatal("want an error for a resolved max_rounds of 0, got nil")
+	}
+	if !strings.Contains(err.Error(), "max_rounds") {
+		t.Errorf("error = %q, want it to mention max_rounds", err.Error())
+	}
+}
+
 // TestRunReworkDryRunShowsConfigResolvedBase pins the review fix: --dry-run
 // must preview the same base ref a real run would actually diff against —
 // resolved via ResolveGateBase from .argus/config.yml's base_branch — not
@@ -347,7 +404,7 @@ func TestReworkAndSuperviseAgreeOnGateBase(t *testing.T) {
 	writeReworkRepoConfig(t, dir, "base_branch: \"develop\"\n")
 	updateRefOriginBranch(t, dir, "develop")
 
-	reworkCfg, repoRoot, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{worktree: dir, base: "origin/main"}, &fakeReviewer{}, reworkLogger())
+	reworkCfg, repoRoot, _, err := buildReworkConfig(context.Background(), io.Discard, &reworkOpts{worktree: dir, base: "origin/main", maxRounds: supervisor.DefaultMaxReworkRounds}, &fakeReviewer{}, reworkLogger())
 	if err != nil {
 		t.Fatalf("buildReworkConfig: %v", err)
 	}

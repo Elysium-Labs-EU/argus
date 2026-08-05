@@ -157,6 +157,45 @@ func TestResolveMaxReworkBudgetRepoConfigZeroIsMeaningful(t *testing.T) {
 	}
 }
 
+func TestResolveMaxReworkRoundsExplicitFlagWinsOutright(t *testing.T) {
+	rcRounds := 10
+	rc := repoconfig.Config{MaxReworkRounds: &rcRounds}
+	got := resolveMaxReworkRounds(true, 3, &rc)
+	if got != 3 {
+		t.Errorf("resolveMaxReworkRounds = %d, want the explicit flag value 3", got)
+	}
+}
+
+func TestResolveMaxReworkRoundsPrefersRepoConfigWhenFlagNotPassed(t *testing.T) {
+	rcRounds := 10
+	rc := repoconfig.Config{MaxReworkRounds: &rcRounds}
+	got := resolveMaxReworkRounds(false, 3, &rc)
+	if got != 10 {
+		t.Errorf("resolveMaxReworkRounds = %d, want 10 from repo config", got)
+	}
+}
+
+func TestResolveMaxReworkRoundsFallsBackToFlagDefaultWhenNeitherSet(t *testing.T) {
+	got := resolveMaxReworkRounds(false, 3, &repoconfig.Config{})
+	if got != 3 {
+		t.Errorf("resolveMaxReworkRounds = %d, want the flag's own default 3", got)
+	}
+}
+
+// TestResolveMaxReworkRoundsRepoConfigZeroIsMeaningful checks that a repo
+// config value of 0 passes through unresolved (buildReworkConfig's own
+// caller-side validation rejects it, not this resolver) rather than being
+// silently swapped for the flag default — the whole reason
+// repoconfig.Config.MaxReworkRounds is a pointer.
+func TestResolveMaxReworkRoundsRepoConfigZeroIsMeaningful(t *testing.T) {
+	zero := 0
+	rc := repoconfig.Config{MaxReworkRounds: &zero}
+	got := resolveMaxReworkRounds(false, 3, &rc)
+	if got != 0 {
+		t.Errorf("resolveMaxReworkRounds = %d, want 0 (repo config value passed through, not silently defaulted)", got)
+	}
+}
+
 func TestResolveGateVerifyCommandExplicitFlagWinsOutright(t *testing.T) {
 	rc := repoconfig.Config{GateVerifyCommand: "make ci"}
 	got := resolveGateVerifyCommand(true, "make lint", &rc)

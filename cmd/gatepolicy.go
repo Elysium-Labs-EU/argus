@@ -70,6 +70,26 @@ func resolveMaxReworkBudget(explicit bool, flagValue int, rc *repoconfig.Config)
 	return flagValue
 }
 
+// resolveMaxReworkRounds applies an explicit --max-rounds flag over this
+// repo's .argus/config.yml rework.max_rounds over flagValue (already
+// supervisor.DefaultMaxReworkRounds when nothing was passed — see
+// newReworkCmd's own flag registration), the same explicit-flag-wins
+// precedence resolveMaxReworkBudget applies for ReworkBudget. Unlike
+// ReworkBudget (a cumulative, cross-invocation restart budget),
+// rework.max_rounds only bounds one invocation's own dispatch-and-judge
+// loop — until this field existed it was flag-only, with no config
+// equivalent at all. rc.MaxReworkRounds is a pointer for the same "0 isn't
+// the same as unset" reason as rc.ReworkBudget, even though the caller
+// (prepareReworkRun-adjacent validation in buildReworkConfig) rejects a
+// resolved value <=0 either way. rc is a pointer solely to avoid copying the
+// struct at the call site.
+func resolveMaxReworkRounds(explicit bool, flagValue int, rc *repoconfig.Config) int {
+	if !explicit && rc.MaxReworkRounds != nil {
+		return *rc.MaxReworkRounds
+	}
+	return flagValue
+}
+
 // resolveGateVerifyCommand applies an explicit --gate-verify-command flag
 // (or its deprecated alias --verify-cmd) over this repo's .argus/config.yml
 // gate_verify_command over "" (no command configured — the gate's prior

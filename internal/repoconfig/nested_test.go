@@ -236,6 +236,17 @@ func TestLoadGateClusterUnderAwaitingReviewParsesAllSix(t *testing.T) {
 	if len(got.Phases) != 0 {
 		t.Errorf("Phases = %+v, want empty — the gate cluster is plain Config fields, not phase policy", got.Phases)
 	}
+	wantDeprecated := []DeprecatedKeyUse{
+		{Old: "phases.awaiting_review.gate_verify_command", New: "review.gate_verify_command"},
+		{Old: "phases.awaiting_review.max_diff_lines", New: "review.max_diff_lines"},
+		{Old: "phases.awaiting_review.proof_required_paths", New: "review.proof_required_paths"},
+		{Old: "phases.awaiting_review.always_review_paths", New: "review.always_review_paths"},
+		{Old: "phases.awaiting_review.review_note", New: "review.review_note"},
+		{Old: "phases.awaiting_review.review_effort", New: "review.review_effort"},
+	}
+	if !reflect.DeepEqual(got.Deprecated, wantDeprecated) {
+		t.Errorf("Deprecated = %+v, want %+v — phases.awaiting_review is now a deprecated location for the gate/review cluster", got.Deprecated, wantDeprecated)
+	}
 }
 
 func TestLoadGateClusterListInlineValueErrors(t *testing.T) {
@@ -315,9 +326,9 @@ func TestLoadDeprecatedDottedPhaseKeysStillParseAndRecordNewLocation(t *testing.
 }
 
 // TestLoadDeprecatedFlatReviewPolicyKeysStillParse covers every flat
-// top-level review-policy key that moved under phases.awaiting_review: each
-// must still assign its Config field and record a Deprecated entry pointing
-// at its new nested location.
+// top-level review-policy key: each must still assign its Config field and
+// record a Deprecated entry pointing at its current canonical location
+// (review.* for the gate/review cluster, ship.* for the ship keys).
 func TestLoadDeprecatedFlatReviewPolicyKeysStillParse(t *testing.T) {
 	content := "max_diff_lines: 400\n" +
 		"proof_required_paths:\n  - terraform\n" +
@@ -350,12 +361,12 @@ func TestLoadDeprecatedFlatReviewPolicyKeysStillParse(t *testing.T) {
 		t.Errorf("TitlePrefixTemplate = %q, want %q", got.TitlePrefixTemplate, "TICKET-{issue}: ")
 	}
 	want := []DeprecatedKeyUse{
-		{Old: "max_diff_lines", New: "phases.awaiting_review.max_diff_lines"},
-		{Old: "proof_required_paths", New: "phases.awaiting_review.proof_required_paths"},
-		{Old: "always_review_paths", New: "phases.awaiting_review.always_review_paths"},
-		{Old: "review_note", New: "phases.awaiting_review.review_note"},
-		{Old: "review_effort", New: "phases.awaiting_review.review_effort"},
-		{Old: "gate_verify_command", New: "phases.awaiting_review.gate_verify_command"},
+		{Old: "max_diff_lines", New: "review.max_diff_lines"},
+		{Old: "proof_required_paths", New: "review.proof_required_paths"},
+		{Old: "always_review_paths", New: "review.always_review_paths"},
+		{Old: "review_note", New: "review.review_note"},
+		{Old: "review_effort", New: "review.review_effort"},
+		{Old: "gate_verify_command", New: "review.gate_verify_command"},
 		{Old: "ship_verify_command", New: "ship.verify_command"},
 		{Old: "title_prefix_template", New: "ship.title_prefix_template"},
 	}
@@ -384,10 +395,13 @@ func TestSaveEmitsNestedShipAndPhasesBlocks(t *testing.T) {
 		t.Fatalf("os.ReadFile: %v", err)
 	}
 	raw := string(rawBytes)
-	for _, want := range []string{"\nship:\n", "  verify_command: \"make ci\"\n", "\nphases:\n", "  working:\n", "    allow:\n", "  awaiting_review:\n", "    gate_verify_command: \"make lint\"\n", "    max_diff_lines: 400\n"} {
+	for _, want := range []string{"\nship:\n", "  verify_command: \"make ci\"\n", "\nreview:\n", "  gate_verify_command: \"make lint\"\n", "  max_diff_lines: 400\n", "\nphases:\n", "  working:\n", "    allow:\n"} {
 		if !strings.Contains(raw, want) {
 			t.Errorf("saved config = %q, want it to contain %q", raw, want)
 		}
+	}
+	if strings.Contains(raw, "awaiting_review:") {
+		t.Errorf("saved config = %q, want no phases.awaiting_review block — the gate/review cluster now lives under review:, and phases: holds only allow/deny/skip", raw)
 	}
 }
 
