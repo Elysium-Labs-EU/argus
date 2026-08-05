@@ -1676,6 +1676,109 @@ func TestDispatchIntoPaneSpawnRelabelSkippedWithoutLabel(t *testing.T) {
 	}
 }
 
+// TestRelabelFreshPaneHappyPath exercises relabelFreshPane directly (rather
+// than through the whole dispatchIntoPane flow): a resolvable pane/tab and a
+// clean TabRename call. Direct-call tests, not just the dispatchIntoPane
+// integration test above, are what actually reach this function's own
+// early-return branches without needing to fake an entire spawn sequence for
+// each one.
+func TestRelabelFreshPaneHappyPath(t *testing.T) {
+	logger := eventlog.New(nil, "rework", "test-run", nil)
+	var renamedTab, renamedLabel string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "pane" && args[1] == "list":
+			return []byte(`{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"tab-9"}]}}`), nil
+		case len(args) > 1 && args[0] == "tab" && args[1] == "rename":
+			renamedTab, renamedLabel = args[2], args[3]
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+	relabelFreshPane(context.Background(), logger, client, "w1:p1", "feat-x", "AP-1207")
+	if renamedTab != "tab-9" || renamedLabel != "AP-1207" {
+		t.Errorf("want TabRename(tab-9, AP-1207), got TabRename(%q, %q)", renamedTab, renamedLabel)
+	}
+}
+
+// TestRelabelFreshPaneEmptyLabelIsNoop confirms relabelFreshPane makes no
+// herdr call at all when label is "" — a rework task with no ticket-key
+// prefix leaves herdr's own default label alone rather than paying for a
+// lookup with nothing to rename to.
+func TestRelabelFreshPaneEmptyLabelIsNoop(t *testing.T) {
+	logger := eventlog.New(nil, "rework", "test-run", nil)
+	called := false
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		called = true
+		return []byte(`{"result":{}}`), nil
+	})
+	relabelFreshPane(context.Background(), logger, client, "w1:p1", "feat-x", "")
+	if called {
+		t.Error("want no herdr call at all with an empty label")
+	}
+}
+
+// TestRelabelFreshPanePaneListErrorIsBestEffort confirms a PaneList failure
+// is logged, not fatal: relabelFreshPane must return cleanly (no panic, no
+// error to propagate — it returns nothing at all) rather than aborting the
+// rework round over a cosmetic label. Calling it directly (not through
+// dispatchIntoPane) is what makes "no error to check" itself the assertion:
+// there is nothing else relabelFreshPane could do to signal failure, so the
+// test's job is confirming it merely returns.
+func TestRelabelFreshPanePaneListErrorIsBestEffort(t *testing.T) {
+	logger := eventlog.New(nil, "rework", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) > 1 && args[0] == "pane" && args[1] == "list" {
+			return nil, errors.New("herdr: transport error")
+		}
+		return []byte(`{"result":{}}`), nil
+	})
+	relabelFreshPane(context.Background(), logger, client, "w1:p1", "feat-x", "AP-1207")
+}
+
+// TestRelabelFreshPaneNoMatchingPaneIsBestEffort confirms relabelFreshPane
+// tolerates herdr's pane-list reply not containing the pane it just
+// dispatched into (or reporting no tab id for it) — a lookup gap that must
+// never fail the rework round.
+func TestRelabelFreshPaneNoMatchingPaneIsBestEffort(t *testing.T) {
+	logger := eventlog.New(nil, "rework", "test-run", nil)
+	tabRenameCalled := false
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "pane" && args[1] == "list":
+			return []byte(`{"result":{"panes":[{"pane_id":"w1:other-pane","tab_id":"tab-9"}]}}`), nil
+		case len(args) > 1 && args[0] == "tab" && args[1] == "rename":
+			tabRenameCalled = true
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+	relabelFreshPane(context.Background(), logger, client, "w1:p1", "feat-x", "AP-1207")
+	if tabRenameCalled {
+		t.Error("want no TabRename call when herdr's pane-list reply has no matching pane")
+	}
+}
+
+// TestRelabelFreshPaneTabRenameErrorIsBestEffort confirms a TabRename
+// failure is logged, not fatal — the same best-effort posture as a PaneList
+// failure above.
+func TestRelabelFreshPaneTabRenameErrorIsBestEffort(t *testing.T) {
+	logger := eventlog.New(nil, "rework", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "pane" && args[1] == "list":
+			return []byte(`{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"tab-9"}]}}`), nil
+		case len(args) > 1 && args[0] == "tab" && args[1] == "rename":
+			return nil, errors.New("herdr: rename rejected")
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+	relabelFreshPane(context.Background(), logger, client, "w1:p1", "feat-x", "AP-1207")
+}
+
 // TestDispatchIntoPaneSpawnLivenessAgentGetError confirms a genuine AgentGet
 // failure during the post-spawn liveness poll (a transport/decode error, not
 // herdr's expected "no live agent" outcome) surfaces immediately rather than

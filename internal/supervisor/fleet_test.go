@@ -302,6 +302,8 @@ func TestTicketKey(t *testing.T) {
 		{"AP-1169", "AP-1169"},
 		{"AP-1207: Fix DELETE /api/web_app/<uuid> 500", "AP-1207"},
 		{"ap-1207: fix delete", "AP-1207"},
+		{"nodash", ""},
+		{"AP-12-34-fix-thing", "AP-12"},
 	}
 	for _, c := range cases {
 		if got := TicketKey(c.s); got != c.want {
