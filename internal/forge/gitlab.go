@@ -78,12 +78,96 @@ func (g *gitlab) FindPR(ctx context.Context, owner, repo, branch string) (PR, bo
 	return PR{HTMLURL: mr.WebURL, State: mr.State, Number: mr.IID, MergedAt: mr.MergedAt}, true, nil
 }
 
-// PRChecks is not implemented for GitLab yet (see the Forge interface doc);
-// GitLab's own pipeline-status API has a different shape than GitHub's
-// check-runs and needs its own mapping, deliberately out of scope for this
-// first, GitHub-only slice.
-func (g *gitlab) PRChecks(_ context.Context, _, _ string, _ int) ([]Check, error) {
-	return nil, fmt.Errorf("PRChecks is not implemented for GitLab yet")
+// gitlabJobsPerPage is the page size PRChecks requests from GitLab's pipeline
+// jobs endpoint — comfortably above what a typical pipeline runs, so a full
+// listing takes as few round trips as possible.
+const gitlabJobsPerPage = 100
+
+// PRChecks maps the MR's current pipeline onto the GitHub-shaped Check
+// vocabulary the Forge interface asks every host to map onto (see its doc
+// comment): it looks up the MR's head_pipeline (falling back to the legacy
+// pipeline field some older GitLab versions still use instead), then lists
+// that pipeline's jobs, one Check per job. A merge request with no pipeline
+// yet (CI hasn't picked it up) reports zero checks and no error, the same
+// "not started" signal a caller like tend's evaluateChecks already reads for
+// a GitHub PR before any check has posted.
+func (g *gitlab) PRChecks(ctx context.Context, owner, repo string, number int) ([]Check, error) {
+	mrURL := fmt.Sprintf("%s/projects/%s/merge_requests/%d", g.base, projectID(owner, repo), number)
+	body, err := g.do(ctx, http.MethodGet, mrURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	var mr struct {
+		HeadPipeline *struct {
+			ID int `json:"id"`
+		} `json:"head_pipeline"`
+		Pipeline *struct {
+			ID int `json:"id"`
+		} `json:"pipeline"`
+	}
+	if err := json.Unmarshal(body, &mr); err != nil {
+		return nil, fmt.Errorf("decoding merge request response: %w", err)
+	}
+	var pipelineID int
+	switch {
+	case mr.HeadPipeline != nil:
+		pipelineID = mr.HeadPipeline.ID
+	case mr.Pipeline != nil:
+		pipelineID = mr.Pipeline.ID
+	default:
+		return nil, nil
+	}
+
+	var checks []Check
+	for page := 1; ; page++ {
+		jobsURL := fmt.Sprintf("%s/projects/%s/pipelines/%d/jobs?per_page=%d&page=%d",
+			g.base, projectID(owner, repo), pipelineID, gitlabJobsPerPage, page)
+		body, err := g.do(ctx, http.MethodGet, jobsURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		var jobs []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			WebURL string `json:"web_url"`
+		}
+		if err := json.Unmarshal(body, &jobs); err != nil {
+			return nil, fmt.Errorf("decoding pipeline jobs response: %w", err)
+		}
+		for _, j := range jobs {
+			state, conclusion := gitlabJobCheckState(j.Status)
+			checks = append(checks, Check{Name: j.Name, State: state, Conclusion: conclusion, LogURL: j.WebURL})
+		}
+		// Mirrors the GitHub check-runs client: a page shorter than requested
+		// is necessarily the last one.
+		if len(jobs) < gitlabJobsPerPage {
+			break
+		}
+	}
+	return checks, nil
+}
+
+// gitlabJobCheckState maps a GitLab pipeline job's status onto GitHub's
+// State/Conclusion vocabulary. A "manual" job is GitLab's own way of saying
+// "exists but waits on a human to click run" — it can sit there forever, so
+// tend must not block on it; mapping it to a terminal, non-blocking
+// "skipped" (the same conclusion GitHub gives an intentionally-not-run check)
+// lets a pipeline built around manual jobs still reach merge-ready.
+func gitlabJobCheckState(status string) (state, conclusion string) {
+	switch status {
+	case "success":
+		return "completed", "success"
+	case "failed":
+		return "completed", "failure"
+	case "canceled":
+		return "completed", "cancelled"
+	case "skipped", "manual":
+		return "completed", "skipped"
+	default:
+		// running, pending, created, scheduled, waiting_for_resource, and any
+		// future GitLab status all mean the job hasn't reached a final result.
+		return "in_progress", ""
+	}
 }
 
 func (g *gitlab) FetchIssue(ctx context.Context, owner, repo string, number int) (Issue, error) {

@@ -61,9 +61,10 @@ type Issue struct {
 // Check is one CI check on a PR's head commit. State/Conclusion follow
 // GitHub's own check-run vocabulary verbatim (its "completed"/"in_progress"
 // states, its "success"/"failure"/"neutral"/... conclusions, spelling and
-// all) since GitHub is PRChecks's only implemented shape so far; a later
-// Gitea/GitLab implementation must map its own states onto this same
-// vocabulary rather than growing check-specific fields here.
+// all) since GitHub was PRChecks's first implemented shape; GitLab's
+// PRChecks now maps its own pipeline-job states onto this same vocabulary
+// too (see gitlab.go), and a later Gitea/Forgejo implementation should do
+// the same rather than growing check-specific fields here.
 type Check struct {
 	Name       string
 	State      string
@@ -104,11 +105,12 @@ type Forge interface {
 	// from before this lookup existed. found is false (with no error) when no
 	// PR was ever opened for branch.
 	FindPR(ctx context.Context, owner, repo, branch string) (pr PR, found bool, err error)
-	// PRChecks returns every check-run reported against the PR's head commit
-	// via GitHub's Checks API — not the legacy Commit Status API some older
-	// CI integrations post to instead, which this does not read. Implemented
-	// for GitHub only so far; other hosts return a clear "not implemented"
-	// error rather than a wrong-shaped guess.
+	// PRChecks returns every check on the PR's head commit — GitHub's
+	// check-runs (not the legacy Commit Status API some older CI integrations
+	// post to instead, which this does not read) or GitLab's pipeline jobs,
+	// mapped onto the same Check vocabulary either way. Gitea/Forgejo has no
+	// implementation yet and returns a clear "not implemented" error rather
+	// than a wrong-shaped guess.
 	PRChecks(ctx context.Context, owner, repo string, number int) ([]Check, error)
 	Host() string
 }
