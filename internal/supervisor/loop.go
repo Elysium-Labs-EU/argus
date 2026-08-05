@@ -244,21 +244,29 @@ func BuildPlan(workers []Worker, base string, project protocol.PhaseConfig, base
 	return plans, nil
 }
 
-// briefFor's allow-set sentence is sourced from the same ResolvedAllowSet
-// settingsFor renders settings.local.json's Allow list from, so a worker
-// reads its own sandbox up front instead of discovering it by trial-and-error
-// deny — the same "drive the wording from the one authoritative source"
-// principle NeverRunBrief already applies to the commit/push clause.
+// briefFor's per-phase allow-set block is sourced from the same
+// ResolvedAllowForPhase settingsFor's static Allow list (via ResolvedAllowSet)
+// and the live check-tool hook both resolve from, so a worker reads its own
+// sandbox up front, phase by phase, instead of discovering the current
+// phase's narrower set by trial-and-error deny — the same "drive the wording
+// from the one authoritative source" principle NeverRunBrief already applies
+// to the commit/push clause. It states every phase's set, not just the
+// worker's starting one, since the same brief covers the worker's entire
+// lifecycle across every phase transition.
 func briefFor(w *Worker, base string, project protocol.PhaseConfig, baseAllow, extraAllow []string) string {
-	allowed := AllowSetBrief(ResolvedAllowSet(project, baseAllow, extraAllow))
+	allowed := PhaseAllowBrief(project, baseAllow, extraAllow, w.Worktree)
 	return fmt.Sprintf(`Task: %s
 Branch: %s
 
 Work only inside %s. Never delete, reset, or touch files outside it; another
 agent may share the parent repo. Write a todo list before anything else.
 
-You may run these commands: %s. Anything else is denied; use these or report
-blocked.
+Allowed commands depend on your current phase (enforced live, not merely
+advertised here):
+%s
+
+Anything not listed for your current phase is denied; use what's listed there
+or report blocked.
 
 Do the work and verify it (build + tests). %s — argus handles shipping. When
 the change is complete and tests pass, set your status phase to
@@ -1219,8 +1227,13 @@ func provisionWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) error {
 	// worker's own `argus worker report` never sets this field and carries
 	// it forward unchanged (see runWorkerReport), so ship can read back what
 	// base was actually used instead of re-defaulting to the literal "main".
+	//
+	// Phase is stamped planning, not left empty: a freshly spawned worker is
+	// planning from the instant it starts (reading its brief and building
+	// its plan is planning), and there is no legal Phase("") to leave it in
+	// any more — see internal/protocol/transition.go.
 	baseBranch := strings.TrimPrefix(cfg.Base, "origin/")
-	if err := protocol.Write(protocol.StatusPath(p.Worktree), &protocol.Status{Base: baseBranch}); err != nil {
+	if err := protocol.Write(protocol.StatusPath(p.Worktree), &protocol.Status{Base: baseBranch, Phase: protocol.PhasePlanning}); err != nil {
 		return fmt.Errorf("recording base branch for %s: %w", p.Task, err)
 	}
 	if err := WriteSettings(p.Worktree, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow); err != nil {

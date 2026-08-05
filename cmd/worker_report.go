@@ -163,13 +163,23 @@ func readReportBody(cmd *cobra.Command, file string) ([]byte, error) {
 // directly testable without going through cobra flag parsing or stdin.
 func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status, now func() time.Time) error {
 	cur, err := protocol.Load(protocol.StatusPath(worktree))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		// A missing file means "hasn't reported yet" (cur stays the zero
-		// Status, so "" -> next is evaluated normally below). Any other
-		// Load error means status.json exists but is corrupt or unreadable —
-		// treating that the same as "hasn't reported yet" would let a worker
-		// in a later phase silently skip the transition guard and wipe the
-		// carried-forward Base/Title/Question/Answer fields.
+	switch {
+	case err == nil:
+		// A real status.json: used as-is below.
+	case errors.Is(err, os.ErrNotExist):
+		// No status.json yet means no worker has reported at all — which is
+		// exactly what "planning" means (a fresh worker's first actions,
+		// before its first report, already are planning; see
+		// internal/protocol/transition.go), not the Phase("") blind spot no
+		// legal move used to exist from. cur.Plan stays empty, so
+		// RequiresPlanEvidence still blocks a first report from skipping
+		// straight to working without a real plan.
+		cur = protocol.Status{Phase: protocol.PhasePlanning}
+	default:
+		// Any other Load error means status.json exists but is corrupt or
+		// unreadable — treating that the same as "hasn't reported yet" would
+		// let a worker in a later phase silently skip the transition guard
+		// and wipe the carried-forward Base/Title/Question/Answer fields.
 		return &ui.UserError{
 			Err:  fmt.Errorf("loading status for %s: %w", worktree, err),
 			Hint: "status.json exists but could not be read; fix or remove it before reporting again",

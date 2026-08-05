@@ -14,25 +14,37 @@ import "slices"
 // still the live process in its worktree — it needs a way to reopen its own
 // status and resubmit without a second process being dispatched into the same
 // worktree.
-// Phase("") is the fresh-worktree case: no status.json exists yet, so Load
-// returns a zero Status and the only legal first move is into planning.
+//
+// There is deliberately no Phase("") row: a worker is always in a named
+// phase. A fresh worktree with no status.json yet resolves as planning (see
+// cmd/worker_report.go's runWorkerReport and cmd/worker_check_tool.go's
+// loadCurrentPhase) — the same phase a worker's first real actions (reading
+// its brief, building its plan) already are — rather than an ungoverned
+// blind spot no config key could ever target.
 //
 // Planning also self-loops: RequiresPlanEvidence blocks planning -> working
 // when the planning report on file carried an empty plan, and self-loop is
 // the only way for a worker to refile that same phase with a filled-in plan
 // — without it, an empty first planning report would be a dead end with no
-// legal move at all.
+// legal move at all. A missing status.json resolving as planning relies on
+// this same self-loop for a worker's very first report.
+//
+// Rebase has no self-loop and no recovery edge of its own: argus stamps it
+// once, at dispatch (see supervisor.RebasePhaseAllow's caller,
+// dispatchRebaseWorker), and RebaseBrief instructs the worker to move
+// straight to awaiting_review or blocked — there is no "report rebase
+// again" or "resume rebase from blocked" step in that brief to gate.
 //
 // PhaseDone is deliberately absent from every value list: a worker report can
 // never set it. "Done" means shipped, and only argus's own ship path (not a
 // worker call) ever gets to declare that — see the IsTerminal doc comment.
 var legalTransitions = map[Phase][]Phase{
-	Phase(""):           {PhasePlanning},
 	PhasePlanning:       {PhasePlanning, PhaseWorking},
 	PhaseWorking:        {PhaseSelfTest, PhaseBlocked},
 	PhaseSelfTest:       {PhaseAwaitingReview, PhaseWorking, PhaseBlocked},
 	PhaseAwaitingReview: {PhaseWorking, PhaseBlocked},
 	PhaseBlocked:        {PhaseWorking},
+	PhaseRebase:         {PhaseAwaitingReview, PhaseBlocked},
 }
 
 // IsLegalTransition reports whether a worker report may move a worktree's

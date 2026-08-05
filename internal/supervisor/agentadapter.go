@@ -124,19 +124,28 @@ type hookEntry struct {
 	Command string `json:"command"`
 }
 
-// checkToolHook wires `argus worker check-tool` as a PreToolUse/Bash hook on
-// every worker. The static allow/deny lists above are read once at session
-// launch and can only ever be the union across every phase (dontAsk has no
-// notion of "phase"), so a phase-conditional rule — both DeniedInPhase's
-// floor and ResolvedAllowForPhase's own per-phase scoping — needs a hook
-// that re-checks the worktree's current status.json live instead.
-func checkToolHook() hookMatcher {
-	return hookMatcher{
-		Matcher: "Bash",
-		Hooks: []hookEntry{
-			{Type: "command", Command: "argus worker check-tool"},
-		},
+// checkToolHooks wires `argus worker check-tool` as a PreToolUse hook on
+// every worker's Bash, Edit, and Write tool calls. The static allow/deny
+// lists above are read once at session launch and can only ever be the
+// union across every phase (dontAsk has no notion of "phase"), so a
+// phase-conditional rule needs a hook that re-checks the worktree's current
+// status.json live instead: DeniedInPhase's floor and ResolvedAllowForPhase's
+// own per-phase scoping for Bash, and PhaseAllowsMutation for Edit/Write —
+// the static Allow list can grant Edit/Write(worktree) for the whole
+// session (it has to, since working/self_test genuinely need it and the
+// file can't be re-rendered mid-session), so only this live check actually
+// keeps a worker from mutating tracked files outside working/self_test.
+// One hookMatcher per tool name rather than a single combined matcher
+// pattern, since Claude Code's own matcher syntax is documented per exact
+// tool name, not as a general regex.
+func checkToolHooks() []hookMatcher {
+	hooks := []hookEntry{{Type: "command", Command: "argus worker check-tool"}}
+	matchers := []string{"Bash", "Edit", "Write"}
+	out := make([]hookMatcher, len(matchers))
+	for i, m := range matchers {
+		out[i] = hookMatcher{Matcher: m, Hooks: hooks}
 	}
+	return out
 }
 
 // settingsFor builds the worktree-scoped permission settings for
@@ -163,21 +172,16 @@ func checkToolHook() hookMatcher {
 // current phase — checkToolHook is what actually narrows a live Bash call
 // down to what the *current* phase's own resolved set allows.
 func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) permissionSettings {
-	glob := worktree + "/**"
-	allow := []string{
-		"Edit(" + glob + ")",
-		"Write(" + glob + ")",
-	}
-	allow = append(allow, ResolvedAllowSet(project, baseAllow, extraAllow)...)
+	allow := ResolvedAllowSet(project, baseAllow, extraAllow, worktree)
 
 	// Deny wins over allow in Claude Code regardless of pattern specificity
 	// (deny/allow are checked in that order, first match wins), so these
-	// entries carve the worker's own permission files out of the broad
-	// Edit/Write(glob) allows above: without them a worker could rewrite its
-	// own settings.local.json mid-session and grant itself capability the
-	// operator never approved. WriteSettings only resets the file at the
-	// start of the *next* run, which leaves the entire current session
-	// unprotected.
+	// entries carve the worker's own permission files out of the
+	// Edit/Write(glob) allows folded into ResolvedAllowSet above: without
+	// them a worker could rewrite its own settings.local.json mid-session
+	// and grant itself capability the operator never approved. WriteSettings
+	// only resets the file at the start of the *next* run, which leaves the
+	// entire current session unprotected.
 	ownSettings := []string{
 		worktree + "/.claude/settings.local.json",
 		worktree + "/.claude/settings.json",
@@ -212,7 +216,7 @@ func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extra
 			Allow: allow,
 			Deny:  deny,
 		},
-		Hooks:                      hooksBlock{PreToolUse: []hookMatcher{checkToolHook()}},
+		Hooks:                      hooksBlock{PreToolUse: checkToolHooks()},
 		EnableAllProjectMcpServers: true,
 	}
 }

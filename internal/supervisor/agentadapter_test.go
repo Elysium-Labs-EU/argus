@@ -111,21 +111,33 @@ func TestSettingsForAllowUnionsEveryPhase(t *testing.T) {
 }
 
 // TestSettingsForWiresCheckToolHook confirms every freshly spawned worker
-// gets the phase-aware PreToolUse hook without any operator config: the
-// static allow/deny lists above are only read once at session launch, so
+// gets the phase-aware PreToolUse hook, on all three tools whose phase
+// scoping is only ever enforced live (Bash commands and, since Edit/Write
+// can't be phase-scoped in the static Allow list — see PhaseAllowsMutation
+// — Edit/Write calls too), without any operator config: the static
+// allow/deny lists above are only read once at session launch, so
 // DeniedInPhase's/ResolvedAllowForPhase's live per-phase enforcement depends
 // on this hook actually being present in every rendered settings file.
 func TestSettingsForWiresCheckToolHook(t *testing.T) {
 	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil)
-	if len(settings.Hooks.PreToolUse) != 1 {
-		t.Fatalf("PreToolUse hooks = %d, want 1", len(settings.Hooks.PreToolUse))
+	if len(settings.Hooks.PreToolUse) != 3 {
+		t.Fatalf("PreToolUse hooks = %d, want 3", len(settings.Hooks.PreToolUse))
 	}
-	matcher := settings.Hooks.PreToolUse[0]
-	if matcher.Matcher != "Bash" {
-		t.Errorf("matcher = %q, want %q", matcher.Matcher, "Bash")
+	wantMatchers := map[string]bool{"Bash": false, "Edit": false, "Write": false}
+	for _, matcher := range settings.Hooks.PreToolUse {
+		if _, ok := wantMatchers[matcher.Matcher]; !ok {
+			t.Errorf("unexpected matcher %q", matcher.Matcher)
+			continue
+		}
+		wantMatchers[matcher.Matcher] = true
+		if len(matcher.Hooks) != 1 || matcher.Hooks[0].Command != "argus worker check-tool" {
+			t.Errorf("matcher %q hook entries = %+v, want a single \"argus worker check-tool\" command", matcher.Matcher, matcher.Hooks)
+		}
 	}
-	if len(matcher.Hooks) != 1 || matcher.Hooks[0].Command != "argus worker check-tool" {
-		t.Errorf("hook entries = %+v, want a single \"argus worker check-tool\" command", matcher.Hooks)
+	for m, seen := range wantMatchers {
+		if !seen {
+			t.Errorf("missing PreToolUse hook for matcher %q", m)
+		}
 	}
 }
 

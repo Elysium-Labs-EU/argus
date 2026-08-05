@@ -11,7 +11,7 @@ func TestDeniedInPhase(t *testing.T) {
 	// verdict exists. Test every phase, not just planning, to guard the
 	// exact escalation this replaced: commit/push used to be merely
 	// ask-gated outside planning.
-	every := append([]Phase{Phase(""), PhaseDone}, ConfigurablePhases...)
+	every := append([]Phase{Phase(""), PhaseDone, PhaseRebase}, ConfigurablePhases...)
 	for _, p := range every {
 		got := DeniedInPhase(p)
 		if !slices.Equal(got, DenyFloor()) {

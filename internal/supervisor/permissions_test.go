@@ -8,12 +8,18 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
 )
 
+// allReportedAndRebasePhases is every phase ResolvedAllowForPhase is ever
+// actually called with in production: the five reportable phases plus the
+// argus-stamped rebase phase. There is deliberately no Phase("") here any
+// more — see internal/protocol/transition.go.
+var allReportedAndRebasePhases = append(slices.Clone(protocol.ConfigurablePhases), protocol.PhaseRebase)
+
 func TestResolvedAllowForPhase_StructuralFloorAlwaysPresent(t *testing.T) {
-	for _, p := range append([]protocol.Phase{protocol.Phase(""), protocol.PhaseDone}, protocol.ConfigurablePhases...) {
-		got := ResolvedAllowForPhase(p, nil, nil, nil)
-		for _, want := range structuralFloorAllow {
+	for _, p := range allReportedAndRebasePhases {
+		got := ResolvedAllowForPhase(p, "/tmp/wt", nil, nil, nil)
+		for _, want := range allPhaseFloor {
 			if !slices.Contains(got, want) {
-				t.Errorf("phase %q: resolved allow %v missing structural floor entry %q", p, got, want)
+				t.Errorf("phase %q: resolved allow %v missing all-phase floor entry %q", p, got, want)
 			}
 		}
 	}
@@ -24,9 +30,8 @@ func TestResolvedAllowForPhase_StructuralFloorAlwaysPresent(t *testing.T) {
 // spawn brief, RebaseBrief, and ReworkBrief) is covered by the structural
 // floor alone, with no repo config or extraAllow needed — the same
 // brief-instructs-a-command-nothing-grants gap RebaseBrief's git fetch/merge
-// hit, but for every worker's routine status report instead of one
-// operation, so it must hold with zero config in every phase including the
-// empty/initial one.
+// once hit, but for every worker's routine status report instead of one
+// operation, so it must hold with zero config in every phase.
 func TestStructuralFloorCoversWriterBriefCommands(t *testing.T) {
 	brief := protocol.WriterBrief("origin/main")
 	commands := []string{"git diff --stat origin/main", "git ls-files --others --exclude-standard"}
@@ -35,8 +40,8 @@ func TestStructuralFloorCoversWriterBriefCommands(t *testing.T) {
 			t.Fatalf("test setup: WriterBrief does not actually instruct %q:\n%s", cmd, brief)
 		}
 	}
-	for _, phase := range append([]protocol.Phase{protocol.Phase("")}, protocol.ConfigurablePhases...) {
-		allow := ResolvedAllowForPhase(phase, nil, nil, nil)
+	for _, phase := range allReportedAndRebasePhases {
+		allow := ResolvedAllowForPhase(phase, "/tmp/wt", nil, nil, nil)
 		for _, cmd := range commands {
 			if !AllowCoversCommand(allow, cmd) {
 				t.Errorf("phase %q: structural floor does not cover WriterBrief command %q: %v", phase, cmd, allow)
@@ -45,9 +50,60 @@ func TestStructuralFloorCoversWriterBriefCommands(t *testing.T) {
 	}
 }
 
+// TestResolvedAllowForPhase_EditWriteOnlyWorkingAndSelfTest is the phase-
+// scoping guarantee at the center of this package: a worker may only mutate
+// tracked files while actually building the change.
+func TestResolvedAllowForPhase_EditWriteOnlyWorkingAndSelfTest(t *testing.T) {
+	worktree := "/tmp/wt"
+	editEntry := "Edit(" + worktree + "/**)"
+	writeEntry := "Write(" + worktree + "/**)"
+	mutating := map[protocol.Phase]bool{
+		protocol.PhaseWorking:  true,
+		protocol.PhaseSelfTest: true,
+	}
+	for _, p := range allReportedAndRebasePhases {
+		got := ResolvedAllowForPhase(p, worktree, nil, nil, nil)
+		has := slices.Contains(got, editEntry) && slices.Contains(got, writeEntry)
+		if has != mutating[p] {
+			t.Errorf("phase %q: Edit/Write present=%v, want %v (allow=%v)", p, has, mutating[p], got)
+		}
+	}
+}
+
+// TestResolvedAllowForPhase_RebaseGetsGitFetchMergeAndVerify confirms the
+// rebase phase's own grant (computed by cmd/worker_check_tool.go from
+// supervisor.RebasePhaseAllow and passed in as extraAllow) reaches
+// ResolvedAllowForPhase only for protocol.PhaseRebase, never any other
+// phase — the replacement for the old blanket extraAllow injection.
+func TestResolvedAllowForPhase_RebaseGetsGitFetchMergeAndVerify(t *testing.T) {
+	rebaseAllow := RebasePhaseAllow("main", "make ci", "")
+	for _, want := range []string{"Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)", "Bash(make ci)"} {
+		if !slices.Contains(rebaseAllow, want) {
+			t.Fatalf("test setup: RebasePhaseAllow(%q, ...) missing %q: %v", "main", want, rebaseAllow)
+		}
+	}
+	got := ResolvedAllowForPhase(protocol.PhaseRebase, "/tmp/wt", nil, nil, rebaseAllow)
+	for _, want := range rebaseAllow {
+		if !slices.Contains(got, want) {
+			t.Errorf("phase rebase: resolved allow %v missing rebase grant %q", got, want)
+		}
+	}
+	// The same rebaseAllow entries handed to a non-rebase phase's extraAllow
+	// must never leak in from anywhere but the caller's own choice to pass
+	// them — ResolvedAllowForPhase itself does not special-case rebase
+	// commands, so a working-phase resolution that was never given them
+	// simply doesn't have them.
+	other := ResolvedAllowForPhase(protocol.PhaseWorking, "/tmp/wt", nil, nil, nil)
+	for _, cmd := range rebaseAllow {
+		if slices.Contains(other, cmd) {
+			t.Errorf("phase working: rebase-only grant %q leaked in unasked: %v", cmd, other)
+		}
+	}
+}
+
 func TestResolvedAllowForPhase_UnionsBaseConfigAndExtra(t *testing.T) {
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
-	got := ResolvedAllowForPhase(protocol.PhaseWorking, project, []string{"Bash(make *)"}, []string{"Bash(npm ci*)"})
+	got := ResolvedAllowForPhase(protocol.PhaseWorking, "/tmp/wt", project, []string{"Bash(make *)"}, []string{"Bash(npm ci*)"})
 	for _, want := range []string{"Bash(go test*)", "Bash(make *)", "Bash(npm ci*)"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("resolved allow %v missing %q", got, want)
@@ -55,7 +111,7 @@ func TestResolvedAllowForPhase_UnionsBaseConfigAndExtra(t *testing.T) {
 	}
 
 	// A phase's own allow entry must not leak into a different phase.
-	other := ResolvedAllowForPhase(protocol.PhasePlanning, project, nil, nil)
+	other := ResolvedAllowForPhase(protocol.PhasePlanning, "/tmp/wt", project, nil, nil)
 	if slices.Contains(other, "Bash(go test*)") {
 		t.Errorf("phases.working.allow leaked into planning: %v", other)
 	}
@@ -63,7 +119,7 @@ func TestResolvedAllowForPhase_UnionsBaseConfigAndExtra(t *testing.T) {
 
 func TestResolvedAllowForPhase_DedupesPreservingOrder(t *testing.T) {
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(git status*)", "Bash(make *)"}}}
-	got := ResolvedAllowForPhase(protocol.PhaseWorking, project, nil, nil)
+	got := ResolvedAllowForPhase(protocol.PhaseWorking, "/tmp/wt", project, nil, nil)
 	count := 0
 	for _, e := range got {
 		if e == "Bash(git status*)" {
@@ -79,7 +135,8 @@ func TestResolvedAllowForPhase_DedupesPreservingOrder(t *testing.T) {
 // the exact privilege-escalation shape a prior attempt shipped: a repo
 // config granting git push/commit (or argus's own supervisor commands)
 // under some phase's own allow list, or via an operator --allow flag, must
-// never survive resolution — in every configurable phase, not just planning.
+// never survive resolution — in every phase, not just planning, and not just
+// the five reportable ones now that rebase is also governed.
 func TestResolvedAllowForPhase_DenyFloorUnremovable(t *testing.T) {
 	denyFloorGlobs := []string{
 		"Bash(git push*)", "Bash(git push origin*)",
@@ -87,9 +144,9 @@ func TestResolvedAllowForPhase_DenyFloorUnremovable(t *testing.T) {
 		"Bash(argus ship*)", "Bash(argus rework*)", "Bash(argus review*)", "Bash(argus supervise*)",
 		"Bash(git *)", // broad enough to cover commit/push too
 	}
-	for _, p := range protocol.ConfigurablePhases {
+	for _, p := range allReportedAndRebasePhases {
 		project := protocol.PhaseConfig{p: {Allow: slices.Clone(denyFloorGlobs)}}
-		got := ResolvedAllowForPhase(p, project, denyFloorGlobs, denyFloorGlobs)
+		got := ResolvedAllowForPhase(p, "/tmp/wt", project, denyFloorGlobs, denyFloorGlobs)
 		for _, bad := range denyFloorGlobs {
 			if slices.Contains(got, bad) {
 				t.Errorf("phase %q: deny-floor-conflicting entry %q survived resolution: %v", p, bad, got)
@@ -181,7 +238,7 @@ func TestResolvedAllowSet_UnionsAcrossPhases(t *testing.T) {
 		protocol.PhaseWorking:  {Allow: []string{"Bash(go test*)"}},
 		protocol.PhasePlanning: {Allow: []string{"Bash(go vet*)"}},
 	}
-	got := ResolvedAllowSet(project, []string{"Bash(make *)"}, []string{"Bash(npm ci*)"})
+	got := ResolvedAllowSet(project, []string{"Bash(make *)"}, []string{"Bash(npm ci*)"}, "/tmp/wt")
 	for _, want := range []string{"Bash(go test*)", "Bash(go vet*)", "Bash(make *)", "Bash(npm ci*)"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("resolved allow set %v missing %q — must union across every configurable phase, not just one", got, want)
@@ -189,10 +246,27 @@ func TestResolvedAllowSet_UnionsAcrossPhases(t *testing.T) {
 	}
 }
 
+// TestResolvedAllowSet_ExcludesRebase confirms the static-file/brief union
+// never preemptively advertises argus's own rebase-dispatch mechanics to a
+// worker that was never dispatched to rebase — ResolvedAllowSet unions
+// protocol.ConfigurablePhases, which deliberately excludes protocol.PhaseRebase.
+func TestResolvedAllowSet_ExcludesRebase(t *testing.T) {
+	if slices.Contains(protocol.ConfigurablePhases, protocol.PhaseRebase) {
+		t.Fatal("protocol.ConfigurablePhases must not include PhaseRebase — rebase is argus-stamped, never worker-reported or repo-configurable")
+	}
+	rebaseOnly := RebasePhaseAllow("main", "", "")
+	got := ResolvedAllowSet(nil, nil, nil, "/tmp/wt")
+	for _, cmd := range rebaseOnly {
+		if slices.Contains(got, cmd) {
+			t.Errorf("ResolvedAllowSet unexpectedly includes rebase-only grant %q: %v", cmd, got)
+		}
+	}
+}
+
 func TestResolvedAllowSet_MatchesSettingsForAllow(t *testing.T) {
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
 	settings := settingsFor("/tmp/wt", project, []string{"Bash(make *)"}, nil)
-	for _, want := range ResolvedAllowSet(project, []string{"Bash(make *)"}, nil) {
+	for _, want := range ResolvedAllowSet(project, []string{"Bash(make *)"}, nil, "/tmp/wt") {
 		if !slices.Contains(settings.Permissions.Allow, want) {
 			t.Errorf("settingsFor's rendered Allow %v missing %q from ResolvedAllowSet — brief and settings file must read the same resolved set", settings.Permissions.Allow, want)
 		}
@@ -211,6 +285,52 @@ func TestAllowSetBrief(t *testing.T) {
 	}
 	if got := AllowSetBrief([]string{"Edit(/tmp/**)"}); got != "(none)" {
 		t.Errorf("AllowSetBrief(non-Bash only) = %q, want %q", got, "(none)")
+	}
+}
+
+func TestPhaseAllowBrief_StatesEachPhaseAndMutationCallout(t *testing.T) {
+	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
+	got := PhaseAllowBrief(project, nil, nil, "/tmp/wt")
+	for _, p := range protocol.ConfigurablePhases {
+		if !strings.Contains(got, string(p)+":") {
+			t.Errorf("PhaseAllowBrief missing a line for phase %q:\n%s", p, got)
+		}
+	}
+	if !strings.Contains(got, "go test*") {
+		t.Errorf("PhaseAllowBrief missing project-configured working allow entry:\n%s", got)
+	}
+	workingLine := lineFor(got, "working")
+	if !strings.Contains(workingLine, "file edits allowed") {
+		t.Errorf("working line should call out file edits allowed: %q", workingLine)
+	}
+	planningLine := lineFor(got, "planning")
+	if !strings.Contains(planningLine, "no file edits") {
+		t.Errorf("planning line should call out no file edits: %q", planningLine)
+	}
+}
+
+func lineFor(block, phase string) string {
+	for l := range strings.SplitSeq(block, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), phase+":") {
+			return l
+		}
+	}
+	return ""
+}
+
+func TestPhaseAllowsMutation(t *testing.T) {
+	cases := map[protocol.Phase]bool{
+		protocol.PhasePlanning:       false,
+		protocol.PhaseWorking:        true,
+		protocol.PhaseSelfTest:       true,
+		protocol.PhaseAwaitingReview: false,
+		protocol.PhaseBlocked:        false,
+		protocol.PhaseRebase:         false,
+	}
+	for phase, want := range cases {
+		if got := PhaseAllowsMutation(phase); got != want {
+			t.Errorf("PhaseAllowsMutation(%q) = %v, want %v", phase, got, want)
+		}
 	}
 }
 

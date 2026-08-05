@@ -854,17 +854,17 @@ func TestDispatchRebaseWorkerPersistsBaseAfterInvalidate(t *testing.T) {
 	}
 }
 
-// TestDispatchRebaseWorkerGrantsBriefCommandsAsExtraAllow is the end-to-end
-// regression test for the dontAsk rebase deadlock: dispatchRebaseWorker must
-// persist the worktree's extraAllow (see protocol.LoadExtraAllow) with
-// exactly the git commands RebaseBrief instructs the worker to run, before
-// the worker ever gets dispatched — a worktree with a default (unmigrated)
-// .argus/config.yml has no other way to grant them, since the rebase worker
-// starts in the empty/initial phase and can't self-grant from inside its own
-// worktree. No worker reports here (ctx times out first), so the only way
-// extra_allow.json can carry these entries afterward is dispatchRebaseWorker's
-// own grant, not anything a fake worker wrote.
-func TestDispatchRebaseWorkerGrantsBriefCommandsAsExtraAllow(t *testing.T) {
+// TestDispatchRebaseWorkerStampsRebasePhase is the end-to-end regression
+// test for the dontAsk rebase deadlock: dispatchRebaseWorker must stamp
+// status.json's Phase as protocol.PhaseRebase, with Base set, before the
+// worker ever gets dispatched — that's what lets cmd/worker_check_tool.go's
+// runWorkerCheckTool compute supervisor.RebasePhaseAllow live and grant the
+// worker's own brief its git fetch/merge commands, without a blanket
+// extraAllow injection reaching every other phase too. No worker reports
+// here (ctx times out first), so the status.json read back afterward is
+// exactly dispatchRebaseWorker's own pre-dispatch write, not anything a fake
+// worker wrote.
+func TestDispatchRebaseWorkerStampsRebasePhase(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()
 
@@ -880,38 +880,23 @@ func TestDispatchRebaseWorkerGrantsBriefCommandsAsExtraAllow(t *testing.T) {
 		t.Fatalf("want the no-status error, got %v", err)
 	}
 
-	got, lerr := protocol.LoadExtraAllow(worktree)
+	status, lerr := protocol.Load(protocol.StatusPath(worktree))
 	if lerr != nil {
-		t.Fatalf("LoadExtraAllow: %v", lerr)
+		t.Fatalf("loading status.json after dispatch: %v", lerr)
 	}
-	for _, want := range supervisor.RebaseExtraAllow("main") {
-		if !slices.Contains(got, want) {
-			t.Errorf("worktree extraAllow %v missing rebase-brief grant %q", got, want)
+	if status.Phase != protocol.PhaseRebase {
+		t.Errorf("Phase = %q, want %q", status.Phase, protocol.PhaseRebase)
+	}
+	if status.Base != "main" {
+		t.Errorf("Base = %q, want %q", status.Base, "main")
+	}
+
+	rebaseAllow := supervisor.RebasePhaseAllow("main", "", "")
+	resolved := supervisor.ResolvedAllowForPhase(status.Phase, worktree, nil, nil, rebaseAllow)
+	for _, want := range rebaseAllow {
+		if !slices.Contains(resolved, want) {
+			t.Errorf("resolved allow for the stamped phase %v missing rebase-brief grant %q", resolved, want)
 		}
-	}
-}
-
-// TestDispatchRebaseWorkerGrantExtraAllowErrorPropagates confirms a failure
-// granting the rebase worker its brief's git commands (an unreadable
-// extra_allow.json here — a directory sitting at its path, so
-// protocol.LoadExtraAllow's os.ReadFile refuses) aborts the dispatch with a
-// wrapped error, rather than proceeding to write a brief the worker's
-// permission grant doesn't actually cover.
-func TestDispatchRebaseWorkerGrantExtraAllowErrorPropagates(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	worktree := t.TempDir()
-	if err := os.MkdirAll(protocol.ExtraAllowPath(worktree), 0o755); err != nil {
-		t.Fatalf("seeding unreadable extra_allow.json: %v", err)
-	}
-
-	logger := eventlog.New(nil, "rebase", "test-run", nil)
-	client := fakeRebaseClient("w1:p1", nil, nil)
-
-	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
-		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
-	})
-	if err == nil || !strings.Contains(err.Error(), "granting rebase worker its own brief's git commands") {
-		t.Fatalf("want the GrantExtraAllow error wrapped, got %v", err)
 	}
 }
 
