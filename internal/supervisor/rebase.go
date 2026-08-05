@@ -270,6 +270,19 @@ func VerifyPushLanded(ctx context.Context, worktree, branch string) error {
 	return nil
 }
 
+// rebaseGitCommands is the single source for the exact git command lines a
+// rebase worker needs: RebaseBrief renders them into the worker's task text,
+// and RebaseExtraAllow grants exactly the same two strings as Bash
+// permission-allow entries, so the instruction and the permission can never
+// drift apart the way a rebase dispatch once drifted for git push itself
+// (see AskGatedCommands's doc comment).
+func rebaseGitCommands(base string) [2]string {
+	return [2]string{
+		"git fetch origin " + base,
+		"git merge origin/" + base + " --no-commit",
+	}
+}
+
 // RebaseBrief is the task brief argus injects when dispatching a worker to
 // resolve a post-merge conflict. The deterministic work (detecting the
 // conflict, spawning the worker, committing and pushing the result) is
@@ -285,13 +298,14 @@ func VerifyPushLanded(ctx context.Context, worktree, branch string) error {
 // genuinely never attempted, which is what a rebase's own worktree
 // permission file (settingsFor) gates behind an unattended approval prompt.
 func RebaseBrief(branch, base string) string {
+	cmds := rebaseGitCommands(base)
 	return fmt.Sprintf(`Task: resolve a post-merge conflict on branch %s
 
 A sibling change merged into %s first, so your branch now conflicts with it.
 This is expected. Resolve it in place (do NOT open a new PR):
 
-  git fetch origin %s
-  git merge origin/%s --no-commit
+  %s
+  %s
   # resolve conflicts so BOTH your change and the merged change coexist
   # leave the resolution unstaged and uncommitted — argus stages it for you
   # re-run the repo's checks (make ci, or make test + make lint)
@@ -307,7 +321,26 @@ Confirm the checks pass against the merged, uncommitted result, then set your
 status phase to "awaiting_review". Use "blocked" if the resolution needs a
 decision only the supervisor can make.
 
-%s`, branch, base, base, base, protocol.NeverRunBrief(protocol.AskGatedCommands), protocol.WriterBrief("origin/"+base))
+%s`, branch, base, cmds[0], cmds[1], protocol.NeverRunBrief(protocol.AskGatedCommands), protocol.WriterBrief("origin/"+base))
+}
+
+// RebaseExtraAllow returns the Bash permission-allow entries covering
+// exactly the git commands RebaseBrief instructs the rebase worker to run
+// for base — no more. dispatchRebaseWorker grants these into the worktree's
+// own extraAllow (see GrantExtraAllow) as part of the rebase dispatch
+// itself, rather than requiring an operator to hand-add them to a repo's
+// .argus/config.yml: this is argus's own operation, not something every
+// working-phase worker in the repo should be able to run. The rebase worker
+// starts in the empty/initial phase (status.json has no Phase until its
+// first report — see dispatchRebaseWorker), not "working", so this must
+// reach the worker independent of phase; extraAllow is exactly that
+// mechanism (see ResolvedAllowForPhase).
+func RebaseExtraAllow(base string) []string {
+	cmds := rebaseGitCommands(base)
+	return []string{
+		"Bash(" + cmds[0] + ")",
+		"Bash(" + cmds[1] + ")",
+	}
 }
 
 // InvalidateStatus removes a worktree's status and verdict files, if present,

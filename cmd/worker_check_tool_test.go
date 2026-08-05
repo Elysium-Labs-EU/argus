@@ -240,6 +240,59 @@ func TestRunWorkerCheckTool(t *testing.T) {
 	})
 }
 
+// TestRunWorkerCheckToolRebaseDispatchAllowsFetchMergeDeniesCommitPush is the
+// end-to-end acceptance test for the dontAsk rebase deadlock: it drives the
+// real PreToolUse hook entrypoint (runWorkerCheckTool, the exact function
+// `argus worker check-tool` runs) against a worktree shaped exactly like a
+// freshly dispatched rebase worker — no .argus/config.yml (a default,
+// unmigrated repo, so the operator never hand-added anything), status.json
+// with no Phase set (the empty/initial phase dispatchRebaseWorker leaves a
+// worktree in before the worker's first report), and extraAllow persisted
+// via the real supervisor.GrantExtraAllow(worktree, supervisor.RebaseExtraAllow(base))
+// call dispatchRebaseWorker itself makes. It confirms both of RebaseBrief's
+// instructed git commands pass, git commit/push stay denied, and the
+// structural floor's git ls-files entry (every worker brief's shared
+// diff_stat instruction) also passes.
+func TestRunWorkerCheckToolRebaseDispatchAllowsFetchMergeDeniesCommitPush(t *testing.T) {
+	origExit := osExit
+	t.Cleanup(func() { osExit = origExit })
+	var exitCode int
+	osExit = func(code int) { exitCode = code }
+
+	repo := t.TempDir()
+	initGitDirAt(t, repo)
+	// No repoconfig.Save call: this repo's .argus/config.yml stays entirely
+	// absent, the default/unmigrated state the acceptance criteria require.
+	if err := protocol.Write(protocol.StatusPath(repo), &protocol.Status{Base: "main"}); err != nil {
+		t.Fatalf("seeding empty-phase status: %v", err)
+	}
+	if err := supervisor.GrantExtraAllow(repo, supervisor.RebaseExtraAllow("main")); err != nil {
+		t.Fatalf("GrantExtraAllow: %v", err)
+	}
+
+	run := func(t *testing.T, cmd string) int {
+		t.Helper()
+		exitCode = 0
+		stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":%q}}`, repo, cmd))
+		var stderr bytes.Buffer
+		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+			t.Fatalf("runWorkerCheckTool(%q): %v", cmd, err)
+		}
+		return exitCode
+	}
+
+	for _, cmd := range []string{"git fetch origin main", "git merge origin/main --no-commit", "git ls-files --others --exclude-standard"} {
+		if got := run(t, cmd); got != 0 {
+			t.Errorf("cmd %q: exit code = %d, want 0 (allowed)", cmd, got)
+		}
+	}
+	for _, cmd := range []string{"git commit -m x", "git push origin feat-x"} {
+		if got := run(t, cmd); got != 2 {
+			t.Errorf("cmd %q: exit code = %d, want 2 (denied — argus ship commits/pushes, not the worker)", cmd, got)
+		}
+	}
+}
+
 func TestLoadProjectPolicy(t *testing.T) {
 	t.Run("not a git repo fails open to zero values", func(t *testing.T) {
 		phases, allow := loadProjectPolicy(context.Background(), t.TempDir())

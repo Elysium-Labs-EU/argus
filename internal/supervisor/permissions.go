@@ -16,10 +16,20 @@ import (
 // documents it as a comment instead (see repoconfig's encodeYAML), for
 // visibility without a second, config-file copy that resolution would then
 // have to reconcile against this one.
+//
+// git ls-files is here for the same reason git status/diff/log are: every
+// worker brief's shared status-reporting block (protocol.WriterBrief) tells
+// the worker to run `git ls-files --others --exclude-standard` to compute
+// diff_stat's untracked-file count — an argus-authored instruction handed to
+// every worker, in every phase, not something scoped to one dispatch path
+// the way RebaseExtraAllow is. Denying it by default would repeat the same
+// brief-instructs-a-command-nothing-grants gap the rebase dispatch hit, just
+// for every worker's routine status report instead of one operation.
 var structuralFloorAllow = []string{
 	"Bash(git status*)",
 	"Bash(git diff*)",
 	"Bash(git log*)",
+	"Bash(git ls-files*)",
 	"Bash(argus worker report*)",
 	"Bash(argus worker answer*)",
 	"Bash(argus worker steer*)",

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
@@ -74,6 +75,27 @@ func WriteSettings(worktree string, project protocol.PhaseConfig, baseAllow, ext
 	}
 	if err := protocol.SaveExtraAllow(worktree, extraAllow); err != nil {
 		return fmt.Errorf("persisting extra allow flags: %w", err)
+	}
+	return nil
+}
+
+// GrantExtraAllow unions commands into worktree's already-persisted
+// extraAllow (see protocol.SaveExtraAllow), keeping whatever operator
+// --allow flags the worktree's original spawn wrote there rather than
+// discarding them. This is how a dispatch that re-enters an existing
+// worktree (rebase, ...) grants a permission its own authored brief
+// instructs but the original spawn had no reason to include — extraAllow is
+// read fresh off disk by the live check-tool hook on every Bash call (see
+// protocol.LoadExtraAllow), so no session restart is needed for the grant to
+// take effect.
+func GrantExtraAllow(worktree string, commands []string) error {
+	existing, err := protocol.LoadExtraAllow(worktree)
+	if err != nil {
+		return fmt.Errorf("loading existing extra allow for %s: %w", worktree, err)
+	}
+	merged := dedupeStrings(append(slices.Clone(existing), commands...))
+	if err := protocol.SaveExtraAllow(worktree, merged); err != nil {
+		return fmt.Errorf("granting %s extra allow: %w", worktree, err)
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
@@ -13,6 +14,32 @@ func TestResolvedAllowForPhase_StructuralFloorAlwaysPresent(t *testing.T) {
 		for _, want := range structuralFloorAllow {
 			if !slices.Contains(got, want) {
 				t.Errorf("phase %q: resolved allow %v missing structural floor entry %q", p, got, want)
+			}
+		}
+	}
+}
+
+// TestStructuralFloorCoversWriterBriefCommands confirms every git command
+// protocol.WriterBrief instructs (shared by every dispatch path: the initial
+// spawn brief, RebaseBrief, and ReworkBrief) is covered by the structural
+// floor alone, with no repo config or extraAllow needed — the same
+// brief-instructs-a-command-nothing-grants gap RebaseBrief's git fetch/merge
+// hit, but for every worker's routine status report instead of one
+// operation, so it must hold with zero config in every phase including the
+// empty/initial one.
+func TestStructuralFloorCoversWriterBriefCommands(t *testing.T) {
+	brief := protocol.WriterBrief("origin/main")
+	commands := []string{"git diff --stat origin/main", "git ls-files --others --exclude-standard"}
+	for _, cmd := range commands {
+		if !strings.Contains(brief, cmd) {
+			t.Fatalf("test setup: WriterBrief does not actually instruct %q:\n%s", cmd, brief)
+		}
+	}
+	for _, phase := range append([]protocol.Phase{protocol.Phase("")}, protocol.ConfigurablePhases...) {
+		allow := ResolvedAllowForPhase(phase, nil, nil, nil)
+		for _, cmd := range commands {
+			if !AllowCoversCommand(allow, cmd) {
+				t.Errorf("phase %q: structural floor does not cover WriterBrief command %q: %v", phase, cmd, allow)
 			}
 		}
 	}

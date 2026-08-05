@@ -291,6 +291,15 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	if werr := protocol.Write(protocol.StatusPath(opts.worktree), &protocol.Status{Base: baseBranch}); werr != nil {
 		return fmt.Errorf("recording base branch before rebase dispatch: %w", werr)
 	}
+	// Granted before the brief is written: the worker check-tool hook denies
+	// git fetch/merge by default under the dontAsk permission model (only
+	// read-only git plumbing is in the structural floor), and the rebase
+	// worker starts in the empty/initial phase, so a repo's own
+	// .argus/config.yml phases.working.allow — even if migrated — would not
+	// cover this dispatch. See supervisor.RebaseExtraAllow.
+	if gerr := supervisor.GrantExtraAllow(opts.worktree, supervisor.RebaseExtraAllow(opts.base)); gerr != nil {
+		return fmt.Errorf("granting rebase worker its own brief's git commands: %w", gerr)
+	}
 	if werr := supervisor.WriteBrief(opts.worktree, supervisor.RebaseBrief(branch, opts.base)); werr != nil {
 		return werr
 	}

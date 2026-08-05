@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -850,6 +851,67 @@ func TestDispatchRebaseWorkerPersistsBaseAfterInvalidate(t *testing.T) {
 	}
 	if status.Base != "trunk" {
 		t.Errorf("want Base %q preserved across InvalidateStatus, got %q", "trunk", status.Base)
+	}
+}
+
+// TestDispatchRebaseWorkerGrantsBriefCommandsAsExtraAllow is the end-to-end
+// regression test for the dontAsk rebase deadlock: dispatchRebaseWorker must
+// persist the worktree's extraAllow (see protocol.LoadExtraAllow) with
+// exactly the git commands RebaseBrief instructs the worker to run, before
+// the worker ever gets dispatched — a worktree with a default (unmigrated)
+// .argus/config.yml has no other way to grant them, since the rebase worker
+// starts in the empty/initial phase and can't self-grant from inside its own
+// worktree. No worker reports here (ctx times out first), so the only way
+// extra_allow.json can carry these entries afterward is dispatchRebaseWorker's
+// own grant, not anything a fake worker wrote.
+func TestDispatchRebaseWorkerGrantsBriefCommandsAsExtraAllow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := dispatchRebaseWorker(ctx, logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no status before the deadline") {
+		t.Fatalf("want the no-status error, got %v", err)
+	}
+
+	got, lerr := protocol.LoadExtraAllow(worktree)
+	if lerr != nil {
+		t.Fatalf("LoadExtraAllow: %v", lerr)
+	}
+	for _, want := range supervisor.RebaseExtraAllow("main") {
+		if !slices.Contains(got, want) {
+			t.Errorf("worktree extraAllow %v missing rebase-brief grant %q", got, want)
+		}
+	}
+}
+
+// TestDispatchRebaseWorkerGrantExtraAllowErrorPropagates confirms a failure
+// granting the rebase worker its brief's git commands (an unreadable
+// extra_allow.json here — a directory sitting at its path, so
+// protocol.LoadExtraAllow's os.ReadFile refuses) aborts the dispatch with a
+// wrapped error, rather than proceeding to write a brief the worker's
+// permission grant doesn't actually cover.
+func TestDispatchRebaseWorkerGrantExtraAllowErrorPropagates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	if err := os.MkdirAll(protocol.ExtraAllowPath(worktree), 0o755); err != nil {
+		t.Fatalf("seeding unreadable extra_allow.json: %v", err)
+	}
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "granting rebase worker its own brief's git commands") {
+		t.Fatalf("want the GrantExtraAllow error wrapped, got %v", err)
 	}
 }
 
