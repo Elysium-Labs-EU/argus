@@ -30,6 +30,31 @@ func TestApprovalRoundTrips(t *testing.T) {
 	}
 }
 
+// TestApprovalMeasuredFilesRoundTrips pins the field ship and rework now hash
+// against instead of a fresh re-measure: it must survive the JSON
+// write/load cycle exactly, in original order, since ContentHash is sensitive
+// to file identity, not just set membership.
+func TestApprovalMeasuredFilesRoundTrips(t *testing.T) {
+	wt := t.TempDir()
+	in := &Approval{
+		Approved:      true,
+		Source:        "gate",
+		ContentHash:   "deadbeef",
+		MeasuredFiles: []string{"b.go", "a.go", "sub/c.go"},
+		UpdatedAt:     time.Now().Truncate(time.Second),
+	}
+	if err := WriteApproval(wt, in); err != nil {
+		t.Fatalf("WriteApproval: %v", err)
+	}
+	got, found, err := LoadApproval(wt)
+	if err != nil || !found {
+		t.Fatalf("LoadApproval: found=%v err=%v", found, err)
+	}
+	if !reflect.DeepEqual(got.MeasuredFiles, in.MeasuredFiles) {
+		t.Errorf("MeasuredFiles round-trip = %v, want %v", got.MeasuredFiles, in.MeasuredFiles)
+	}
+}
+
 func TestLoadApprovalMissingIsNotFound(t *testing.T) {
 	_, found, err := LoadApproval(t.TempDir())
 	if err != nil {

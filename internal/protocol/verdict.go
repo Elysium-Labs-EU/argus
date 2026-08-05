@@ -24,8 +24,18 @@ type Approval struct {
 	// not just their line counts. ship recomputes it just before committing
 	// and refuses to ship if the worktree no longer matches, so an edit that
 	// lands after approval can't ride an old verdict that never saw it.
-	ContentHash string   `json:"content_hash"`
-	Reasons     []string `json:"reasons,omitempty"`
+	ContentHash string `json:"content_hash"`
+	// MeasuredFiles is the exact file list ContentHash was computed over —
+	// the same set MeasureDiff produced before any gate-verify command ran.
+	// ship (and rework's own zero-delta check) must re-check against this
+	// recorded set rather than a fresh MeasureDiff call: the verify command
+	// can leave a new untracked artifact or reformat a tracked file, and a
+	// fresh re-measure taken after it ran would see a different set than the
+	// one ContentHash was bound to, refusing a worktree nothing actually
+	// edited. Empty on a verdict recorded before this field existed — callers
+	// fall back to a fresh re-measure for those.
+	MeasuredFiles []string `json:"measured_files,omitempty"`
+	Reasons       []string `json:"reasons,omitempty"`
 	// MeasuredDiff is argus's own ground-truth diff size at the moment this
 	// verdict was recorded. A later round subtracts it from a fresh
 	// measurement so the under-report check judges only what changed since

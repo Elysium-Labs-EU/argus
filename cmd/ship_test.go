@@ -303,6 +303,70 @@ func TestCheckApprovedRefusesWhenWorktreeChangedSinceApproval(t *testing.T) {
 	}
 }
 
+// TestCheckApprovedAllowsApprovedDespiteVerifyArtifactLeftInWorktree pins the
+// fix for ship binding ContentHash to the pre-gate-verify file set: a verify
+// command (e.g. `make ci`) can leave a new non-ignored artifact after
+// approval was recorded. ship must hash the recorded MeasuredFiles set, not a
+// fresh re-measure that would pick up the artifact as a superset and refuse
+// an otherwise-untouched approval.
+func TestCheckApprovedAllowsApprovedDespiteVerifyArtifactLeftInWorktree(t *testing.T) {
+	wt := gitRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "f.go"), []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, files, err := supervisor.MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	hash, err := supervisor.ContentHash(wt, files)
+	if err != nil {
+		t.Fatalf("ContentHash: %v", err)
+	}
+	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: true, Source: "gate", ContentHash: hash, MeasuredFiles: files}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A gate-verify-command-style artifact, left after approval, not part of
+	// the approved set.
+	if err := os.WriteFile(filepath.Join(wt, "coverage.out"), []byte("mode: set\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := checkApproved(context.Background(), wt, "HEAD", false); err != nil {
+		t.Fatalf("a verify-command artifact outside the approved set should not block ship: %v", err)
+	}
+}
+
+// TestCheckApprovedRefusesByteEditToApprovedFileAfterApproval is the
+// invariant the above fix must not weaken: a genuine post-approval edit to a
+// file that WAS in the approved set must still trip the stale-content guard.
+func TestCheckApprovedRefusesByteEditToApprovedFileAfterApproval(t *testing.T) {
+	wt := gitRepo(t)
+	path := filepath.Join(wt, "f.go")
+	if err := os.WriteFile(path, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, files, err := supervisor.MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	hash, err := supervisor.ContentHash(wt, files)
+	if err != nil {
+		t.Fatalf("ContentHash: %v", err)
+	}
+	if err := protocol.WriteApproval(wt, &protocol.Approval{Approved: true, Source: "gate", ContentHash: hash, MeasuredFiles: files}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path, []byte("package x\n\nvar x = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := checkApproved(context.Background(), wt, "HEAD", false); err == nil {
+		t.Fatal("want error: an approved file's bytes changed after approval")
+	}
+}
+
 func TestCheckApprovedForceBypassesEverything(t *testing.T) {
 	// No verdict, but --force overrides.
 	if err := checkApproved(context.Background(), t.TempDir(), "HEAD", true); err != nil {

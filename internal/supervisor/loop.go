@@ -845,12 +845,13 @@ func recordApproval(cfg *Config, st *workerState, approved bool, source, summary
 		now = cfg.Now
 	}
 	a := protocol.Approval{
-		Approved:     approved,
-		Source:       source,
-		Summary:      summary,
-		Reasons:      reasons,
-		MeasuredDiff: st.measured,
-		UpdatedAt:    now(),
+		Approved:      approved,
+		Source:        source,
+		Summary:       summary,
+		Reasons:       reasons,
+		MeasuredDiff:  st.measured,
+		MeasuredFiles: st.measuredFiles,
+		UpdatedAt:     now(),
 	}
 	// An approval with no binding is exactly the gap this exists to close, so a
 	// hash failure must not silently ship as an approved verdict.
