@@ -25,12 +25,13 @@ pre-commit:
 
 pre-push:
   commands:
-    coverage:
-      glob: "*.go"
-      run: make test-coverage-check
-      priority: 1
-
+    # A single `make crap` call: its own test-coverage-check prerequisite
+    # generates coverage.out exactly once, and go-crap now scores off that
+    # same file (see scripts/go-crap-gate.sh). Running coverage and crap as
+    # two separate lefthook commands meant two separate `make` processes,
+    # each re-running `go test` independently -- two coverage samples with
+    # no guarantee they'd agree with each other or with a prior gate-verify
+    # run of `make ci`.
     crap:
       glob: "*.go"
       run: make crap
-      priority: 2
