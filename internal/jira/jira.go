@@ -107,7 +107,7 @@ func SaveConfig(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ") // #nosec G117 -- cfg *is* the on-disk credential file (0600, ~/.argus/jira.json); persisting api_token here is the point, not a secret-in-log leak
+	data, err := json.MarshalIndent(cfg, "", "  ") // #nosec G117 -- gosec's own finding on this line names G117 ("Marshaled struct field matches secret pattern"); cfg *is* the on-disk credential file (0600, ~/.argus/jira.json), so persisting api_token here is the point, not a secret-in-log leak
 	if err != nil {
 		return fmt.Errorf("encoding config: %w", err)
 	}
@@ -418,7 +418,8 @@ func (c *Client) Assign(ctx context.Context, key, accountID string) error {
 
 // myselfResponse is the subset of GET /rest/api/3/myself we read.
 type myselfResponse struct {
-	AccountID string `json:"accountId"`
+	AccountID   string `json:"accountId"`
+	DisplayName string `json:"displayName"`
 }
 
 // Myself resolves the accountID of the API token's owner. It exists so a
@@ -426,18 +427,11 @@ type myselfResponse struct {
 // claim hook) without the operator having to look up their own opaque Jira
 // accountID and pass it in explicitly.
 func (c *Client) Myself(ctx context.Context) (string, error) {
-	base, err := c.resolvedBase(ctx)
+	who, err := c.whoami(ctx)
 	if err != nil {
 		return "", err
 	}
-	var me myselfResponse
-	if err := c.readJSON(ctx, base+"/rest/api/3/myself", &me); err != nil {
-		return "", err
-	}
-	if me.AccountID == "" {
-		return "", fmt.Errorf("myself response had no accountId")
-	}
-	return me.AccountID, nil
+	return who.AccountID, nil
 }
 
 // WhoamiResult is what `argus jira check` reports on success: the
@@ -457,14 +451,19 @@ type WhoamiResult struct {
 // actual dispatch — not a "--dry-run"-shaped check that only verifies fields
 // are non-empty.
 func (c *Client) Whoami(ctx context.Context) (WhoamiResult, error) {
+	return c.whoami(ctx)
+}
+
+// whoami is the single GET /rest/api/3/myself implementation Myself and
+// Whoami both sit on top of: Myself narrows the result to the accountID it
+// has always returned, Whoami exposes the full shape (including the
+// resolved API base) `argus jira check` needs.
+func (c *Client) whoami(ctx context.Context) (WhoamiResult, error) {
 	base, err := c.resolvedBase(ctx)
 	if err != nil {
 		return WhoamiResult{}, err
 	}
-	var me struct {
-		AccountID   string `json:"accountId"`
-		DisplayName string `json:"displayName"`
-	}
+	var me myselfResponse
 	if err := c.readJSON(ctx, base+"/rest/api/3/myself", &me); err != nil {
 		return WhoamiResult{}, err
 	}
