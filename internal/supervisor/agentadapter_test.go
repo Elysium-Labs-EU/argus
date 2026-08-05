@@ -42,14 +42,27 @@ func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 	settings := settingsFor(wt, nil, nil, nil)
 
 	want := []string{
-		"Edit(" + wt + "/.claude/settings.local.json)",
-		"Write(" + wt + "/.claude/settings.local.json)",
-		"Edit(" + wt + "/.claude/settings.json)",
-		"Write(" + wt + "/.claude/settings.json)",
+		"Edit(" + absPathPattern(wt+"/.claude/settings.local.json") + ")",
+		"Write(" + absPathPattern(wt+"/.claude/settings.local.json") + ")",
+		"Edit(" + absPathPattern(wt+"/.claude/settings.json") + ")",
+		"Write(" + absPathPattern(wt+"/.claude/settings.json") + ")",
 	}
 	for _, entry := range want {
 		if !slices.Contains(settings.Permissions.Deny, entry) {
 			t.Errorf("deny list missing %q; got %v", entry, settings.Permissions.Deny)
+		}
+	}
+	// The allow glob this carve-out protects against is rendered
+	// filesystem-absolute (see TestStructuralFloorAllow_EditWriteUseDoubleSlash);
+	// a single-slash deny here would match nothing and silently reopen these
+	// files to Edit/Write.
+	bad := []string{
+		"Edit(" + wt + "/.claude/settings.local.json)",
+		"Write(" + wt + "/.claude/settings.local.json)",
+	}
+	for _, entry := range bad {
+		if slices.Contains(settings.Permissions.Deny, entry) {
+			t.Errorf("deny list contains single-slash %q, which matches nothing under dontAsk; got %v", entry, settings.Permissions.Deny)
 		}
 	}
 }
@@ -70,12 +83,21 @@ func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
 	settings := settingsFor(wt, nil, nil, nil)
 
 	want := []string{
-		"Edit(" + wt + "/.claude/argus/**)",
-		"Write(" + wt + "/.claude/argus/**)",
+		"Edit(" + absPathPattern(wt+"/.claude/argus/**") + ")",
+		"Write(" + absPathPattern(wt+"/.claude/argus/**") + ")",
 	}
 	for _, entry := range want {
 		if !slices.Contains(settings.Permissions.Deny, entry) {
 			t.Errorf("deny list missing %q; got %v", entry, settings.Permissions.Deny)
+		}
+	}
+	bad := []string{
+		"Edit(" + wt + "/.claude/argus/**)",
+		"Write(" + wt + "/.claude/argus/**)",
+	}
+	for _, entry := range bad {
+		if slices.Contains(settings.Permissions.Deny, entry) {
+			t.Errorf("deny list contains single-slash %q, which matches nothing under dontAsk; got %v", entry, settings.Permissions.Deny)
 		}
 	}
 }

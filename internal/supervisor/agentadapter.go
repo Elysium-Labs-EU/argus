@@ -183,9 +183,10 @@ func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extra
 	// only resets the file at the start of the *next* run, which leaves the
 	// entire current session unprotected.
 	ownSettings := []string{
-		worktree + "/.claude/settings.local.json",
-		worktree + "/.claude/settings.json",
+		absPathPattern(worktree + "/.claude/settings.local.json"),
+		absPathPattern(worktree + "/.claude/settings.json"),
 	}
+	argusControlPlaneGlob := absPathPattern(worktree + "/.claude/argus/**")
 	deny := []string{
 		"Bash(rm -rf *)",
 		"Bash(git worktree remove*)",
@@ -199,9 +200,13 @@ func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extra
 		// and by `argus worker report` (a Bash subprocess this deny does not
 		// touch). Without this, a worker's Edit/Write tool can hand-edit
 		// status.json straight to awaiting_review or write an approving
-		// verdict.json, skipping IsLegalTransition entirely.
-		"Edit(" + worktree + "/.claude/argus/**)",
-		"Write(" + worktree + "/.claude/argus/**)",
+		// verdict.json, skipping IsLegalTransition entirely. Rendered via
+		// absPathPattern like the allow glob it carves out of (see
+		// structuralFloorAllow) — a single-slash deny here would match
+		// nothing once the allow glob is filesystem-absolute, silently
+		// reopening the control plane to Edit/Write.
+		"Edit(" + argusControlPlaneGlob + ")",
+		"Write(" + argusControlPlaneGlob + ")",
 	}
 	for _, p := range ownSettings {
 		deny = append(deny, "Edit("+p+")", "Write("+p+")")

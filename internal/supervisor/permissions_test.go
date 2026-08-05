@@ -55,8 +55,8 @@ func TestStructuralFloorCoversWriterBriefCommands(t *testing.T) {
 // tracked files while actually building the change.
 func TestResolvedAllowForPhase_EditWriteOnlyWorkingAndSelfTest(t *testing.T) {
 	worktree := "/tmp/wt"
-	editEntry := "Edit(" + worktree + "/**)"
-	writeEntry := "Write(" + worktree + "/**)"
+	editEntry := "Edit(" + absPathPattern(worktree+"/**") + ")"
+	writeEntry := "Write(" + absPathPattern(worktree+"/**") + ")"
 	mutating := map[protocol.Phase]bool{
 		protocol.PhaseWorking:  true,
 		protocol.PhaseSelfTest: true,
@@ -331,6 +331,49 @@ func TestPhaseAllowsMutation(t *testing.T) {
 		if got := PhaseAllowsMutation(phase); got != want {
 			t.Errorf("PhaseAllowsMutation(%q) = %v, want %v", phase, got, want)
 		}
+	}
+}
+
+// TestAbsPathPattern pins the exact rendering absPathPattern must produce:
+// a "//"-prefixed path, the filesystem-absolute form Claude Code's file-path
+// permission matcher requires — a single leading "/" is project-root-relative
+// and matches nothing under dontAsk (see the helper's own doc comment).
+func TestAbsPathPattern(t *testing.T) {
+	got := absPathPattern("/tmp/wt/**")
+	want := "//tmp/wt/**"
+	if got != want {
+		t.Errorf("absPathPattern(%q) = %q, want %q", "/tmp/wt/**", got, want)
+	}
+	if strings.HasPrefix(got, "///") {
+		t.Errorf("absPathPattern(%q) = %q, has three or more leading slashes, want exactly two", "/tmp/wt/**", got)
+	}
+}
+
+// TestStructuralFloorAllow_EditWriteUseDoubleSlash is the regression guard
+// for the issue this package shipped without ever exercising end to end: a
+// single-slash Edit/Write glob is silently project-root-relative to Claude
+// Code, not filesystem-absolute, so it matches no real file under
+// --permission-mode dontAsk and every worker edit is denied before argus's
+// own check-tool hook is ever reached. The rendered allow glob must use the
+// "//"-absolute form, not a bare single slash.
+func TestStructuralFloorAllow_EditWriteUseDoubleSlash(t *testing.T) {
+	worktree := "/tmp/wt"
+	floor := structuralFloorAllow(protocol.PhaseWorking, worktree)
+	wantEdit := "Edit(//tmp/wt/**)"
+	wantWrite := "Write(//tmp/wt/**)"
+	if !slices.Contains(floor, wantEdit) {
+		t.Errorf("structuralFloorAllow(working, %q) = %v, missing //-absolute %q", worktree, floor, wantEdit)
+	}
+	if !slices.Contains(floor, wantWrite) {
+		t.Errorf("structuralFloorAllow(working, %q) = %v, missing //-absolute %q", worktree, floor, wantWrite)
+	}
+	badEdit := "Edit(" + worktree + "/**)"
+	badWrite := "Write(" + worktree + "/**)"
+	if slices.Contains(floor, badEdit) {
+		t.Errorf("structuralFloorAllow(working, %q) = %v, contains single-slash %q — Claude Code treats this as project-root-relative, never matches a real file", worktree, floor, badEdit)
+	}
+	if slices.Contains(floor, badWrite) {
+		t.Errorf("structuralFloorAllow(working, %q) = %v, contains single-slash %q — Claude Code treats this as project-root-relative, never matches a real file", worktree, floor, badWrite)
 	}
 }
 
