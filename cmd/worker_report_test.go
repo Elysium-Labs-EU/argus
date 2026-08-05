@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 )
 
 func fixedNow(t time.Time) func() time.Time {
@@ -703,6 +704,257 @@ func TestWorkerReportCmdUsesGetwdWhenWorktreeFlagEmpty(t *testing.T) {
 	}
 	if got.Phase != protocol.PhasePlanning {
 		t.Errorf("Phase = %q, want planning", got.Phase)
+	}
+}
+
+// TestRunWorkerReportRejectsGatedEdgeWithLogButNoFreshRecord is the hooked-run
+// hard-reject case: a plan-log.jsonl exists (argus's hooks are wired) but no
+// record has landed since the checkpoint a prior gated transition already
+// consumed — the actual cheat this issue closes, distinct from the fail-open
+// (no log at all) case below.
+func TestRunWorkerReportRejectsGatedEdgeWithLogButNoFreshRecord(t *testing.T) {
+	wt := t.TempDir()
+	// Plan is non-empty here specifically to prove the self-reported field is
+	// NOT what's being checked once a plan-log exists — only the live record.
+	seed := protocol.Status{Phase: protocol.PhasePlanning, Plan: []string{"x"}}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := supervisor.AppendPlanLog(wt, "TodoWrite", old); err != nil {
+		t.Fatalf("AppendPlanLog: %v", err)
+	}
+	if err := supervisor.AdvancePlanCheckpoint(wt, old.Add(time.Minute)); err != nil {
+		t.Fatalf("AdvancePlanCheckpoint: %v", err)
+	}
+
+	err := runWorkerReport(wt, protocol.PhaseWorking, &protocol.Status{}, fixedNow(old.Add(time.Hour)))
+	if err == nil {
+		t.Fatal("want an error moving planning -> working with a plan-log present but no fresh record since checkpoint, got nil")
+	}
+	if !strings.Contains(err.Error(), "no fresh TodoWrite/TaskCreate/TaskUpdate activity") {
+		t.Errorf("error = %q, want it to mention no fresh activity", err.Error())
+	}
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if got.Phase != protocol.PhasePlanning {
+		t.Errorf("status.json Phase = %q, want unchanged planning (rejected transition must not persist)", got.Phase)
+	}
+}
+
+// TestRunWorkerReportAcceptsGatedEdgeWithFreshLogRecordAndAdvancesCheckpoint
+// pins the accept path and its side effect: a fresh record lets the
+// transition through, and the checkpoint advances so the same (now-stale)
+// record can't satisfy the next gated edge too.
+func TestRunWorkerReportAcceptsGatedEdgeWithFreshLogRecordAndAdvancesCheckpoint(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{Phase: protocol.PhasePlanning}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	if err := supervisor.AppendPlanLog(wt, "TodoWrite", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("AppendPlanLog: %v", err)
+	}
+	stamp := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := runWorkerReport(wt, protocol.PhaseWorking, &protocol.Status{}, fixedNow(stamp)); err != nil {
+		t.Fatalf("gated transition with a fresh (pre-checkpoint) plan-log record rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Phase != protocol.PhaseWorking {
+		t.Errorf("Phase = %q, want working", got.Phase)
+	}
+
+	fresh, logExists, err := supervisor.HasFreshPlanEvidence(wt)
+	if err != nil {
+		t.Fatalf("HasFreshPlanEvidence: %v", err)
+	}
+	if !logExists {
+		t.Fatal("logExists = false, want true")
+	}
+	if fresh {
+		t.Error("fresh = true after the accepted transition, want false — the checkpoint must have advanced past the record this transition just spent")
+	}
+}
+
+// TestRunWorkerReportRetriesSameEdgeAfterFreshEvidenceRecorded pins the
+// documented no-self-loop retry design at checkPlanEvidence's call site: a
+// rejected gated report leaves the phase unchanged, so the worker's retry is
+// to record fresh evidence and re-send the exact same forward edge — which
+// must then succeed, with no new self-loop transition ever required.
+func TestRunWorkerReportRetriesSameEdgeAfterFreshEvidenceRecorded(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{Phase: protocol.PhaseWorking}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := supervisor.AppendPlanLog(wt, "TodoWrite", old); err != nil {
+		t.Fatalf("AppendPlanLog: %v", err)
+	}
+	if err := supervisor.AdvancePlanCheckpoint(wt, old.Add(time.Minute)); err != nil {
+		t.Fatalf("AdvancePlanCheckpoint: %v", err)
+	}
+
+	if err := runWorkerReport(wt, protocol.PhaseSelfTest, &protocol.Status{}, fixedNow(old.Add(2*time.Minute))); err == nil {
+		t.Fatal("want the first working -> self_test attempt rejected for stale evidence, got nil")
+	}
+
+	fresh := old.Add(3 * time.Minute)
+	if err := supervisor.AppendPlanLog(wt, "TodoWrite", fresh); err != nil {
+		t.Fatalf("AppendPlanLog (retry): %v", err)
+	}
+
+	if err := runWorkerReport(wt, protocol.PhaseSelfTest, &protocol.Status{}, fixedNow(fresh.Add(time.Minute))); err != nil {
+		t.Fatalf("retry of the same edge after fresh plan-log evidence rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Phase != protocol.PhaseSelfTest {
+		t.Errorf("Phase = %q, want self_test", got.Phase)
+	}
+}
+
+// TestRunWorkerReportEnforcesFreshEvidencePerGatedEdge drives all three gated
+// edges through a hooked run's real plan-log.jsonl, proving each one needs
+// its own fresh record — the windowed half of "record live, enforce per
+// phase": the record that satisfied planning -> working must not still
+// satisfy working -> self_test, and so on.
+func TestRunWorkerReportEnforcesFreshEvidencePerGatedEdge(t *testing.T) {
+	wt := t.TempDir()
+	base := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	tick := 0
+	next := func() time.Time {
+		tick++
+		return base.Add(time.Duration(tick) * time.Minute)
+	}
+	record := func() {
+		if err := supervisor.AppendPlanLog(wt, "TodoWrite", next()); err != nil {
+			t.Fatalf("AppendPlanLog: %v", err)
+		}
+	}
+	report := func(phase protocol.Phase) error {
+		return runWorkerReport(wt, phase, &protocol.Status{}, fixedNow(next()))
+	}
+
+	if err := report(protocol.PhasePlanning); err != nil {
+		t.Fatalf("planning report rejected: %v", err)
+	}
+
+	record()
+	if err := report(protocol.PhaseWorking); err != nil {
+		t.Fatalf("planning -> working rejected despite a fresh record: %v", err)
+	}
+
+	if err := report(protocol.PhaseSelfTest); err == nil {
+		t.Fatal("want working -> self_test rejected — no new plan-log activity since planning -> working's own checkpoint advance")
+	}
+	record()
+	if err := report(protocol.PhaseSelfTest); err != nil {
+		t.Fatalf("working -> self_test rejected despite a fresh record: %v", err)
+	}
+
+	if err := report(protocol.PhaseAwaitingReview); err == nil {
+		t.Fatal("want self_test -> awaiting_review rejected — no new plan-log activity since self_test's own checkpoint advance")
+	}
+	record()
+	if err := report(protocol.PhaseAwaitingReview); err != nil {
+		t.Fatalf("self_test -> awaiting_review rejected despite a fresh record: %v", err)
+	}
+
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Phase != protocol.PhaseAwaitingReview {
+		t.Errorf("final phase = %q, want awaiting_review", got.Phase)
+	}
+}
+
+// TestRunWorkerReportFailsOpenForNewlyGatedEdgesWithNoPlanLog is the
+// fail-open acceptance test for the two edges RequiresPlanEvidence newly
+// gates (working -> self_test, self_test -> awaiting_review): with no
+// plan-log.jsonl at all (a foreign/headless spawn argus never hooked), they
+// have no legacy self-reported signal to fall back on, so they must stay
+// allowed exactly as they were before this issue widened RequiresPlanEvidence
+// to cover them.
+func TestRunWorkerReportFailsOpenForNewlyGatedEdgesWithNoPlanLog(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{Phase: protocol.PhaseWorking}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	if err := runWorkerReport(wt, protocol.PhaseSelfTest, &protocol.Status{}, fixedNow(time.Now())); err != nil {
+		t.Fatalf("working -> self_test rejected with no plan-log at all: %v", err)
+	}
+
+	wt2 := t.TempDir()
+	seed2 := protocol.Status{Phase: protocol.PhaseSelfTest}
+	if err := protocol.Write(protocol.StatusPath(wt2), &seed2); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	if err := runWorkerReport(wt2, protocol.PhaseAwaitingReview, &protocol.Status{}, fixedNow(time.Now())); err != nil {
+		t.Fatalf("self_test -> awaiting_review rejected with no plan-log at all: %v", err)
+	}
+}
+
+// TestRunWorkerReportPropagatesPlanEvidenceCheckError exercises
+// checkPlanEvidence's own error branch: a corrupt plan-checkpoint.json makes
+// HasFreshPlanEvidence itself fail, which must surface as a UserError rather
+// than being silently swallowed.
+func TestRunWorkerReportPropagatesPlanEvidenceCheckError(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{Phase: protocol.PhasePlanning}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	if err := supervisor.AppendPlanLog(wt, "TodoWrite", time.Now()); err != nil {
+		t.Fatalf("AppendPlanLog: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".claude", "argus", "plan-checkpoint.json"), []byte("{bad json"), 0o600); err != nil {
+		t.Fatalf("seeding corrupt checkpoint: %v", err)
+	}
+
+	err := runWorkerReport(wt, protocol.PhaseWorking, &protocol.Status{}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error when plan evidence can't be checked, got nil")
+	}
+	if !strings.Contains(err.Error(), "checking plan evidence") {
+		t.Errorf("error = %q, want it to mention checking plan evidence", err.Error())
+	}
+}
+
+// TestRunWorkerReportPropagatesCheckpointAdvanceError exercises
+// checkPlanEvidence's other error branch: a fresh record clears
+// HasFreshPlanEvidence, but AdvancePlanCheckpoint itself then fails to
+// persist — that must also surface as a UserError, not a silent pass.
+func TestRunWorkerReportPropagatesCheckpointAdvanceError(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{Phase: protocol.PhasePlanning}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	if err := supervisor.AppendPlanLog(wt, "TodoWrite", time.Now()); err != nil {
+		t.Fatalf("AppendPlanLog: %v", err)
+	}
+	dir := filepath.Join(wt, ".claude", "argus")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	err := runWorkerReport(wt, protocol.PhaseWorking, &protocol.Status{}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error when the checkpoint can't be persisted, got nil")
+	}
+	if !strings.Contains(err.Error(), "advancing plan checkpoint") {
+		t.Errorf("error = %q, want it to mention advancing plan checkpoint", err.Error())
 	}
 }
 

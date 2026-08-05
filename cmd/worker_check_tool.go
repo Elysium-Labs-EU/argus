@@ -201,8 +201,9 @@ func evaluateToolGate(cmdStr string, phase protocol.Phase, denied, allowed []str
 // (see protocol.ResolvedDenyForPhase): matched names which of three
 // distinct, non-overlapping families it fell into, since a single generic
 // wording would misdescribe the other two —
-//   - AlwaysDeniedCommands (argus's own supervisor commands): always denied,
-//     every phase, for a reason unrelated to git.
+//   - AlwaysDeniedCommands (argus's own supervisor commands, plus the
+//     PostToolUse-hook-only record-plan): always denied, every phase, for a
+//     reason unrelated to git.
 //   - AskGatedCommands (git commit/push): also always denied, every phase,
 //     but specifically because a worker never commits or pushes at all.
 //   - anything else: a repo's own phases.<name>.deny addition — scoped to
@@ -210,6 +211,11 @@ func evaluateToolGate(cmdStr string, phase protocol.Phase, denied, allowed []str
 //     commit/push at all (e.g. "npm publish").
 func denyReason(matched string, phase protocol.Phase) string {
 	switch {
+	case matched == "argus worker record-plan":
+		return fmt.Sprintf(
+			"argus: %q is denied — it only ever runs as a PostToolUse hook Claude Code itself fires on a real TodoWrite/TaskCreate/TaskUpdate call, never something a worker's own turn invokes directly",
+			matched,
+		)
 	case slices.Contains(protocol.AlwaysDeniedCommands, matched):
 		return fmt.Sprintf(
 			"argus: %q is denied — argus's own supervisor commands (ship/rework/review/supervise) are for the supervising session only, never a worker's own self-invocation",

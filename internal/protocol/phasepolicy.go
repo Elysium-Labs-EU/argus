@@ -44,7 +44,17 @@ type PhaseConfig map[Phase]PhasePolicy
 // prevented this before: an unlisted Bash command falls through to Claude
 // Code's default ask-prompt, which just hangs a headless worker rather than
 // actually blocking it.
-var AlwaysDeniedCommands = []string{"argus ship", "argus rework", "argus review", "argus supervise"}
+//
+// `argus worker record-plan` belongs here for a related but distinct reason:
+// it is not an operator tool, but it is also not a worker's own
+// self-invocation — it is wired exclusively as a PostToolUse hook Claude Code
+// itself fires (see recordPlanHooks), never something a worker's own turn is
+// meant to type at a Bash prompt. Denying it here closes the same hole
+// stripDenyFloor closes for the others: without it, a repo's own
+// phases.<name>.allow could grant a wide-enough Bash pattern to let a worker
+// forge plan-log.jsonl entries by hand, defeating the whole point of a
+// recorder the worker's own Bash allowlist can't reach.
+var AlwaysDeniedCommands = []string{"argus ship", "argus rework", "argus review", "argus supervise", "argus worker record-plan"}
 
 // DeniedInPhase returns the Bash command prefixes denied while a worker
 // reports phase p, before any repo config is applied — the floor

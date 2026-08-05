@@ -107,9 +107,12 @@ type permissionBlock struct {
 }
 
 // hooksBlock mirrors the shape Claude Code reads from settings.json's "hooks"
-// key. Only PreToolUse is populated today — see checkToolHook.
+// key. PreToolUse gates a call before it runs (see checkToolHooks);
+// PostToolUse observes one after it already ran (see recordPlanHooks) and can
+// never block it.
 type hooksBlock struct {
-	PreToolUse []hookMatcher `json:"PreToolUse,omitempty"`
+	PreToolUse  []hookMatcher `json:"PreToolUse,omitempty"`
+	PostToolUse []hookMatcher `json:"PostToolUse,omitempty"`
 }
 
 // hookMatcher pairs a tool-name matcher (Claude Code's own glob-like syntax,
@@ -141,6 +144,28 @@ type hookEntry struct {
 func checkToolHooks() []hookMatcher {
 	hooks := []hookEntry{{Type: "command", Command: "argus worker check-tool"}}
 	matchers := []string{"Bash", "Edit", "Write"}
+	out := make([]hookMatcher, len(matchers))
+	for i, m := range matchers {
+		out[i] = hookMatcher{Matcher: m, Hooks: hooks}
+	}
+	return out
+}
+
+// recordPlanHooks wires `argus worker record-plan` as a PostToolUse hook on
+// every worker's TodoWrite and TaskCreate/TaskUpdate calls: the live,
+// argus-owned recorder HasFreshPlanEvidence checks against, replacing the
+// one-shot, whole-transcript grep HasPlanEvidence used to be the only signal
+// for. PostToolUse fires after the tool already ran and can never block it —
+// see runWorkerRecordPlan — so this is pure observation, the write half of
+// the same "record live, enforce per phase" split checkToolHooks' PreToolUse
+// gate implements for command/mutation denial. Two matchers, not one
+// "TodoWrite|TaskCreate|TaskUpdate" combined pattern, for the same reason
+// checkToolHooks registers one hookMatcher per tool name: Claude Code's own
+// hook matcher syntax is documented per exact tool name (or a
+// pipe-alternation within one), not as a single cross-tool regex.
+func recordPlanHooks() []hookMatcher {
+	hooks := []hookEntry{{Type: "command", Command: "argus worker record-plan"}}
+	matchers := []string{"TodoWrite", "TaskCreate|TaskUpdate"}
 	out := make([]hookMatcher, len(matchers))
 	for i, m := range matchers {
 		out[i] = hookMatcher{Matcher: m, Hooks: hooks}
@@ -221,7 +246,7 @@ func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extra
 			Allow: allow,
 			Deny:  deny,
 		},
-		Hooks:                      hooksBlock{PreToolUse: checkToolHooks()},
+		Hooks:                      hooksBlock{PreToolUse: checkToolHooks(), PostToolUse: recordPlanHooks()},
 		EnableAllProjectMcpServers: true,
 	}
 }
