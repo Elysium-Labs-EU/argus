@@ -409,6 +409,7 @@ Useful flags (see `argus supervise --help` for all):
 - `--review-concurrency <n>` — max concurrent `--review` calls on multi-worker escalation (default 4).
 - `--worker-placement <workspace|tab>` (default `workspace`) — `tab` nests each worker's pane as a tab in the current herdr workspace; needs `HERDR_WORKSPACE_ID` set (running from inside a herdr pane).
 - `--forge <gitlab|gitea>` — self-hosted API shape for the `--issues` forge fetch; `.argus/config.yml` `forge` key sets a default.
+- `.argus/config.yml` `workspace_label_template` — overrides the herdr-visible workspace/tab label a `--issues`/`--jira-issues` spawned worker gets (default: bare `#<n>`/ticket key). Supports `{issue}`/`{project}`/`{summary}` placeholders; see `docs/repo-config.md`.
 - `--allow <pattern,...>` — extra Claude Code permission patterns appended to every worker's resolved allow set (every phase), on top of `.argus/config.yml` `allow`/`phases.<name>.allow`, for a one-off run. See "Workers launch under Claude Code's `dontAsk` permission mode" above.
 - Gate tuning:
   - `--max-diff-lines` (default 400, `0` disables) — insertions+deletions from the *measured* git diff; over the limit escalates regardless of test results. Pure size proxy, independent of the other checks. (Real diffs of 1178/1527/461 lines have all correctly escalated past 400.)

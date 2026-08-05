@@ -177,6 +177,7 @@ func promptAllFields(reader *bufio.Reader, out io.Writer, cfg *repoconfig.Config
 	cfg.Allow = promptList(reader, out, "allow", cfg.Allow)
 	cfg.Phases = promptPhaseAllow(reader, out, cfg.Phases)
 	cfg.BriefNote = promptLine(reader, out, "brief_note", cfg.BriefNote)
+	cfg.WorkspaceLabelTemplate = promptLine(reader, out, "workspace_label_template (herdr workspace/tab label for an --issues/--jira-issues spawned worker, e.g. \"{project}/{issue}\"; blank keeps the bare \"#<n>\"/ticket-key label)", cfg.WorkspaceLabelTemplate)
 	cfg.MaxDiffLines = promptOptionalInt(reader, out, "review.max_diff_lines", cfg.MaxDiffLines)
 	cfg.ReworkBudget = promptOptionalInt(reader, out, "rework.budget (restart budget: total rework rounds a worktree may ever be dispatched for)", cfg.ReworkBudget)
 	cfg.MaxReworkRounds = promptOptionalInt(reader, out, "rework.max_rounds (per-invocation dispatch-and-judge loop ceiling, distinct from rework.budget)", cfg.MaxReworkRounds)

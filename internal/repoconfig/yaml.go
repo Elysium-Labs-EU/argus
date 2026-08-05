@@ -102,6 +102,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.BriefNote != "" {
 		fmt.Fprintf(&b, "brief_note: %s\n", quoteYAML(cfg.BriefNote))
 	}
+	if cfg.WorkspaceLabelTemplate != "" {
+		fmt.Fprintf(&b, "workspace_label_template: %s\n", quoteYAML(cfg.WorkspaceLabelTemplate))
+	}
 	writeShipBlock(&b, cfg)
 	writeReworkBlock(&b, cfg)
 	writeReviewBlock(&b, cfg)
@@ -386,9 +389,9 @@ func indentOf(line string) int {
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, region 1's top-level
 // `key: value` scalars (base_branch, worker_placement, launcher, forge,
-// status_page, worktree_dir, brief_note, worktree_bootstrap_command,
-// owner_stale_after, rework_budget; value optionally quoted) and its one
-// top-level list key (`allow`); a top-level `ship:` block (see
+// status_page, worktree_dir, brief_note, workspace_label_template,
+// worktree_bootstrap_command, owner_stale_after, rework_budget; value
+// optionally quoted) and its one top-level list key (`allow`); a top-level `ship:` block (see
 // parseShipBlock) and a top-level `phases:` block (see parsePhasesBlock,
 // parsePhaseSubBlock); legacyFlatKeys' deprecated flat top-level keys and
 // the deprecated dotted `phase.<name>.skip`/`phase.<name>.deny` key (see
@@ -833,9 +836,9 @@ func assignAwaitingReviewKey(cfg *Config, key, value string, lines []string, nex
 
 // assignScalarField sets cfg's field for one of parseYAML's scalar keys
 // (base_branch, worker_placement, launcher, forge, status_page, worktree_dir,
-// brief_note, review_note, ship_verify_command, gate_verify_command,
-// worktree_bootstrap_command, title_prefix_template, owner_stale_after,
-// review_effort, max_diff_lines, rework_budget — key is already the
+// brief_note, workspace_label_template, review_note, ship_verify_command,
+// gate_verify_command, worktree_bootstrap_command, title_prefix_template,
+// owner_stale_after, review_effort, max_diff_lines, rework_budget — key is already the
 // canonical field name by the time it reaches here, legacyFlatKeys having
 // been applied by the caller for a deprecated flat key, and this same switch
 // being reused directly by assignAwaitingReviewKey for these keys' current
@@ -858,6 +861,8 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 		cfg.WorktreeDir = value
 	case "brief_note":
 		cfg.BriefNote = value
+	case "workspace_label_template":
+		cfg.WorkspaceLabelTemplate = value
 	case "review_note":
 		cfg.ReviewNote = value
 	case "ship_verify_command":

@@ -180,6 +180,173 @@ func TestBuildWorkersIssueLabelSurvivesPartialLabels(t *testing.T) {
 	}
 }
 
+// TestIssuesToTasksDefaultLabelUnchangedWithNoTemplate pins that a repo with
+// no workspace_label_template configured (no .argus/config.yml at all here)
+// keeps issuesToTasks's pre-existing bare "#<n>" label byte-for-byte — the
+// compatibility guarantee workspace_label_template's own doc comment makes.
+func TestIssuesToTasksDefaultLabelUnchangedWithNoTemplate(t *testing.T) {
+	f := &fakeForge{issues: map[int]forge.Issue{
+		7: {Number: 7, Title: "t", Body: "b"},
+	}}
+	_, _, labels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", t.TempDir(), []int{7}, briefNoteOverride{})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("want 1 label, got %d", len(labels))
+	}
+	if want := "#7"; labels[0] != want {
+		t.Errorf("labels[0] = %q, want %q", labels[0], want)
+	}
+}
+
+// TestIssuesToTasksAppliesWorkspaceLabelTemplate covers the opt-in path: a
+// repo whose .argus/config.yml sets workspace_label_template gets that
+// template rendered instead of the bare "#<n>" default, with {issue},
+// {project}, and {summary} all substituted from real fetched-issue data.
+func TestIssuesToTasksAppliesWorkspaceLabelTemplate(t *testing.T) {
+	dir := t.TempDir()
+	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{WorkspaceLabelTemplate: "{project}/{issue}-{summary}"}); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+	f := &fakeForge{issues: map[int]forge.Issue{
+		7: {Number: 7, Title: "Fix login crash", Body: "b"},
+	}}
+	_, _, labels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", dir, []int{7}, briefNoteOverride{})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("want 1 label, got %d", len(labels))
+	}
+	if want := "widget/#7-fix-login-crash"; labels[0] != want {
+		t.Errorf("labels[0] = %q, want %q", labels[0], want)
+	}
+}
+
+// TestJiraIssuesToTasksAppliesWorkspaceLabelTemplate mirrors
+// TestIssuesToTasksAppliesWorkspaceLabelTemplate for the Jira pipeline:
+// {issue} substitutes the same bare ticket key jiraIssuesToTasks would
+// otherwise use verbatim as the label, and {project} substitutes
+// branchPrefix (this repo's own name), not the Jira key.
+func TestJiraIssuesToTasksAppliesWorkspaceLabelTemplate(t *testing.T) {
+	dir := t.TempDir()
+	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{WorkspaceLabelTemplate: "{project}/{issue}"}); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+	f := &fakeJira{issues: map[string]forge.Issue{
+		"PROJ-9": {Title: "fix bug", Body: "b"},
+	}}
+	_, _, labels, err := jiraIssuesToTasks(context.Background(), io.Discard, f, dir, "myrepo", []string{"PROJ-9"}, jiraSpawnOpts{}, briefNoteOverride{})
+	if err != nil {
+		t.Fatalf("jiraIssuesToTasks: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("want 1 label, got %d", len(labels))
+	}
+	if want := "myrepo/PROJ-9"; labels[0] != want {
+		t.Errorf("labels[0] = %q, want %q", labels[0], want)
+	}
+}
+
+// TestWorkspaceLabelTemplateConfigDefault covers workspaceLabelTemplateConfigDefault's
+// two branches directly: a repo with the key set, and one with no config
+// file at all (repoconfig.Load's own "missing file, zero Config" case).
+func TestWorkspaceLabelTemplateConfigDefault(t *testing.T) {
+	dir := t.TempDir()
+	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{WorkspaceLabelTemplate: "{project}/{issue}"}); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+	if got, want := workspaceLabelTemplateConfigDefault(dir), "{project}/{issue}"; got != want {
+		t.Errorf("workspaceLabelTemplateConfigDefault(%q) = %q, want %q", dir, got, want)
+	}
+	if got := workspaceLabelTemplateConfigDefault(t.TempDir()); got != "" {
+		t.Errorf("workspaceLabelTemplateConfigDefault(no config file) = %q, want \"\"", got)
+	}
+
+	// A malformed config.yml (parseYAML rejects an unrecognized key) hits
+	// the same best-effort "" fallback as a missing file — a load/parse
+	// failure is never fatal to label construction.
+	broken := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(repoconfig.Path(broken)), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(repoconfig.Path(broken), []byte("not_a_real_key: value\n"), 0o600); err != nil {
+		t.Fatalf("writing broken config: %v", err)
+	}
+	if got := workspaceLabelTemplateConfigDefault(broken); got != "" {
+		t.Errorf("workspaceLabelTemplateConfigDefault(malformed config) = %q, want \"\"", got)
+	}
+}
+
+// TestRenderWorkspaceLabel exercises all three placeholders together, plus a
+// template with no placeholders at all (rendered verbatim) and a repeated
+// placeholder (strings.ReplaceAll substitutes every occurrence, not just the
+// first).
+func TestRenderWorkspaceLabel(t *testing.T) {
+	cases := []struct {
+		name     string
+		template string
+		want     string
+	}{
+		{"allThreePlaceholders", "{project}/{issue}-{summary}", "widget/#42-fix-login-crash"},
+		{"noPlaceholders", "fixed-label", "fixed-label"},
+		{"repeatedPlaceholder", "{issue}/{issue}", "#42/#42"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := renderWorkspaceLabel(c.template, "#42", "widget", "Fix login crash")
+			if got != c.want {
+				t.Errorf("renderWorkspaceLabel(%q, ...) = %q, want %q", c.template, got, c.want)
+			}
+		})
+	}
+}
+
+// TestSummarySlug covers summarySlug's word cap, length cap (including the
+// trailing-hyphen trim when the cut lands right after a hyphen), and
+// punctuation-stripping/empty-word skipping, matching workspace_label_
+// template's own {summary} doc comment (roughly 3 words / ~30 chars,
+// lowercase, hyphenated, no punctuation).
+func TestSummarySlug(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+		want  string
+	}{
+		{"empty", "", ""},
+		{"whitespaceOnly", "   ", ""},
+		{"simple", "Fix login crash", "fix-login-crash"},
+		{"capsAtThreeWords", "one two three four five", "one-two-three"},
+		{"stripsPunctuation", "Fix: login/crash (urgent)!!", "fix-logincrash-urgent"},
+		{"skipsWordsThatBecomeEmpty", "hello !!! world", "hello-world"},
+		{
+			// Each field is a single run of 'a'/'b'/'c', so slugWord leaves it
+			// untouched; the joined "aaaaaaaaaa-bbbbbbbbbb-cccccccccc" (32
+			// chars) exceeds workspaceLabelSummaryMaxLen (30) and is cut mid
+			// third word, with no trailing hyphen to trim.
+			"capsAtMaxLenMidWord",
+			strings.Repeat("a", 10) + " " + strings.Repeat("b", 10) + " " + strings.Repeat("c", 10),
+			strings.Repeat("a", 10) + "-" + strings.Repeat("b", 10) + "-" + strings.Repeat("c", 8),
+		},
+		{
+			// 29 'a's + "-bb" = 32 chars; the 30-char cut lands exactly on the
+			// hyphen, which TrimRight then strips.
+			"capsAtMaxLenTrimsTrailingHyphen",
+			strings.Repeat("a", 29) + " bb",
+			strings.Repeat("a", 29),
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := summarySlug(c.title)
+			if got != c.want {
+				t.Errorf("summarySlug(%q) = %q, want %q", c.title, got, c.want)
+			}
+		})
+	}
+}
+
 func TestFoldIssueSourcesIssuesError(t *testing.T) {
 	// repo isn't a git checkout, so resolving the origin remote fails before any
 	// network call — exercises the --issues error path without a real forge.
