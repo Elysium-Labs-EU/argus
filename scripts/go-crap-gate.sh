@@ -6,18 +6,39 @@
 # own lines this change modified relative to the base ref. Pre-existing debt in
 # untouched functions -- even in a file you edited elsewhere -- does not block.
 #
-#   GO_CRAP_BASE       base ref (default: origin/main); CI sets it to PR target
-#   GO_CRAP_THRESHOLD  CRAP threshold (default: 20; go-crap's own upstream
-#                      default is 30, tightened here for this repo)
+#   GO_CRAP_BASE               base ref (default: origin/main); CI sets it to
+#                              PR target
+#   GO_CRAP_THRESHOLD          CRAP threshold (default: 20; go-crap's own
+#                              upstream default is 30, tightened here for
+#                              this repo)
+#   GO_CRAP_COVERAGE_PROFILE  path to a "go test -coverprofile" profile
+#                              (default: coverage.out, as written by
+#                              `make test-coverage-check`, this target's own
+#                              prerequisite)
+#
+# Left to itself, go-crap runs its own `go test` to measure coverage --
+# a second, independent sample from the one test-coverage-check just took.
+# Per-run scheduling/ordering noise then lets that second sample land on
+# either side of the threshold from one invocation to the next, so a commit
+# can pass here and fail the pre-push hook (or vice versa) with no code
+# change in between. Pinning go-crap to the profile already on disk makes
+# every caller in a single tree state score off the exact same sample.
 #
 # Pure bash + python3 (no gawk), so it runs the same on macOS and Linux CI.
 set -euo pipefail
 
 THRESHOLD="${GO_CRAP_THRESHOLD:-20}"
 BASE="${GO_CRAP_BASE:-origin/main}"
+COVERAGE_PROFILE="${GO_CRAP_COVERAGE_PROFILE:-coverage.out}"
 
 command -v go-crap >/dev/null 2>&1 || {
   echo "go-crap not found. Run: go install github.com/padiazg/go-crap@latest" >&2
+  exit 1
+}
+
+[ -s "$COVERAGE_PROFILE" ] || {
+  echo "go-crap-gate: coverage profile '$COVERAGE_PROFILE' missing or empty." >&2
+  echo "Run 'make test-coverage-check' first (the crap Makefile target already depends on it)." >&2
   exit 1
 }
 
@@ -40,7 +61,7 @@ fi
 
 TMP_JSON="$(mktemp -t gocrap.XXXXXX)"
 trap 'rm -f "$TMP_JSON"' EXIT
-go-crap scan . --exclude '.*_test\.go' --format json -o "$TMP_JSON"
+go-crap scan . --exclude '.*_test\.go' --coverage-profile "$COVERAGE_PROFILE" --format json -o "$TMP_JSON"
 
 python3 - "$DIFF_BASE" "$THRESHOLD" "$TMP_JSON" <<'PY'
 import json, re, subprocess, sys
