@@ -44,7 +44,13 @@ type Lifecycle struct {
 	Repo      string         `json:"repo"`
 	Branch    string         `json:"branch"`
 	PRURL     string         `json:"pr_url"`
-	PRNumber  int            `json:"pr_number"`
+	// Title is the PR/commit title ship actually resolved and opened the PR
+	// with (see cmd/ship.go's resolvePRTitle) — recorded here because
+	// status.json's own Title is worker-supplied and optional, so a worker
+	// that never self-titled would otherwise leave `fleet` showing a blank
+	// title forever, even after a successful ship.
+	Title    string `json:"title,omitempty"`
+	PRNumber int    `json:"pr_number"`
 	// JiraNotified marks that the --jira-issue post-ship comment already
 	// landed for this worktree's PR. Jira has no FindPR-equivalent lookup a
 	// retry could use to detect an already-posted comment, so this is the

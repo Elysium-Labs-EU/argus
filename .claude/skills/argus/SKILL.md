@@ -55,10 +55,21 @@ nothing else runs without it. Everything below is the reference for these steps.
 | Hand off a worktree after a sibling PR merged first | `argus rebase --worktree <path> --base main` |
 | Poll a shipped PR's CI checks to a terminal state (GitHub only) | `argus tend --worktree <path> --dry-run` |
 | Clean up a worktree once its PR merged | `argus worktree prune --branch <name> --dry-run` |
-| See phase/owner/lifecycle for every linked worktree, read-only | `argus fleet --json` |
+| See phase/owner/lifecycle for every linked worktree, read-only (default: this session's own + unowned worktrees) | `argus fleet --json` |
+| Same, but every linked worktree regardless of owner, including idle ones | `argus fleet --json --all --include-idle` |
 | See escalation rate / token cost | `argus stats` |
 | Check/fix the Bash allowlist argus itself needs | `argus config check --write` |
 | Set up a repo's own base branch/allow list/brief note (see `docs/repo-config.md`) | `argus init` |
+
+`fleet` defaults to scoping the view by owner (this invocation's resolved
+identity — `--owner` > `$ARGUS_OWNER_ID` > `$HERDR_WORKSPACE_ID` > a generated
+id, the same chain `supervise` uses) plus any unowned worktree, and hides
+worktrees with no `status.json` yet — a repo that accumulates worktrees
+across many sessions is mostly noise otherwise. `--all` restores every linked
+worktree regardless of owner; `--include-idle` restores untouched ones.
+`--json`'s output is an envelope (`generated_at`/`scope`/`controller_id`/
+`count`/`excluded_foreign_count`/`excluded_idle_count`/`worktrees`), so a
+filtered-out row is always accounted for, never silently dropped.
 
 If `argus` isn't on PATH, don't silently downgrade — **offer to install it first**:
 

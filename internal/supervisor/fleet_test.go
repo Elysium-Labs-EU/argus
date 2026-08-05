@@ -1,7 +1,9 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -206,6 +208,150 @@ func TestBuildFleetAcrossAssortedWorktreeStates(t *testing.T) {
 
 	if r := byBranch["no-owner"]; r.OwnerFile != FileAbsent || r.HeartbeatAge != 0 {
 		t.Errorf("no-owner: owner file=%q heartbeat age=%v, want absent/0 (never computed off a missing lease)", r.OwnerFile, r.HeartbeatAge)
+	}
+}
+
+func TestFleetRowForeign(t *testing.T) {
+	mine := &FleetRow{OwnerFile: FileOK, Owner: ownership.Owner{OwnerID: "me"}}
+	if mine.Foreign("me") {
+		t.Error("a matching owner_id should not be foreign")
+	}
+	theirs := &FleetRow{OwnerFile: FileOK, Owner: ownership.Owner{OwnerID: "them"}}
+	if !theirs.Foreign("me") {
+		t.Error("a mismatched owner_id should be foreign")
+	}
+	unowned := &FleetRow{OwnerFile: FileAbsent}
+	if unowned.Foreign("me") {
+		t.Error("no owner.json at all should not be foreign — it can't be attributed away")
+	}
+	unreadable := &FleetRow{OwnerFile: FileUnreadable}
+	if unreadable.Foreign("me") {
+		t.Error("a corrupt owner.json should not be foreign — it must stay visible, not be silently attributed away")
+	}
+}
+
+func TestFleetRowIdle(t *testing.T) {
+	if (&FleetRow{StatusFile: FileAbsent}).Idle() != true {
+		t.Error("no status.json at all should be idle")
+	}
+	if (&FleetRow{StatusFile: FileUnreadable}).Idle() != false {
+		t.Error("an unreadable status.json is a real anomaly, not idle")
+	}
+	if (&FleetRow{StatusFile: FileOK}).Idle() != false {
+		t.Error("a real status.json should not be idle")
+	}
+}
+
+func TestFilterFleet(t *testing.T) {
+	rows := []FleetRow{
+		{Branch: "mine", StatusFile: FileOK, OwnerFile: FileOK, Owner: ownership.Owner{OwnerID: "me"}},
+		{Branch: "unowned", StatusFile: FileOK, OwnerFile: FileAbsent},
+		{Branch: "foreign", StatusFile: FileOK, OwnerFile: FileOK, Owner: ownership.Owner{OwnerID: "them"}},
+		{Branch: "idle-mine", StatusFile: FileAbsent, OwnerFile: FileOK, Owner: ownership.Owner{OwnerID: "me"}},
+	}
+
+	defaultScope := FilterFleet(rows, "me", false, false)
+	byBranch := make(map[string]bool, len(defaultScope.Rows))
+	for _, r := range defaultScope.Rows {
+		byBranch[r.Branch] = true
+	}
+	if !byBranch["mine"] || !byBranch["unowned"] || byBranch["foreign"] || byBranch["idle-mine"] {
+		t.Errorf("default scope = %+v, want mine+unowned (unowned can't be attributed away) but not foreign or idle", defaultScope.Rows)
+	}
+	if defaultScope.ExcludedForeignCount != 1 {
+		t.Errorf("excluded foreign count = %d, want 1", defaultScope.ExcludedForeignCount)
+	}
+	if defaultScope.ExcludedIdleCount != 1 {
+		t.Errorf("excluded idle count = %d, want 1 (idle-mine only — the foreign row is excluded as foreign, never double-counted as idle too)", defaultScope.ExcludedIdleCount)
+	}
+
+	withIdle := FilterFleet(rows, "me", false, true)
+	branches := make(map[string]bool, len(withIdle.Rows))
+	for _, r := range withIdle.Rows {
+		branches[r.Branch] = true
+	}
+	if !branches["mine"] || !branches["unowned"] || branches["foreign"] || !branches["idle-mine"] {
+		t.Errorf("--include-idle without --all = %+v, want mine+unowned+idle-mine but not foreign", withIdle.Rows)
+	}
+
+	all := FilterFleet(rows, "me", true, true)
+	if len(all.Rows) != len(rows) || all.ExcludedForeignCount != 0 || all.ExcludedIdleCount != 0 {
+		t.Errorf("--all --include-idle should keep everything with zero exclusions: %+v", all)
+	}
+}
+
+func TestFilterFleetForeignRowNeverDoubleCountedAsIdle(t *testing.T) {
+	rows := []FleetRow{
+		{Branch: "foreign-idle", StatusFile: FileAbsent, OwnerFile: FileOK, Owner: ownership.Owner{OwnerID: "them"}},
+	}
+	result := FilterFleet(rows, "me", false, false)
+	if result.ExcludedForeignCount != 1 || result.ExcludedIdleCount != 0 {
+		t.Errorf("a foreign+idle row should count once as foreign, not also as idle: %+v", result)
+	}
+}
+
+func TestNormalizeTicket(t *testing.T) {
+	cases := []struct {
+		branch string
+		want   string
+	}{
+		{"AP-1169-fix-thing", "AP-1169"},
+		{"ap-1166-fix-thing", "AP-1166"},
+		{"argus-fix-issue-554", ""},
+		{"", ""},
+		{"AP-1169", "AP-1169"},
+	}
+	for _, c := range cases {
+		if got := normalizeTicket(c.branch); got != c.want {
+			t.Errorf("normalizeTicket(%q) = %q, want %q", c.branch, got, c.want)
+		}
+	}
+}
+
+func TestFleetRowMarshalJSONNullsZeroTimestamps(t *testing.T) {
+	row := FleetRow{Branch: "AP-1169-fix", StatusFile: FileOK}
+	data, err := json.Marshal(&row)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if decoded["phase_updated_at"] != nil {
+		t.Errorf("phase_updated_at should be omitted for a zero-value timestamp, got %v", decoded["phase_updated_at"])
+	}
+	status, ok := decoded["Status"].(map[string]any)
+	if !ok {
+		t.Fatalf("Status not decoded as an object: %v", decoded["Status"])
+	}
+	if _, present := status["updated_at"]; present {
+		t.Errorf("Status.updated_at should be omitted for a zero value, got %v", status["updated_at"])
+	}
+	if decoded["ticket"] != "AP-1169" {
+		t.Errorf("ticket = %v, want AP-1169", decoded["ticket"])
+	}
+	if bytes.Contains(data, []byte("0001-01-01")) {
+		t.Errorf("encoded JSON should never contain the zero-time sentinel:\n%s", data)
+	}
+}
+
+func TestFleetRowMarshalJSONKeepsRealTimestamps(t *testing.T) {
+	when := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	row := FleetRow{
+		Branch:     "feat-x",
+		StatusFile: FileOK, Status: protocol.Status{UpdatedAt: when},
+	}
+	data, err := json.Marshal(&row)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if decoded["phase_updated_at"] != when.Format(time.RFC3339) {
+		t.Errorf("phase_updated_at = %v, want %s", decoded["phase_updated_at"], when.Format(time.RFC3339))
 	}
 }
 
