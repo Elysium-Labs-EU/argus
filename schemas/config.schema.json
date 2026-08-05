@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Elysium-Labs-EU/argus/main/schemas/config.schema.json",
   "title": "argus repo configuration",
-  "description": "Configuration schema for .argus/config.yml files. Keys are grouped into three regions by when they actually run: top-level (phase-independent — static repo facts and spawn-time keys), ship: (argus-side actions after a verdict, run by the operator, not a worker phase), and phases: (per-worker-lifecycle-phase keys, either live on every configurable phase — allow/deny/skip — or, for the gate/review cluster, valid only on the terminal awaiting_review phase). All keys are optional; a missing file is equivalent to a zero config. See internal/repoconfig/config.go and internal/repoconfig/yaml.go.",
+  "description": "Configuration schema for .argus/config.yml files. Keys are grouped into three regions by when they actually run: top-level (phase-independent — static repo facts and spawn-time keys), ship: (argus-side actions after a verdict, run by the operator, not a worker phase), and phases: (per-worker-lifecycle-phase keys, either live on every configurable phase — allow/deny/skip — or, for the gate/review cluster, valid only on the terminal awaiting_review phase). Workers launch under --permission-mode dontAsk (default-deny): allow/phases.<name>.allow are what supervisor.ResolvedAllowForPhase actually resolves into each worker's per-phase permission grant, on top of a code-guaranteed structural floor (read-only git, argus worker self-calls) and beneath a code-guaranteed, unremovable deny floor (git commit/push, argus ship/rework/review/supervise) no allow entry can re-grant. All keys are optional; a missing file is equivalent to a zero config, which degrades a worker to structural-floor-only, never wide open. See internal/repoconfig/config.go, internal/repoconfig/yaml.go, and internal/supervisor/permissions.go.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -61,7 +61,7 @@
     },
     "allow": {
       "type": "array",
-      "description": "Extra tool-permission patterns granted to every worker, on top of argus's toolchain-neutral defaults — a static, phase-independent base list, distinct from phases.<name>.allow's forward-looking per-phase groundwork (see phases.working.allow below).",
+      "description": "Tool-permission patterns granted to every worker in every phase, on top of the code-guaranteed structural floor (read-only git, argus worker self-calls) — a static, phase-independent base list unioned with phases.<name>.allow's own per-phase addition for whichever phase a worker currently reports (see phases.working.allow below and supervisor.ResolvedAllowForPhase). An entry that could authorize a deny-floor command (git commit/push, argus ship/rework/review/supervise) is stripped after the union — it can never survive into a worker's actual resolved allow set, regardless of what this list says.",
       "items": { "type": "string" },
       "examples": [["Bash(make *)"]]
     },
@@ -170,7 +170,7 @@
       "properties": {
         "allow": {
           "type": "array",
-          "description": "Extra tool-permission patterns granted while a worker reports this phase. Parsed and schema-validated; not yet consumed by any resolver — groundwork for the follow-up worker-permissions minimal-rights work (switching workers to dontAsk with a curated per-phase allow set), which needs this per-phase structure to already exist.",
+          "description": "Tool-permission patterns granted only while a worker reports this phase, on top of the top-level allow list and the code-guaranteed structural floor (see supervisor.ResolvedAllowForPhase) — the materialized-toolchain layer `argus init` writes from toolchain detection and the interactive setup co-builds with the operator, one phase at a time. An entry here that could authorize a deny-floor command (git commit/push, argus ship/rework/review/supervise) is stripped after the union regardless of which phase it's placed under; it can never survive into a worker's actual resolved allow set.",
           "items": { "type": "string" }
         },
         "deny": {

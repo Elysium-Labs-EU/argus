@@ -17,11 +17,11 @@ func TestClaudeCodeAdapterDefaultLauncher(t *testing.T) {
 
 func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	path, content, err := (claudeCodeAdapter{}).RenderSettings(wt, []string{"Bash(pnpm *)"}, []string{"Bash(task *)"})
+	path, content, err := (claudeCodeAdapter{}).RenderSettings(wt, nil, []string{"Bash(pnpm *)"}, []string{"Bash(task *)"})
 	if err != nil {
 		t.Fatalf("RenderSettings: %v", err)
 	}
-	if want := filepath.Join(".claude", "settings.local.json"); path != want {
+	if want := filepath.Join(".claude", "settings.local.json"); want != path {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 
@@ -29,17 +29,17 @@ func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 	if err := json.Unmarshal(content, &round); err != nil {
 		t.Fatalf("content not valid json: %v", err)
 	}
-	if round.Permissions.Allow[len(round.Permissions.Allow)-1] != "Bash(task *)" {
+	if !slices.Contains(round.Permissions.Allow, "Bash(task *)") {
 		t.Errorf("extraAllow not applied via RenderSettings; got %v", round.Permissions.Allow)
 	}
 	if !slices.Contains(round.Permissions.Allow, "Bash(pnpm *)") {
-		t.Errorf("repoAllow not applied via RenderSettings; got %v", round.Permissions.Allow)
+		t.Errorf("baseAllow not applied via RenderSettings; got %v", round.Permissions.Allow)
 	}
 }
 
 func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	settings := settingsFor(wt, nil, nil)
+	settings := settingsFor(wt, nil, nil, nil)
 
 	want := []string{
 		"Edit(" + wt + "/.claude/settings.local.json)",
@@ -59,7 +59,7 @@ func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 // with no human present to answer it, every project MCP server must already
 // be pre-approved before the worker's launcher ever starts.
 func TestSettingsForEnablesAllProjectMcpServers(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil)
 	if !settings.EnableAllProjectMcpServers {
 		t.Error("expected EnableAllProjectMcpServers to be true so the first-run MCP consent gate never blocks a headless worker")
 	}
@@ -67,7 +67,7 @@ func TestSettingsForEnablesAllProjectMcpServers(t *testing.T) {
 
 func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	settings := settingsFor(wt, nil, nil)
+	settings := settingsFor(wt, nil, nil, nil)
 
 	want := []string{
 		"Edit(" + wt + "/.claude/argus/**)",
@@ -80,31 +80,43 @@ func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
 	}
 }
 
-// TestSettingsForAskListMatchesAskGatedCommands confirms settingsFor's Ask
-// list is derived from protocol.AskGatedCommands — the same slice every
-// brief's NeverRunBrief clause names — rather than its own independently
-// hardcoded glob strings that could silently list a different command than
-// what a brief actually warns about.
-func TestSettingsForAskListMatchesAskGatedCommands(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil)
-	if len(settings.Permissions.Ask) != len(protocol.AskGatedCommands) {
-		t.Fatalf("ask list length = %d, want %d matching AskGatedCommands", len(settings.Permissions.Ask), len(protocol.AskGatedCommands))
-	}
-	for _, cmd := range protocol.AskGatedCommands {
+// TestSettingsForDenyListMatchesDenyFloor confirms settingsFor's static
+// permissions.deny carries protocol.DenyFloor()'s own commands (git
+// commit/push, argus ship/rework/review/supervise), in glob form, as
+// defense in depth alongside checkToolHook's live enforcement — the same
+// slice AlwaysDeniedCommands/AskGatedCommands feed every brief's NeverRunBrief
+// clause, so the deny list and a brief's own wording can never drift apart.
+func TestSettingsForDenyListMatchesDenyFloor(t *testing.T) {
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil)
+	for _, cmd := range protocol.DenyFloor() {
 		want := "Bash(" + cmd + ":*)"
-		if !slices.Contains(settings.Permissions.Ask, want) {
-			t.Errorf("ask list missing %q for AskGatedCommands entry %q; got %v", want, cmd, settings.Permissions.Ask)
+		if !slices.Contains(settings.Permissions.Deny, want) {
+			t.Errorf("deny list missing %q for DenyFloor entry %q; got %v", want, cmd, settings.Permissions.Deny)
 		}
+	}
+}
+
+// TestSettingsForAllowUnionsEveryPhase confirms the static, session-wide
+// allow list is the union of every protocol.ConfigurablePhases value's own
+// resolved allow — since this file can't itself vary by the worker's
+// current phase, a command allowed only in "working" must still show up
+// here (the live checkToolHook is what narrows a call back down to the
+// worker's *current* phase; see cmd/worker_check_tool.go).
+func TestSettingsForAllowUnionsEveryPhase(t *testing.T) {
+	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", project, nil, nil)
+	if !slices.Contains(settings.Permissions.Allow, "Bash(go test*)") {
+		t.Errorf("allow list missing phases.working.allow entry; got %v", settings.Permissions.Allow)
 	}
 }
 
 // TestSettingsForWiresCheckToolHook confirms every freshly spawned worker
 // gets the phase-aware PreToolUse hook without any operator config: the
-// static allow/ask/deny lists above are only read once at session launch,
-// so DeniedInPhase's live per-phase enforcement depends on this hook
-// actually being present in every rendered settings file.
+// static allow/deny lists above are only read once at session launch, so
+// DeniedInPhase's/ResolvedAllowForPhase's live per-phase enforcement depends
+// on this hook actually being present in every rendered settings file.
 func TestSettingsForWiresCheckToolHook(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil)
 	if len(settings.Hooks.PreToolUse) != 1 {
 		t.Fatalf("PreToolUse hooks = %d, want 1", len(settings.Hooks.PreToolUse))
 	}

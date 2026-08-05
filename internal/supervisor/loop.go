@@ -1,9 +1,10 @@
 // Package supervisor is the deterministic core of argus: it discovers herdr
-// panes, enforces one worktree per worker, spawns workers in auto mode, and
-// learns each worker's state by reading its typed status file — never by
-// scraping terminal scrollback. No LLM sits in this loop; the three judgment
-// points (permission prompts, diff correctness, test adequacy) are surfaced to
-// the human in this cut, not automated.
+// panes, enforces one worktree per worker, spawns workers under
+// --permission-mode dontAsk with a curated per-phase allow set, and learns
+// each worker's state by reading its typed status file — never by scraping
+// terminal scrollback. No LLM sits in this loop; the three judgment points
+// (permission prompts, diff correctness, test adequacy) are surfaced to the
+// human in this cut, not automated.
 package supervisor
 
 import (
@@ -116,14 +117,19 @@ type Config struct {
 	// existing installs are unaffected until an operator opts in.
 	WorkerRuntime string
 	ScrubEnv      []string // env vars withheld from each worker (e.g. forge tokens it never needs)
-	// RepoAllow is the repo's own .argus/config.yml allow list (see
-	// internal/repoconfig), the base permission list settingsFor inserts
-	// after its fixed structural entries — replacing the hardcoded Go/make
-	// literal argus used to assume for every repo regardless of toolchain.
+	// RepoAllow is the repo's own .argus/config.yml top-level (phase-independent)
+	// allow list (see internal/repoconfig), unioned into every phase's resolved
+	// allow set — replacing the hardcoded Go/make literal argus used to assume
+	// for every repo regardless of toolchain.
 	RepoAllow []string
+	// RepoPhases is the repo's own .argus/config.yml phases.<name>.allow/deny/
+	// skip policy (see internal/repoconfig, protocol.PhaseConfig), the
+	// per-phase addition ResolvedAllowForPhase layers on top of RepoAllow and
+	// the structural floor for exactly the phase a worker currently reports.
+	RepoPhases protocol.PhaseConfig
 	// ExtraAllow appends operator-supplied CLI --allow patterns (e.g.
 	// "Bash(task *)", "Bash(npm *)") to every worker's generated allowlist, on
-	// top of RepoAllow, for a one-off run.
+	// top of RepoAllow and RepoPhases, for a one-off run.
 	ExtraAllow []string
 	Interval   time.Duration
 	Timeout    time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
@@ -196,10 +202,10 @@ func hasTraversalSegment(s string) bool {
 // BuildPlan resolves each worker into a concrete plan. Missing worktree paths are
 // derived by WorktreePath from RepoRoot, WorktreeDir, and Branch; each brief is
 // the task text plus the shared status-writing contract so writer and reader
-// can't drift. repoAllow and extraAllow are forwarded to settingsFor so every
-// worker's allowlist reflects the same repo-config and operator-supplied
-// extension the dry-run preview shows.
-func BuildPlan(workers []Worker, base string, repoAllow, extraAllow []string) ([]WorkerPlan, error) {
+// can't drift. project, baseAllow, and extraAllow are forwarded to settingsFor
+// so every worker's allowlist reflects the same repo-config and
+// operator-supplied extension the dry-run preview shows.
+func BuildPlan(workers []Worker, base string, project protocol.PhaseConfig, baseAllow, extraAllow []string) ([]WorkerPlan, error) {
 	plans := make([]WorkerPlan, len(workers))
 	for i := range workers {
 		w := workers[i]
@@ -226,7 +232,7 @@ func BuildPlan(workers []Worker, base string, repoAllow, extraAllow []string) ([
 		}
 		plans[i] = WorkerPlan{
 			Worker:   w,
-			Settings: settingsFor(w.Worktree, repoAllow, extraAllow),
+			Settings: settingsFor(w.Worktree, project, baseAllow, extraAllow),
 			Brief:    briefFor(&w, base),
 		}
 	}
@@ -271,7 +277,12 @@ func taskLabel(task string) string {
 }
 
 // DefaultLauncher is the agent argus starts in each worker pane.
-const DefaultLauncher = "claude --permission-mode auto"
+// --permission-mode dontAsk never prompts the human: it resolves every call
+// from the rendered settings.local.json alone (read-only tools stay
+// auto-allowed by the mode itself), denying-and-feeding-back anything
+// outside the resolved allow set instead of asking or hanging — see
+// settingsFor/ResolvedAllowForPhase for what actually populates that set.
+const DefaultLauncher = "claude --permission-mode dontAsk"
 
 // usesDefaultLauncher reports whether launcher actually starts a Claude Code
 // session — the only launcher that writes a ~/.claude/projects transcript for
@@ -482,7 +493,7 @@ func envMap(env []string) map[string]string {
 // worker, watches and judges each one's status independently until it reaches a
 // terminal phase or ctx is canceled, then prints a metrics report.
 func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error {
-	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoAllow, cfg.ExtraAllow)
+	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow)
 	if err != nil {
 		return err
 	}
@@ -573,7 +584,7 @@ func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 // or grinding on an existing PR branch — under the same deterministic observation
 // instead of eyeballing its pane scrollback.
 func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
-	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoAllow, cfg.ExtraAllow)
+	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow)
 	if err != nil {
 		return err
 	}
@@ -1064,7 +1075,13 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 		model, effort := launcherModelEffort(cfg.Launcher)
 		cfg.Log.Emit(&eventlog.Event{
 			Action: "spawn", Target: taskLabel(p.Task), Outcome: "ok", Detail: paneID,
-			Fields: map[string]any{"model": model, "effort": effort},
+			// allow is the actual rendered permissions.allow this worker
+			// launched with (see settingsFor) — an audit trail an operator
+			// can grep for a spawn that ran with an unexpectedly broad
+			// allow set, since a repo's own .argus/config.yml can change
+			// between runs and this is what was actually in effect for
+			// *this* one.
+			Fields: map[string]any{"model": model, "effort": effort, "allow": p.Settings.Permissions.Allow},
 		})
 
 		states[i] = &workerState{plan: p, paneID: paneID, started: cfg.Now(), dispatchedAt: dispatchedAt}
@@ -1160,7 +1177,7 @@ func provisionWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) error {
 	if err := protocol.Write(protocol.StatusPath(p.Worktree), &protocol.Status{Base: baseBranch}); err != nil {
 		return fmt.Errorf("recording base branch for %s: %w", p.Task, err)
 	}
-	if err := WriteSettings(p.Worktree, cfg.RepoAllow, cfg.ExtraAllow); err != nil {
+	if err := WriteSettings(p.Worktree, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow); err != nil {
 		return fmt.Errorf("writing settings for %s: %w", p.Task, err)
 	}
 	if err := WriteBrief(p.Worktree, p.Brief); err != nil {

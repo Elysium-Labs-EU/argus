@@ -70,9 +70,10 @@ func newSuperviseCmd() *cobra.Command {
 		Short: "Supervise herdr worker panes through to review",
 		Long: `Supervise runs the deterministic half of multi-pane supervision: it
 discovers the given herdr panes, enforces one worktree per worker, spawns each
-worker in auto mode with a scoped permission file, and tracks each worker's typed
-status.json rather than its scrollback. Judgment calls (diff review, blocked
-decisions) are surfaced to you; no LLM sits in this loop.
+worker under --permission-mode dontAsk with a curated per-phase allow set, and
+tracks each worker's typed status.json rather than its scrollback. Judgment
+calls (diff review, blocked decisions) are surfaced to you; no LLM sits in
+this loop.
 
 Workers are defined by paired --tasks and --branches; argus creates a worktree per
 worker and runs it in the pane herdr opens there. Pass --panes only to reuse
@@ -174,7 +175,7 @@ cannot be disabled by repo config.`,
 				interval: interval, timeout: timeout,
 				review: review, reviewModel: reviewModel, reviewEffort: resolveReviewEffort(cmd.Flags().Changed("review-effort"), reviewEffort, &rc), reviewConcurrency: reviewConcurrency,
 				policy: policy, gateVerifyCommand: gateVerifyCommand, worktreeBootstrapCmd: worktreeBootstrapCommand,
-				allow: allow, repoAllow: rc.Allow, credentialEnv: overrides, repoExplicit: repo != "",
+				allow: allow, repoAllow: rc.Allow, repoPhases: rc.Phases, credentialEnv: overrides, repoExplicit: repo != "",
 				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
 				reviewNote:      resolveReviewNote(cmd.Flags().Changed("review-note"), reviewNote, &rc),
 			})
@@ -231,18 +232,19 @@ cannot be disabled by repo config.`,
 // signature.
 type superviseOpts struct {
 	credentialEnv        map[string]string
-	reviewModel          string
-	reviewEffort         string
-	base                 string
-	launcher             string
+	repoPhases           protocol.PhaseConfig
+	policy               *supervisor.ReviewPolicy
 	workerRuntime        string
+	launcher             string
+	base                 string
 	workerPlacement      string
 	reviewNote           string
 	gateVerifyCommand    string
 	worktreeBootstrapCmd string
-	policy               *supervisor.ReviewPolicy
-	allow                []string
+	reviewEffort         string
+	reviewModel          string
 	repoAllow            []string
+	allow                []string
 	interval             time.Duration
 	timeout              time.Duration
 	reviewConcurrency    int
@@ -432,6 +434,7 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		ReviewConcurrency:        o.reviewConcurrency,
 		WorkerRuntime:            o.workerRuntime,
 		RepoAllow:                o.repoAllow,
+		RepoPhases:               o.repoPhases,
 		ExtraAllow:               o.allow,
 		Policy:                   o.policy,
 		ReviewNote:               o.reviewNote,

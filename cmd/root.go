@@ -17,8 +17,9 @@ var rootCmd = &cobra.Command{
 
 argus runs the mechanical half of multi-pane supervision as plain code
 instead of an LLM: it discovers herdr panes, enforces one worktree per
-worker, spawns them in auto mode, and tracks each worker's typed status
-file rather than scraping terminal scrollback.`, buildinfo.GetVersionOnly()),
+worker, spawns them under --permission-mode dontAsk with a curated
+per-phase allow set, and tracks each worker's typed status file rather
+than scraping terminal scrollback.`, buildinfo.GetVersionOnly()),
 	Version: buildinfo.Get(),
 	// main.go renders errors itself (with UserError hints where available),
 	// and a runtime failure like a missing herdr binary isn't a usage

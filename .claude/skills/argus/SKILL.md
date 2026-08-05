@@ -6,8 +6,10 @@ description: "Supervise parallel herdr worker agents through to a forge PR (GitH
 # argus — deterministic agent supervisor
 
 Go CLI for multi-pane agent supervision. Discovers/opens herdr panes, gives each
-worker its own git worktree, spawns it in auto mode with a scoped permission file,
-tracks each worker's typed `status.json` (not scrollback). A gate cross-checks
+worker its own git worktree, spawns it under Claude Code's `dontAsk`
+permission mode with a curated per-phase permission-allow set (default-deny,
+not auto-approve), tracks each worker's typed `status.json` (not scrollback).
+A gate cross-checks
 each worker's self-report against the real `git diff` and auto-approves the safe
 majority; the LLM re-enters only for escalations. `ship` refuses to open a PR
 without a recorded approving verdict.
@@ -130,29 +132,52 @@ Enforced in code, not conventions the worker is merely asked to follow.
   (`internal/supervisor/preflight.go`); a syntax error is reported immediately
   against every planned worker at once, not just once that worker reaches the
   gate.
-- **A worker cannot commit/push before reporting a plan, and cannot invoke
-  argus's own supervisor commands on itself, in any phase — enforced live via a
-  `PreToolUse` hook, not settings.json** (`settings.json`/`settings.local.json`
-  are read once at session launch, so a phase-conditional rule can't live
-  there). `argus worker check-tool`, wired via
-  `internal/supervisor/agentadapter.go`'s `checkToolHook`, re-checks the
-  worktree's live `status.json` on every matching Bash call, on every
-  `supervise` spawn. Two floors, hardcoded in
-  `internal/protocol.DeniedInPhase`, apply regardless of repo config:
-  - `git commit`/`git push` — denied during `planning` (ask-gated in every
-    other phase).
-  - `argus ship`/`rework`/`review`/`supervise` — denied in **every** phase.
-    Prevents a worker calling `argus ship --force` on itself to bypass the
-    verdict-required gate (previously an unlisted command hit Claude Code's
-    default ask-prompt, which hangs a headless worker instead of blocking it).
-  - A repo's `.argus/config.yml` can *add* denied commands per phase
-    (`phases.<name>.deny`) and `phases.<name>.skip` to drop its own addition —
-    never the hardcoded floor, resolved from the repo's main checkout (a
-    worker editing its own worktree's copy has no effect). The older dotted
-    form (`phase.<name>.deny`) still works as a deprecated alias. Full shape:
-    `schemas/config.schema.json` `phases.*` blocks.
+- **Workers launch under Claude Code's `dontAsk` permission mode: default-deny,
+  not auto-approve-and-chase-a-denylist.** `dontAsk` never prompts a human — it
+  resolves every call from the rendered `settings.local.json` alone
+  (read-only tools stay auto-allowed by the mode itself), denying and feeding
+  the reason back to the worker for anything else, no hang. The resolved
+  allow set is a strict layering, floor authoritative:
+  ```
+  resolved allow(phase) = structural-floor ∪ allow ∪ phases.<phase>.allow ∪ --allow flags − deny-floor
+  ```
+  - **structural floor** (code, every phase, unremovable): read-only tools,
+    read-only git only (`git status`/`git diff`/`git log`), and a worker's own
+    `argus worker report`/`answer`/`steer` self-calls. A worker never runs
+    `git add`, `git commit`, or `git push` — it edits files, leaves them
+    uncommitted, and reports; the gate measures the *uncommitted* working-tree
+    diff; `argus ship` is what stages/commits/pushes. No config file at all ⇒
+    this floor is all a worker gets — skipping setup makes a worker *more*
+    restricted, never less.
+  - **`allow` / `phases.<name>.allow`** (config, genuinely editable): the
+    materialized toolchain, written by `argus init` from toolchain detection
+    and co-built interactively per phase
+    (`planning`/`working`/`self_test`/`awaiting_review`/`blocked`); `argus
+    init --refresh` re-materializes just this from the current default,
+    leaving everything else untouched. `phases.<name>.deny`/`.skip` still work
+    as before (unchanged by this — see below).
+  - **deny floor** (code, every phase, subtracted last, unremovable): `argus
+    ship`/`rework`/`review`/`supervise`, and `git commit`/`git push`. No
+    `phases.<any>.allow` entry, materialized command, or `--allow` flag can
+    re-grant any of these — an entry as broad as `"Bash(git push*)"` under
+    `phases.working.allow` is stripped after the union, in *every* phase, not
+    just `planning`. Prevents a worker calling `argus ship --force` on itself
+    to bypass the verdict-required gate.
+  - Because `settings.local.json` is written once at session launch and can't
+    itself vary by phase, the rendered file is the union of every phase's own
+    resolved allow — a live `PreToolUse` hook (`argus worker check-tool`,
+    wired via `internal/supervisor/agentadapter.go`'s `checkToolHook`) is what
+    narrows a call back down to the worker's *current* phase, re-reading
+    `.argus/config.yml` fresh from the trusted main checkout on every matching
+    Bash call (a worker editing its own worktree's copy has no effect). The
+    older dotted deny form (`phase.<name>.deny`) still works as a deprecated
+    alias. Full shape: `schemas/config.schema.json` `phases.*` blocks.
+  - The effective allow set actually used is recorded on every `spawn` event
+    in `~/.argus/runs/*.jsonl` — grep it for a run that spawned with an
+    unexpectedly broad grant.
   - Gaps: no cross-repo config tier, no per-phase scripts-on-entry, matching is
-    plain string-prefix (not hardened against shell-level evasion).
+    plain string-prefix (not hardened against shell-level evasion), and
+    `Task`/`WebFetch` aren't yet pulled outside the convenience floor.
 
 ## Known gaps — still manual, no first-class command yet
 
@@ -373,6 +398,7 @@ Useful flags (see `argus supervise --help` for all):
 - `--review-concurrency <n>` — max concurrent `--review` calls on multi-worker escalation (default 4).
 - `--worker-placement <workspace|tab>` (default `workspace`) — `tab` nests each worker's pane as a tab in the current herdr workspace; needs `HERDR_WORKSPACE_ID` set (running from inside a herdr pane).
 - `--forge <gitlab|gitea>` — self-hosted API shape for the `--issues` forge fetch; `.argus/config.yml` `forge` key sets a default.
+- `--allow <pattern,...>` — extra Claude Code permission patterns appended to every worker's resolved allow set (every phase), on top of `.argus/config.yml` `allow`/`phases.<name>.allow`, for a one-off run. See "Workers launch under Claude Code's `dontAsk` permission mode" above.
 - Gate tuning:
   - `--max-diff-lines` (default 400, `0` disables) — insertions+deletions from the *measured* git diff; over the limit escalates regardless of test results. Pure size proxy, independent of the other checks. (Real diffs of 1178/1527/461 lines have all correctly escalated past 400.)
   - `--proof-required-path` — change needs real-world proof.

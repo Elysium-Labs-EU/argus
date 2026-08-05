@@ -642,7 +642,7 @@ func TestExecuteReportsOrphansOnPartialFailure(t *testing.T) {
 	plans, err := BuildPlan([]Worker{
 		{Task: "a", Branch: "feat-a", RepoRoot: t.TempDir()},
 		{Task: "b", Branch: "feat-b", RepoRoot: t.TempDir()},
-	}, "origin/main", nil, nil)
+	}, "origin/main", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}

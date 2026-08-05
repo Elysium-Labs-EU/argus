@@ -103,12 +103,14 @@ deprecation warning pointing at its new nested location, never a hard break.
   hint at all. Precedence: an explicit `--status-page-url` flag on `ship`,
   then this key, then svcstatus's built-in map (empty for an unrecognized
   host either way). `argus init` prompts for it.
-- **`allow`** — the base Claude Code permission-allow list `supervise` writes
-  into each worker's generated `settings.local.json`, replacing (not just
-  appending to) argus's old hardcoded Go/make list. A CLI `--allow` still
-  appends to this on top, for a one-off run. With no config file, no
-  build/test tooling is pre-cleared for anyone — only toolchain-neutral git
-  read/write plumbing (`git status`/`diff`/`log`/`add`) and edits confined to
+- **`allow`** / **`phases.<name>.allow`** — see "Worker permissions: `dontAsk`
+  and the per-phase allow set" below; this is the "materialized toolchain"
+  layer of that model, the one bucket that's genuinely per-repo policy.
+  `allow` is phase-independent (granted in every phase); `phases.<name>.allow`
+  adds to it for one specific phase only. A CLI `--allow` flag appends to both
+  on top, for a one-off run. With no config file, no build/test tooling is
+  pre-cleared for anyone — a worker gets only the code-guaranteed structural
+  floor (read-only git, argus's own status self-calls) and edits confined to
   the worktree.
 - **`brief_note`** — a single opaque string appended verbatim to a
   generated worker brief when the brief comes from `--issues`/`--jira-issues`.
@@ -173,6 +175,69 @@ deprecation warning pointing at its new nested location, never a hard break.
   budget entirely (unbounded, the prior behavior); unset falls back to
   `supervisor.DefaultMaxReworkBudget`. Precedence: an explicit
   `--max-rework-budget` flag, then this key, then the built-in default.
+
+## Worker permissions: `dontAsk` and the per-phase allow set
+
+Workers launch under Claude Code's `--permission-mode dontAsk`: never prompt
+a human, resolve every call from the rendered `settings.local.json` alone —
+read-only tools stay auto-allowed by the mode itself, and anything else is
+either in `permissions.allow` or it's denied and fed back to the worker, not
+asked and not hung. This is default-deny, the opposite of the old
+`--permission-mode auto` (auto-approve, chase a denylist that can never
+close).
+
+The resolved allow set for one phase is a strict layering, floor
+authoritative:
+
+```
+resolved allow(phase) =
+    structural-floor          (code-guaranteed, every phase)
+  ∪ allow                     (config, phase-independent)
+  ∪ phases.<phase>.allow      (config, this phase only)
+  ∪ --allow flags             (one-off, every phase)
+  − deny-floor                (subtracted last, unremovable)
+```
+
+- **structural floor** (code, every phase, cannot be removed by any config):
+  read-only tools, read-only git only (`git status`/`git diff`/`git log`),
+  and a worker's own `argus worker report`/`answer`/`steer` self-calls. A
+  worker never runs `git add`, `git commit`, or `git push` — it edits files,
+  leaves them uncommitted, and reports; the gate measures the *uncommitted*
+  working-tree diff; `argus ship` is what stages, commits, and pushes. With
+  no config file at all, this floor is all a worker gets: enough to edit
+  files and be gated, no repo toolchain command — skipping setup makes a
+  worker *more* restricted, never less.
+- **`allow` / `phases.<name>.allow`** (config, genuinely editable per repo):
+  the materialized toolchain — the one bucket that's real per-repo policy.
+  Written by `argus init` from toolchain detection (`Taskfile.yml`,
+  `Makefile`, `package.json`, `go.mod`), then co-built interactively with the
+  operator, one `phases.<name>` at a time
+  (`planning`/`working`/`self_test`/`awaiting_review`/`blocked`). Edited
+  freely by hand afterward.
+- **`--allow` flags**: additive for one run, flat across every phase — the
+  ad-hoc escape hatch and the no-`init` path.
+- **deny floor** (code, every phase, subtracted last, unremovable): `argus
+  ship`/`rework`/`review`/`supervise`, and `git commit`/`git push`. No
+  `phases.<any>.allow` entry, materialized toolchain command, or `--allow`
+  flag can re-grant any of these — even an entry as broad as
+  `"Bash(git push*)"` sitting under `phases.working.allow` is stripped after
+  the union, in every phase, not just `planning`.
+
+Because `settings.local.json` is written once at session launch and can't
+itself vary by the worker's *current* phase, the file that's actually
+rendered is the union of every phase's own resolved allow — otherwise a
+command legitimately scoped to `working` would simply be unavailable the
+moment a worker reported `self_test`. A live `PreToolUse` hook (`argus worker
+check-tool`) is what narrows a call back down to the worker's actual current
+phase, re-reading `.argus/config.yml` fresh from the trusted main checkout on
+every Bash call — a worker editing its own worktree's tracked copy has no
+effect here, same as it has none on `ship`/`rework`/`review`'s own config
+reads.
+
+`argus init --refresh` re-materializes only the `allow`/`phases.<name>.allow`
+suggestion from the current toolchain-detection default, leaving every other
+key (including any hand-authored `deny`/`skip`) untouched — for a repo whose
+`config.yml` predates an improved default set in a newer argus.
 
 ## Why this is safe from a worker
 

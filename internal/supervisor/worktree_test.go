@@ -36,14 +36,17 @@ func TestEnsureDistinctWorktreesRefusesCollision(t *testing.T) {
 
 func TestSettingsForConfinesToWorktree(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt, nil, nil)
+	s := settingsFor(wt, nil, nil, nil)
 
 	wantAllow := "Edit(" + wt + "/**)"
 	if !slices.Contains(s.Permissions.Allow, wantAllow) {
 		t.Errorf("allow missing %q; got %v", wantAllow, s.Permissions.Allow)
 	}
-	if !slices.Contains(s.Permissions.Ask, "Bash(git commit:*)") {
-		t.Errorf("commit should be gated behind ask; got %v", s.Permissions.Ask)
+	if !slices.Contains(s.Permissions.Deny, "Bash(git commit:*)") {
+		t.Errorf("commit should be denied outright (deny floor, dontAsk mode); got %v", s.Permissions.Deny)
+	}
+	if !slices.Contains(s.Permissions.Deny, "Bash(git push:*)") {
+		t.Errorf("push should be denied outright (deny floor, dontAsk mode); got %v", s.Permissions.Deny)
 	}
 	for _, want := range []string{"Bash(sudo *)", "Bash(rm -rf *)", "Bash(git reset --hard*)"} {
 		if !slices.Contains(s.Permissions.Deny, want) {
@@ -56,26 +59,28 @@ func TestSettingsForConfinesToWorktree(t *testing.T) {
 // fix: with no
 // repo config, argus assumes no build/test toolchain for anyone (not just
 // non-Go repos) — the old hardcoded "Bash(go build *)"/"Bash(make *)"
-// defaults must not resurface.
+// defaults must not resurface. git add is deliberately absent too: a worker
+// never stages anything — it edits files and reports, and the gate measures
+// the uncommitted working tree, so only read-only git plumbing is floor.
 func TestSettingsForNoRepoAllowIsToolchainNeutral(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt, nil, nil)
+	s := settingsFor(wt, nil, nil, nil)
 
-	for _, unwanted := range []string{"Bash(go build *)", "Bash(go test *)", "Bash(go vet *)", "Bash(go get *)", "Bash(make *)"} {
+	for _, unwanted := range []string{"Bash(go build *)", "Bash(go test *)", "Bash(go vet *)", "Bash(go get *)", "Bash(make *)", "Bash(git add*)"} {
 		if slices.Contains(s.Permissions.Allow, unwanted) {
-			t.Errorf("allow should not assume a toolchain by default; unexpectedly found %q in %v", unwanted, s.Permissions.Allow)
+			t.Errorf("allow should not assume a toolchain (or grant git add) by default; unexpectedly found %q in %v", unwanted, s.Permissions.Allow)
 		}
 	}
-	for _, want := range []string{"Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git add*)"} {
+	for _, want := range []string{"Bash(git status*)", "Bash(git diff*)", "Bash(git log*)"} {
 		if !slices.Contains(s.Permissions.Allow, want) {
-			t.Errorf("allow missing toolchain-neutral git read/write %q; got %v", want, s.Permissions.Allow)
+			t.Errorf("allow missing structural-floor read-only git %q; got %v", want, s.Permissions.Allow)
 		}
 	}
 }
 
 func TestSettingsForAppendsRepoAndExtraAllow(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt, []string{"Bash(task *)"}, []string{"Bash(npm *)"})
+	s := settingsFor(wt, nil, []string{"Bash(task *)"}, []string{"Bash(npm *)"})
 
 	for _, want := range []string{"Bash(task *)", "Bash(npm *)"} {
 		if !slices.Contains(s.Permissions.Allow, want) {
@@ -116,7 +121,7 @@ func TestRunWorktreeBootstrapCommandFailureCarriesOutput(t *testing.T) {
 
 func TestWriteSettingsWritesConfinedFile(t *testing.T) {
 	wt := t.TempDir()
-	if err := WriteSettings(wt, nil, nil); err != nil {
+	if err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"}); err != nil {
 		t.Fatalf("WriteSettings: %v", err)
 	}
 	path := filepath.Join(wt, ".claude", "settings.local.json")
@@ -125,11 +130,21 @@ func TestWriteSettingsWritesConfinedFile(t *testing.T) {
 		t.Fatalf("reading settings: %v", err)
 	}
 	var round permissionSettings
-	if err := json.Unmarshal(data, &round); err != nil {
+	if err = json.Unmarshal(data, &round); err != nil {
 		t.Fatalf("settings not valid json: %v", err)
 	}
 	if !strings.Contains(string(data), wt+"/**") {
 		t.Errorf("settings should scope edits to the worktree path")
+	}
+
+	// WriteSettings also persists extraAllow so the live check-tool hook can
+	// read it back — it has no other access to this invocation's own flags.
+	extraAllow, err := protocol.LoadExtraAllow(wt)
+	if err != nil {
+		t.Fatalf("LoadExtraAllow: %v", err)
+	}
+	if !slices.Contains(extraAllow, "Bash(task *)") {
+		t.Errorf("LoadExtraAllow = %v, want it to contain the extraAllow WriteSettings was given", extraAllow)
 	}
 }
 
@@ -140,7 +155,7 @@ func TestWriteSettingsWrapsMkdirAllError(t *testing.T) {
 		t.Fatalf("seeding blocking file: %v", err)
 	}
 
-	err := WriteSettings(wt, nil, nil)
+	err := WriteSettings(wt, nil, nil, nil)
 	if err == nil {
 		t.Fatal("want error when settings dir can't be created, got nil")
 	}
@@ -158,11 +173,33 @@ func TestWriteSettingsWrapsWriteFileError(t *testing.T) {
 		t.Fatalf("seeding blocking dir: %v", err)
 	}
 
-	err := WriteSettings(wt, nil, nil)
+	err := WriteSettings(wt, nil, nil, nil)
 	if err == nil {
 		t.Fatal("want error when settings file can't be written, got nil")
 	}
 	if !strings.Contains(err.Error(), "writing settings file") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+// TestWriteSettingsWrapsSaveExtraAllowError forces WriteSettings' last
+// branch: settings.local.json itself writes fine, but persisting extraAllow
+// (protocol.SaveExtraAllow) fails because a regular file already sits where
+// .claude/argus/ needs to be a directory.
+func TestWriteSettingsWrapsSaveExtraAllowError(t *testing.T) {
+	wt := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(wt, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".claude", "argus"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding blocking file: %v", err)
+	}
+
+	err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"})
+	if err == nil {
+		t.Fatal("want error when extra_allow.json's parent dir can't be created, got nil")
+	}
+	if !strings.Contains(err.Error(), "persisting extra allow flags") {
 		t.Errorf("error should be wrapped with context, got: %v", err)
 	}
 }
@@ -174,7 +211,7 @@ type fakeFailingAgent struct{}
 
 func (fakeFailingAgent) DefaultLauncher() string { return "" }
 
-func (fakeFailingAgent) RenderSettings(string, []string, []string) (string, []byte, error) {
+func (fakeFailingAgent) RenderSettings(string, protocol.PhaseConfig, []string, []string) (string, []byte, error) {
 	return "", nil, errors.New("boom")
 }
 
@@ -185,7 +222,7 @@ func TestWriteSettingsWrapsRenderSettingsError(t *testing.T) {
 	defer func() { defaultAgent = orig }()
 	defaultAgent = fakeFailingAgent{}
 
-	err := WriteSettings(t.TempDir(), nil, nil)
+	err := WriteSettings(t.TempDir(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("want error when RenderSettings fails, got nil")
 	}
