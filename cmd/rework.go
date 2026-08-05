@@ -436,7 +436,7 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	// phase having changed nothing. Measured here rather than read from prior
 	// because a non-approved verdict — the only kind rework acts on — never
 	// persisted a ContentHash of its own.
-	priorContentHash := preRoundContentHash(ctx, cfg.Base, opts.worktree)
+	priorContentHash := preRoundContentHash(ctx, cfg.Base, opts.worktree, prior)
 	// Same pre-dispatch snapshot, at the git-history level: a worker can commit
 	// content that was already sitting in the worktree uncommitted before this
 	// round even started, which leaves priorContentHash unchanged even though a
@@ -561,14 +561,27 @@ func taskFor(worktree, branch string) string {
 // preRoundContentHash digests the worktree's touched-file bytes as they stand
 // before a rework round dispatches — the state the prior verdict already found
 // wanting — so JudgeOne can flag a round that reaches a terminal phase identical
-// to it. Best-effort: a measure or hash failure returns "", which simply
+// to it. prior's own MeasuredFiles is used when available: it is the exact set
+// that verdict's own ContentHash was bound to, so comparing against it (rather
+// than a fresh MeasureDiff call that could see a set a since-run gate-verify
+// command perturbed) can't spuriously disagree over files neither round's own
+// work touched. A prior verdict with no recorded set (none at all, or one
+// written before MeasuredFiles existed) falls back to a fresh measure. Both
+// paths are best-effort: a measure or hash failure returns "", which simply
 // disables that one gate check for the round rather than blocking the round on
 // argus's own inability to measure. base matches the ref reconcile measures the
-// post-round diff against, so the two hashes cover the same file set.
-func preRoundContentHash(ctx context.Context, base, worktree string) string {
-	_, files, err := supervisor.MeasureDiff(ctx, worktree, base)
-	if err != nil {
-		return ""
+// post-round diff against, so the fallback hash covers the same file set.
+func preRoundContentHash(ctx context.Context, base, worktree string, prior *protocol.Approval) string {
+	files := []string(nil)
+	if prior != nil {
+		files = prior.MeasuredFiles
+	}
+	if len(files) == 0 {
+		var err error
+		_, files, err = supervisor.MeasureDiff(ctx, worktree, base)
+		if err != nil {
+			return ""
+		}
 	}
 	hash, err := supervisor.ContentHash(worktree, files)
 	if err != nil {

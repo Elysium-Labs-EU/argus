@@ -301,6 +301,58 @@ func TestRunReworkMaxRoundsDefaultsWhenOmitted(t *testing.T) {
 	}
 }
 
+// TestPreRoundContentHashFallsBackWithoutPriorMeasuredFiles covers the first
+// round (or a legacy verdict recorded before MeasuredFiles existed): with no
+// recorded set to read, preRoundContentHash must behave exactly as before —
+// a fresh MeasureDiff against base, hashed.
+func TestPreRoundContentHashFallsBackWithoutPriorMeasuredFiles(t *testing.T) {
+	dir := initGitDirWithDiff(t)
+
+	got := preRoundContentHash(context.Background(), "feat-x", dir, nil)
+
+	_, files, err := supervisor.MeasureDiff(context.Background(), dir, "feat-x")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	want, err := supervisor.ContentHash(dir, files)
+	if err != nil {
+		t.Fatalf("ContentHash: %v", err)
+	}
+	if got == "" || got != want {
+		t.Errorf("preRoundContentHash = %q, want fresh-measure hash %q", got, want)
+	}
+}
+
+// TestPreRoundContentHashUsesPriorMeasuredFilesSet pins the rework half of the
+// ship fix: preRoundContentHash must hash the prior verdict's own recorded
+// MeasuredFiles set, not a fresh re-measure — otherwise an artifact a prior
+// round's gate-verify command left behind (not part of that verdict's own
+// set) would make this round's zero-delta comparison see a different,
+// spuriously larger file set than the one the prior verdict was bound to.
+func TestPreRoundContentHashUsesPriorMeasuredFilesSet(t *testing.T) {
+	dir := initGitDirWithDiff(t)
+	_, files, err := supervisor.MeasureDiff(context.Background(), dir, "feat-x")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	prior := &protocol.Approval{MeasuredFiles: files}
+
+	// Simulate an artifact left by the prior round's own gate-verify command,
+	// not part of the verdict's recorded set.
+	if werr := os.WriteFile(filepath.Join(dir, "artifact.out"), []byte("x\n"), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+
+	got := preRoundContentHash(context.Background(), "feat-x", dir, prior)
+	want, err := supervisor.ContentHash(dir, files)
+	if err != nil {
+		t.Fatalf("ContentHash: %v", err)
+	}
+	if got != want {
+		t.Errorf("preRoundContentHash = %q, want the recorded-set hash %q (ignoring the new artifact)", got, want)
+	}
+}
+
 func TestRunReworkApprovesFirstRound(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := initGitDirWithDiff(t)

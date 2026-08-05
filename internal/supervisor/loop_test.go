@@ -940,6 +940,33 @@ func TestReviewEscalationsHardReasonSurvivesReviewerApprove(t *testing.T) {
 	}
 }
 
+// TestRecordApprovalPersistsMeasuredFiles pins the fix for ship refusing an
+// approved worktree whenever a gate-verify command perturbed the file set
+// re-measured at ship time: recordApproval must persist the exact same file
+// list ContentHash was computed over, so ship can hash that recorded set
+// instead of re-deriving a possibly different one.
+func TestRecordApprovalPersistsMeasuredFiles(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	_, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	st := &workerState{
+		plan:          &WorkerPlan{Worker: Worker{Task: "t", Worktree: wt}},
+		measuredFiles: files,
+	}
+	cfg := &Config{}
+	recordApproval(cfg, st, true, "gate", "auto-approved", nil)
+
+	approval, found, err := protocol.LoadApproval(wt)
+	if err != nil || !found {
+		t.Fatalf("LoadApproval: found=%v err=%v", found, err)
+	}
+	if !slices.Equal(approval.MeasuredFiles, files) {
+		t.Errorf("MeasuredFiles = %v, want %v", approval.MeasuredFiles, files)
+	}
+}
+
 // TestReworkRoundNotBlockedByStaleCumulativeUnderReport: a rework round only
 // ever self-reports its own incremental delta, never the cumulative diff
 // since base, so the hard under-report gate must judge a later round against

@@ -475,9 +475,15 @@ func checkApproved(ctx context.Context, worktree, base string, force bool) error
 			Hint: "address the findings and re-review, or pass --force to override",
 		}
 	}
-	_, files, err := supervisor.MeasureDiff(ctx, worktree, base)
-	if err != nil {
-		return fmt.Errorf("re-measuring worktree before ship: %w", err)
+	files := approval.MeasuredFiles
+	if len(files) == 0 {
+		// Legacy verdict, recorded before MeasuredFiles existed: fall back to a
+		// fresh re-measure rather than making an in-flight verdict unshippable
+		// by the upgrade.
+		_, files, err = supervisor.MeasureDiff(ctx, worktree, base)
+		if err != nil {
+			return fmt.Errorf("re-measuring worktree before ship: %w", err)
+		}
 	}
 	hash, err := supervisor.ContentHash(worktree, files)
 	if err != nil {
