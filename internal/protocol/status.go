@@ -44,8 +44,15 @@ type DiffStat struct {
 	Deletions  int `json:"deletions"`
 }
 
-// TestRun records one test invocation and its outcome. Cmd is the exact command
-// the worker ran; Target names what it exercised (a package, a VM, a service).
+// TestRun records one test invocation and its outcome. Cmd must be the
+// exact, fully self-contained, copy-paste-runnable command the worker ran —
+// the gate replays it byte-for-byte to reproduce a claimed pass. Target is a
+// descriptive label naming what Cmd exercised (a package, a VM, a service,
+// a Dockerfile) and, only when it resolves to a real directory under the
+// worktree, a hint for which directory to replay Cmd from (a monorepo with
+// one Makefile/go.mod per module). Target is never appended to Cmd as an
+// argument, whatever shape it takes — see replayCommands in
+// internal/supervisor/testverify.go.
 //
 // ExpectedResult is optional and only meaningful when it equals ResultFail: it
 // marks a run the worker deliberately broke to prove a check catches the

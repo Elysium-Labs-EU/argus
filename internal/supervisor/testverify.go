@@ -99,55 +99,33 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 	return mismatches, unverifiable
 }
 
-// replayCommands recomposes the exact command line(s) to re-run for a
-// worker's self-reported Cmd/Target, in place of a naive Cmd+" "+Target join
-// that trusts the worker's paraphrase of what it actually typed. That join
-// breaks in five observed ways, each guarded here:
+// replayCommands recomposes the exact command line to re-run for a worker's
+// self-reported Cmd/Target. Cmd is contractually self-contained (see
+// status.go's TestRun.Target doc and brief.go's WriterBrief): it is always
+// replayed byte-for-byte, never with Target folded in as a positional
+// argument. A prior version joined them with Cmd+" "+Target whenever Target
+// wasn't recognized as a directory, trusting Target to be an argument Cmd
+// expected — but Target is documented (and, in the observed failure, used)
+// as a descriptive label just as often: a human-readable description of
+// what Cmd exercises, a comma-separated file list mirroring a task brief, or
+// a path Cmd already embeds itself. Appending any of those produces neither
+// valid shell nor a valid subcommand — "docker buildx build -f
+// docker/Dockerfile . frontend/docker/Dockerfile" for a Target that was only
+// ever meant to record which Dockerfile the build exercised — and that
+// failure was previously misread as a real mismatch, escalating a worker's
+// correct change. Target's only remaining effect on replay is picking a
+// working directory:
 //
 //   - `make <target>`: make treats every token after the target name as an
 //     additional target to build, never as an argument to the recipe — a
-//     stray word the worker appended (in Cmd or Target) turns into "No rule
-//     to make target". The target is always replayed bare.
-//   - Target already present in Cmd: a worker sometimes folds a path into
-//     Cmd directly and repeats it in Target, so joining hands the tool the
-//     same path twice.
-//   - Target listing several comma-separated paths (mirroring how a task
-//     brief lists target files): joined into one command line this can
-//     overflow a tool that only accepts a single positional argument.
-//     Replaying Cmd once per listed path reproduces what actually happened
-//     without needing to know any given tool's arity.
-//   - Target holding a human-readable description of what Cmd exercises
-//     (e.g. Cmd "task frontend:test", Target "frontend unit tests (vitest)")
-//     rather than an argument Cmd expects: the writer brief never tells a
-//     worker which shape Target is, so this is the normal case, not a
-//     misuse. Appending it produces neither valid shell nor a valid
-//     subcommand, and that failure was previously misread as a real
-//     mismatch. A label reads as prose — multiple words — where a
-//     positional argument reported this way is always one shell word, so
-//     Cmd is replayed bare rather than guessing where in the phrase a
-//     shell-safe split would even go.
-//   - Cmd itself carrying a trailing parenthetical aside describing what it
-//     triggers (e.g. `git commit (lefthook pre-commit: format, lint,
-//     fieldalignment, test)`) rather than being purely literal shell — the
-//     same prose-vs-argument confusion the Target case above guards against,
-//     just folded into Cmd instead. Passed to sh -c verbatim, the stray
-//     parens are a syntax error ("unexpected token `(`"), which is not
-//     evidence the underlying claim is false — yet this mismatch is
-//     unwaivable. Stripped before replay so the literal command underneath
-//     is what actually gets re-run.
-//   - Target naming a subdirectory the command must be run from rather than
-//     an argument to append (e.g. a monorepo with one go.mod/Makefile per
-//     plugin dir: Cmd "govulncheck ./..." or "make crap", Target
-//     "eos-sink-logbench") — appending it produces "govulncheck ./...
-//     eos-sink-logbench", a positional argument the tool never expected,
-//     instead of the cwd the worker actually ran it from; for the make case
-//     it's worse, since "make crap eos-sink-logbench" reads as a second,
-//     nonexistent target and fails with "No rule to make target". Detected
-//     by resolving target against worktree; only a real directory takes
-//     this branch (both here and in the make branch above) — any other
-//     single word (e.g. a package path like "./...") falls through
-//     unchanged to the append case, since that's exactly what tools with a
-//     real positional target expect.
+//     stray word turns into "No rule to make target". The target is always
+//     replayed bare, from Target's resolved directory when Target names one
+//     that exists (a monorepo with one Makefile per module, e.g. Cmd "make
+//     crap", Target "eos-sink-logbench"), else the worktree root.
+//   - Any other Cmd: when Target resolves to a real directory under
+//     worktree (the same per-module-monorepo shape), Cmd replays from
+//     there instead of the worktree root. Otherwise Cmd replays from the
+//     worktree root, verbatim, whatever shape Target takes.
 func replayCommands(worktree, cmd, target string) []replayCmd {
 	cmd = stripTrailingParenthetical(cmd)
 
@@ -155,31 +133,13 @@ func replayCommands(worktree, cmd, target string) []replayCmd {
 		return []replayCmd{{cmd: "make " + fields[1], dir: targetDir(worktree, target)}}
 	}
 
-	if target == "" || strings.Contains(cmd, target) {
-		return []replayCmd{{cmd: cmd, dir: worktree}}
-	}
-
-	if strings.Contains(target, ",") {
-		var cmds []replayCmd
-		for p := range strings.SplitSeq(target, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				cmds = append(cmds, replayCmd{cmd: cmd + " " + p, dir: worktree})
-			}
-		}
-		if len(cmds) > 0 {
-			return cmds
+	if target != "" {
+		if dir, ok := targetDirIfExists(worktree, target); ok {
+			return []replayCmd{{cmd: cmd, dir: dir}}
 		}
 	}
 
-	if len(strings.Fields(target)) > 1 {
-		return []replayCmd{{cmd: cmd, dir: worktree}}
-	}
-
-	if dir, ok := targetDirIfExists(worktree, target); ok {
-		return []replayCmd{{cmd: cmd, dir: dir}}
-	}
-
-	return []replayCmd{{cmd: cmd + " " + target, dir: worktree}}
+	return []replayCmd{{cmd: cmd, dir: worktree}}
 }
 
 // targetDirIfExists resolves target against worktree and reports whether the
