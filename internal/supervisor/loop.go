@@ -238,25 +238,34 @@ func BuildPlan(workers []Worker, base string, project protocol.PhaseConfig, base
 		plans[i] = WorkerPlan{
 			Worker:   w,
 			Settings: settingsFor(w.Worktree, project, baseAllow, extraAllow),
-			Brief:    briefFor(&w, base),
+			Brief:    briefFor(&w, base, project, baseAllow, extraAllow),
 		}
 	}
 	return plans, nil
 }
 
-func briefFor(w *Worker, base string) string {
+// briefFor's allow-set sentence is sourced from the same ResolvedAllowSet
+// settingsFor renders settings.local.json's Allow list from, so a worker
+// reads its own sandbox up front instead of discovering it by trial-and-error
+// deny — the same "drive the wording from the one authoritative source"
+// principle NeverRunBrief already applies to the commit/push clause.
+func briefFor(w *Worker, base string, project protocol.PhaseConfig, baseAllow, extraAllow []string) string {
+	allowed := AllowSetBrief(ResolvedAllowSet(project, baseAllow, extraAllow))
 	return fmt.Sprintf(`Task: %s
 Branch: %s
 
 Work only inside %s. Never delete, reset, or touch files outside it; another
 agent may share the parent repo. Write a todo list before anything else.
 
+You may run these commands: %s. Anything else is denied; use these or report
+blocked.
+
 Do the work and verify it (build + tests). %s — argus handles shipping. When
 the change is complete and tests pass, set your status phase to
 "awaiting_review" (not "done"); use "blocked" if you need a decision only the
 supervisor can make.
 
-%s`, w.Task, w.Branch, w.Worktree, protocol.NeverRunBrief(protocol.AskGatedCommands), protocol.WriterBrief(base))
+%s`, w.Task, w.Branch, w.Worktree, allowed, protocol.NeverRunBrief(protocol.AskGatedCommands), protocol.WriterBrief(base))
 }
 
 // taskLabel is a short, log-friendly identifier for a worker task: the first

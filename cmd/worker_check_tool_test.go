@@ -83,6 +83,25 @@ func TestEvaluateToolGate_AllowScoping(t *testing.T) {
 	if !strings.Contains(reason, "not in the resolved allow set") {
 		t.Errorf("reason = %q, want it to name the allow-scope block", reason)
 	}
+	if !strings.Contains(reason, "report `blocked`") {
+		t.Errorf("reason = %q, want it to tell the worker to report blocked", reason)
+	}
+	if strings.Contains(reason, "add it to phases") {
+		t.Errorf("reason = %q, want it to NOT point the worker at editing .argus/config.yml — that has no effect from inside a worktree", reason)
+	}
+
+	// A worker whose repo grants `make *` but not bare `go` must see `make`
+	// listed as an alternative, so it reaches for `make ci`/`make build`
+	// instead of concluding make is denied too and self-blocking — the exact
+	// wasted-round failure this fixes.
+	makeOnlyAllow := supervisor.ResolvedAllowForPhase(protocol.PhaseWorking, nil, []string{"Bash(make *)"}, nil)
+	goDeniedReason, blocked := evaluateToolGate("go build ./...", protocol.PhaseWorking, denied, makeOnlyAllow)
+	if !blocked {
+		t.Error("evaluateToolGate(go build, working, make-only allow) = not blocked, want blocked")
+	}
+	if !strings.Contains(goDeniedReason, "make") {
+		t.Errorf("reason = %q, want it to surface make as the allowed alternative", goDeniedReason)
+	}
 
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
 	workingAllow := supervisor.ResolvedAllowForPhase(protocol.PhaseWorking, project, nil, nil)
@@ -450,6 +469,36 @@ func TestRunWorkerCheckToolProjectConfig(t *testing.T) {
 		}
 		if exitCode != 2 {
 			t.Errorf("exit code = %d, want 2 — phases.working.allow must not leak into planning", exitCode)
+		}
+	})
+
+	// TestRunWorkerCheckToolProjectConfig_DenyMessageSurfacesMakeAlternative
+	// reproduces the exact wasted-round failure the issue this fixes
+	// describes: a repo grants `make *` but not bare `go`, a worker runs `go
+	// build ./...`, gets denied, and needs the deny message itself to point
+	// it at `make` — not at hand-editing .argus/config.yml, which the worker
+	// cannot reach from inside its worktree.
+	t.Run("deny message for a make-only repo surfaces make as the allowed alternative to bare go", func(t *testing.T) {
+		exitCode = 0
+		writeConfig(t, &repoconfig.Config{Allow: []string{"Bash(make *)"}})
+		writeStatus(t, protocol.PhaseWorking)
+		stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":"go build ./..."}}`, repo))
+		var stderr bytes.Buffer
+		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+			t.Fatalf("runWorkerCheckTool: %v", err)
+		}
+		if exitCode != 2 {
+			t.Errorf("exit code = %d, want 2 — bare go was never granted", exitCode)
+		}
+		got := stderr.String()
+		if !strings.Contains(got, "make") {
+			t.Errorf("stderr = %q, want it to surface make as the allowed alternative", got)
+		}
+		if !strings.Contains(got, "report `blocked`") {
+			t.Errorf("stderr = %q, want it to tell the worker to report blocked instead of editing config", got)
+		}
+		if strings.Contains(got, "add it to phases") {
+			t.Errorf("stderr = %q, want it to NOT point the worker at editing .argus/config.yml", got)
 		}
 	})
 
