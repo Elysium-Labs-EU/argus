@@ -199,8 +199,12 @@ resolved allow(phase) =
 ```
 
 - **structural floor** (code, every phase, cannot be removed by any config):
-  read-only tools, read-only git only (`git status`/`git diff`/`git log`),
-  and a worker's own `argus worker report`/`answer`/`steer` self-calls. A
+  read-only tools, read-only git only (`git status`/`git diff`/`git log`/
+  `git ls-files`), and a worker's own `argus worker report`/`answer`/`steer`
+  self-calls. `git ls-files` is here because every worker brief's shared
+  status-reporting block instructs `git ls-files --others --exclude-standard`
+  to compute `diff_stat`'s untracked-file count — an argus-authored
+  instruction every worker needs, in every phase, not repo-specific policy. A
   worker never runs `git add`, `git commit`, or `git push` — it edits files,
   leaves them uncommitted, and reports; the gate measures the *uncommitted*
   working-tree diff; `argus ship` is what stages, commits, and pushes. With
