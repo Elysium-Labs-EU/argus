@@ -12,6 +12,7 @@ func TestLifecycleRoundTrips(t *testing.T) {
 	in := &Lifecycle{
 		State: LifecycleShipped, Host: "codeberg.org", Owner: "o", Repo: "r",
 		Branch: "feat-x", PRURL: "https://codeberg.org/o/r/pulls/7", PRNumber: 7,
+		Title: "feat: resolved PR title",
 	}
 	if err := WriteLifecycle(wt, in); err != nil {
 		t.Fatalf("WriteLifecycle: %v", err)
@@ -20,7 +21,7 @@ func TestLifecycleRoundTrips(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("LoadLifecycle: found=%v err=%v", found, err)
 	}
-	if got.State != LifecycleShipped || got.PRNumber != 7 || got.PRURL != in.PRURL {
+	if got.State != LifecycleShipped || got.PRNumber != 7 || got.PRURL != in.PRURL || got.Title != in.Title {
 		t.Errorf("round-trip mismatch: %+v", got)
 	}
 	if got.UpdatedAt.IsZero() {

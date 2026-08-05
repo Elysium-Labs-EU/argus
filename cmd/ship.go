@@ -337,7 +337,7 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 	// forge.FindPR by branch), just without the exact PR number pre-resolved.
 	lc := &protocol.Lifecycle{
 		State: protocol.LifecycleShipped, Host: target.host, Owner: target.owner, Repo: target.name,
-		Branch: target.branch, PRURL: pr.HTMLURL, PRNumber: pr.Number,
+		Branch: target.branch, PRURL: pr.HTMLURL, PRNumber: pr.Number, Title: target.prTitle,
 		JiraNotified: prevLifecycle.JiraNotified,
 	}
 	if lerr := protocol.WriteLifecycle(a.worktree, lc); lerr != nil {

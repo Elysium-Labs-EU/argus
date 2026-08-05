@@ -822,6 +822,9 @@ func TestShipChangeCommitsPushesAndOpensPR(t *testing.T) {
 	if lc.State != protocol.LifecycleShipped || lc.PRNumber != 99 || lc.PRURL != "https://fake/pull/99" {
 		t.Errorf("unexpected lifecycle record: %+v", lc)
 	}
+	if lc.Title != target.prTitle {
+		t.Errorf("lifecycle.Title = %q, want the resolved PR title %q (so fleet always has one, even if the worker never self-titled)", lc.Title, target.prTitle)
+	}
 }
 
 // TestShipChangeReusesExistingPRInsteadOfDuplicating covers a ship retry

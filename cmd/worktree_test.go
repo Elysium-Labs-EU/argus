@@ -46,8 +46,10 @@ func repoWithWorktree(t *testing.T, branch string) (repoRoot, worktree string) {
 
 // repoWithWorktreeIn adds a second linked worktree on branch to an
 // already-established repoRoot (see repoWithWorktree), so a test can put
-// more than one candidate worktree under the same repo.
-func repoWithWorktreeIn(t *testing.T, repoRoot, branch string) (string, string) {
+// more than one candidate worktree under the same repo. It returns only the
+// new worktree's path — repoRoot is already the caller's own input, not
+// something this needs to hand back.
+func repoWithWorktreeIn(t *testing.T, repoRoot, branch string) string {
 	t.Helper()
 	run := func(args ...string) {
 		t.Helper()
@@ -60,7 +62,7 @@ func repoWithWorktreeIn(t *testing.T, repoRoot, branch string) (string, string) 
 	run("branch", "--set-upstream-to=origin/"+branch, branch)
 	worktree := filepath.Join(t.TempDir(), branch)
 	run("worktree", "add", "-q", worktree, branch)
-	return repoRoot, worktree
+	return worktree
 }
 
 func TestRunWorktreePruneRequiresATarget(t *testing.T) {
@@ -426,7 +428,7 @@ func TestResolvePruneForgeClientConfigLoadError(t *testing.T) {
 // never calls the failing forge at all, still gets evaluated and reported.
 func TestPrunePlanEvaluateCandidateErrorContinuesSweep(t *testing.T) {
 	repoRoot, badWorktree := repoWithWorktree(t, "feat-err")
-	_, goodWorktree := repoWithWorktreeIn(t, repoRoot, "feat-ok")
+	goodWorktree := repoWithWorktreeIn(t, repoRoot, "feat-ok")
 	if err := protocol.WriteLifecycle(goodWorktree, &protocol.Lifecycle{
 		State: protocol.LifecycleMerged, Host: "fake", Owner: "o", Repo: "r", Branch: "feat-ok",
 		PRURL: "https://fake/pr/ok",
