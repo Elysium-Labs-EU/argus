@@ -583,8 +583,11 @@ func TestRunSupervisionSpawnDryRunSkipsCredProxy(t *testing.T) {
 	cmd.SetContext(context.Background())
 
 	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: gitInitDir(t)}}
+	// base left empty: this test is about cred-proxy skipping under --dry-run,
+	// not base-ref resolution, and gitInitDir's bare repo has no commit for a
+	// real ref to resolve against.
 	err := runSupervision(cmd, fakeClient(), workers, &superviseOpts{
-		dryRun: true, base: "origin/main",
+		dryRun: true,
 	})
 	if err != nil {
 		t.Fatalf("runSupervision: %v", err)
@@ -784,8 +787,10 @@ func TestRunSupervisionSpawnDefaultPlacementOmitsWorkspaceFlag(t *testing.T) {
 
 	// The fake runner errors on every herdr call after "worktree create" (the
 	// next real call is ensureFreshPane's AgentGet), so this always returns an
-	// error; only the captured worktree-create args matter here.
-	_ = runSupervision(cmd, client, workers, &superviseOpts{base: "origin/main"})
+	// error; only the captured worktree-create args matter here. base is left
+	// empty: gitInitDir's bare repo has no commit for a real ref to resolve
+	// against, and this test isn't about base-ref resolution.
+	_ = runSupervision(cmd, client, workers, &superviseOpts{})
 
 	if len(worktreeCreateArgs) == 0 {
 		t.Fatal("worktree create was never called")
@@ -1104,68 +1109,14 @@ func TestSpawnWorkersRelativeRepoResolvesAbsolute(t *testing.T) {
 	}
 }
 
-// runGitForSuperviseTest mirrors internal/supervisor's test-only git setup
-// helper — used here to build a real repo with a detectable origin/HEAD.
-func runGitForSuperviseTest(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-}
-
-// repoWithOriginHEAD builds a real git repo whose refs/remotes/origin/HEAD
-// resolves to defaultBranch, by cloning a bare "origin" seeded with one
-// commit there.
-func repoWithOriginHEAD(t *testing.T, defaultBranch string) string {
-	t.Helper()
-	origin := t.TempDir()
-	runGitForSuperviseTest(t, origin, "init", "-q", "--initial-branch="+defaultBranch)
-	runGitForSuperviseTest(t, origin, "config", "user.email", "t@t")
-	runGitForSuperviseTest(t, origin, "config", "user.name", "t")
-	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runGitForSuperviseTest(t, origin, "add", "README.md")
-	runGitForSuperviseTest(t, origin, "commit", "-q", "-m", "init")
-
-	repo := t.TempDir()
-	runGitForSuperviseTest(t, filepath.Dir(repo), "clone", "-q", origin, repo)
-	return repo
-}
-
-func TestResolveSuperviseBaseExplicitFlagWinsOutright(t *testing.T) {
-	repo := repoWithOriginHEAD(t, "trunk")
-	rc := repoconfig.Config{BaseBranch: "develop"}
-	got := resolveSuperviseBase(context.Background(), true, "origin/explicit", repo, &rc)
-	if got != "origin/explicit" {
-		t.Errorf("resolveSuperviseBase = %q, want the explicit flag value", got)
-	}
-}
-
-func TestResolveSuperviseBasePrefersRepoConfig(t *testing.T) {
-	repo := repoWithOriginHEAD(t, "trunk")
-	rc := repoconfig.Config{BaseBranch: "develop"}
-	got := resolveSuperviseBase(context.Background(), false, "origin/main", repo, &rc)
-	if got != "origin/develop" {
-		t.Errorf("resolveSuperviseBase = %q, want origin/%s from repo config", got, "develop")
-	}
-}
-
-func TestResolveSuperviseBaseFallsBackToDetectedOriginHEAD(t *testing.T) {
-	repo := repoWithOriginHEAD(t, "trunk")
-	got := resolveSuperviseBase(context.Background(), false, "origin/main", repo, &repoconfig.Config{})
-	if got != "origin/trunk" {
-		t.Errorf("resolveSuperviseBase = %q, want origin/%s detected from origin/HEAD", got, "trunk")
-	}
-}
-
-func TestResolveSuperviseBaseFallsBackToFlagDefault(t *testing.T) {
-	got := resolveSuperviseBase(context.Background(), false, "origin/main", "", &repoconfig.Config{})
-	if got != "origin/main" {
-		t.Errorf("resolveSuperviseBase = %q, want the flag's own default when nothing else resolves", got)
-	}
-}
+// supervisor.ResolveGateBase's precedence — what this file's own
+// resolveSuperviseBase tests used to pin directly — now lives in
+// internal/supervisor's own TestResolveGateBase* tests (base_test.go),
+// alongside ResolveBase and DetectDefaultBase. See in particular
+// TestResolveGateBaseAgreesForSupervisePathAndReworkPath there, and
+// TestReworkAndSuperviseAgreeOnGateBase in cmd/rework_test.go, which pin
+// that supervise and rework resolve an identical ref for the same
+// repo/config through this one shared helper.
 
 func TestResolveWorkerPlacementExplicitFlagWinsOutright(t *testing.T) {
 	rc := repoconfig.Config{WorkerPlacement: "tab"}
@@ -1269,8 +1220,11 @@ func TestRunSupervisionSpawnDryRunPlumbsRepoAllow(t *testing.T) {
 	cmd.SetContext(context.Background())
 
 	workers := []supervisor.Worker{{Task: "t", Branch: "b", RepoRoot: gitInitDir(t)}}
+	// base left empty: this test is about repoAllow reaching the rendered
+	// plan, not base-ref resolution, and gitInitDir's bare repo has no commit
+	// for a real ref to resolve against.
 	err := runSupervision(cmd, fakeClient(), workers, &superviseOpts{
-		dryRun: true, base: "origin/main", repoAllow: []string{"Bash(pnpm *)"},
+		dryRun: true, repoAllow: []string{"Bash(pnpm *)"},
 	})
 	if err != nil {
 		t.Fatalf("runSupervision: %v", err)

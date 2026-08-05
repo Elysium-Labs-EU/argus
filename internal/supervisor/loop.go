@@ -24,6 +24,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/ownership"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 // Worker is one supervised task. PaneID, when set, names an existing pane to run
@@ -75,8 +76,12 @@ type Config struct {
 	Policy   *ReviewPolicy
 	Client   herdr.Client
 	Base     string
-	Home     string
-	Launcher string
+	// BaseSource labels where Base came from (see ResolveGateBase) — used
+	// only so Preflight's/Attach's base-ref-exists check (VerifyBaseRef) can
+	// name the actual thing to fix in its error, not just the bare ref.
+	BaseSource BaseSource
+	Home       string
+	Launcher   string
 	// OwnerID and OwnerLabel identify this supervise invocation for the
 	// ownership lease (see internal/ownership) prepareWorktree writes into
 	// every worktree it creates. Resolved once by cmd/supervise.go — via
@@ -590,6 +595,27 @@ func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
 	}
 	if err := EnsureDistinctWorktrees(worktreePaths(plans)); err != nil {
 		return err
+	}
+	// Fail fast on an unresolvable base ref here too, before any worker is
+	// watched or judged — a bad --base (--attach requires one explicitly) is
+	// a config/infra problem, not a review outcome, and must never surface as
+	// a per-worker measure_diff failure indistinguishable from a real gate
+	// escalation. Checked against EVERY target's own worktree, not just the
+	// first: --attach can watch worktrees from different repos in one run
+	// (see cmd/supervise.go's attachWorkers), and cfg.Base is one shared ref
+	// string checked against each one's own git history — a later target
+	// missing it is a real, distinct failure even when an earlier target
+	// already resolved it fine. The error names the offending target
+	// (worktree path) alongside VerifyBaseRef's own ref+source detail, so a
+	// multi-target run says exactly which one is misconfigured.
+	rb := ResolvedBase{Ref: cfg.Base, Source: cfg.BaseSource}
+	for i := range plans {
+		if err := VerifyBaseRef(ctx, plans[i].Worktree, rb); err != nil {
+			if uerr, ok := errors.AsType[*ui.UserError](err); ok {
+				return &ui.UserError{Err: fmt.Errorf("attach target %s: %w", plans[i].Worktree, uerr.Err), Hint: uerr.Hint}
+			}
+			return err
+		}
 	}
 	states := make([]*workerState, len(plans))
 	for i := range plans {

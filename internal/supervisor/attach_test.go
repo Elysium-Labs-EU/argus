@@ -108,6 +108,110 @@ func TestAttachTimesOutOnNonTerminalWorker(t *testing.T) {
 	}
 }
 
+// TestAttachFailsFastOnUnresolvableBaseRef pins the fail-fast fix for
+// --attach: a bad --base (required explicitly for --attach — see
+// cmd/supervise.go) must be caught up front, before any worker is watched or
+// judged, and must never surface as a gate/review escalation on the attached
+// worker.
+func TestAttachFailsFastOnUnresolvableBaseRef(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+		Task: "attached-worker", Phase: protocol.PhaseAwaitingReview,
+	}); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	cfg := &Config{
+		Out: &bytes.Buffer{}, Now: time.Now, Client: noPanes(),
+		Base: "origin/does-not-exist", BaseSource: BaseSourceFlag,
+		Home: t.TempDir(), Interval: 2 * time.Millisecond, Timeout: time.Second,
+	}
+	workers := []Worker{{Task: "attached-worker", Branch: "feat", Worktree: wt}}
+
+	err := Attach(context.Background(), cfg, workers)
+	if err == nil {
+		t.Fatal("an unresolvable base ref should fail Attach fast, got nil")
+	}
+	if !strings.Contains(err.Error(), `"origin/does-not-exist" does not exist`) {
+		t.Errorf("error = %q, want it to name the unresolvable ref", err)
+	}
+	if _, found, _ := protocol.LoadApproval(wt); found {
+		t.Error("a fail-fast base-ref error must never reach the gate and record a verdict")
+	}
+}
+
+// TestAttachPropagatesBuildPlanError proves a BuildPlan failure (e.g. a
+// branch name BuildPlan itself refuses) short-circuits Attach before it ever
+// gets to worktree-collision or base-ref checks.
+func TestAttachPropagatesBuildPlanError(t *testing.T) {
+	cfg := &Config{Now: time.Now}
+	workers := []Worker{{Task: "a", Branch: "../evil", RepoRoot: "/repo"}}
+	if err := Attach(context.Background(), cfg, workers); err == nil {
+		t.Fatal("want an error when BuildPlan fails, got nil")
+	}
+}
+
+// TestAttachRefusesCollidingWorktrees proves two workers sharing one
+// worktree are refused before Attach ever watches or judges either one.
+func TestAttachRefusesCollidingWorktrees(t *testing.T) {
+	cfg := &Config{Now: time.Now}
+	workers := []Worker{
+		{Task: "a", Branch: "feat-x", Worktree: "/same"},
+		{Task: "b", Branch: "feat-y", Worktree: "/same"},
+	}
+	if err := Attach(context.Background(), cfg, workers); err == nil {
+		t.Fatal("want an error for colliding worktrees, got nil")
+	}
+}
+
+// TestAttachFailsFastOnUnresolvableBaseRefInNonFirstTarget pins the review
+// fix: every attach target's own worktree is validated, not just the first —
+// --attach can watch worktrees from different repos in one run, so an
+// earlier target resolving cfg.Base fine does not mean a later one will. A
+// bad ref on the second target must still fail fast, naming that target,
+// instead of slipping through to a per-worker measure_diff failure
+// indistinguishable from a real review escalation.
+func TestAttachFailsFastOnUnresolvableBaseRefInNonFirstTarget(t *testing.T) {
+	good := gitWorktreeWithDiff(t) // has a commit, so "HEAD" resolves
+	bad := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", bad).CombinedOutput(); err != nil {
+		t.Fatalf("git init %s: %v\n%s", bad, err, out)
+	}
+	// bad has no commit at all (unborn HEAD), so "HEAD" never resolves there.
+
+	for _, wt := range []string{good, bad} {
+		if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{
+			Task: "attached-worker", Phase: protocol.PhaseAwaitingReview,
+		}); err != nil {
+			t.Fatalf("seeding status for %s: %v", wt, err)
+		}
+	}
+
+	cfg := &Config{
+		Out: &bytes.Buffer{}, Now: time.Now, Client: noPanes(),
+		Base: "HEAD", BaseSource: BaseSourceFlag,
+		Home: t.TempDir(), Interval: 2 * time.Millisecond, Timeout: time.Second,
+	}
+	workers := []Worker{
+		{Task: "good", Branch: "feat-a", Worktree: good},
+		{Task: "bad", Branch: "feat-b", Worktree: bad},
+	}
+
+	err := Attach(context.Background(), cfg, workers)
+	if err == nil {
+		t.Fatal("want an error when a non-first target's base ref is unresolvable, got nil")
+	}
+	if !strings.Contains(err.Error(), bad) {
+		t.Errorf("error = %q, want it to name the offending target %q", err, bad)
+	}
+	if !strings.Contains(err.Error(), `"HEAD" does not exist`) {
+		t.Errorf("error = %q, want it to name the unresolvable ref", err)
+	}
+	if _, found, _ := protocol.LoadApproval(good); found {
+		t.Error("a fail-fast base-ref error must never reach the gate and record a verdict for any target, including one already checked fine before the bad one")
+	}
+}
+
 // TestAttachDoesNotMaskUnderReportAcrossReattaches proves a plain re-attach
 // (no rework dispatch in between) judges the worker's self-reported diff
 // against the full measured diff every time, not against whatever a prior

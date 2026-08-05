@@ -153,3 +153,50 @@ func TestPreflightChecksRepoRootOnceAcrossWorkers(t *testing.T) {
 		t.Fatalf("want 1 consolidated repo problem for 2 workers sharing one bad --repo, got %d: %v", len(errs), errs)
 	}
 }
+
+// TestPreflightRejectsUnresolvableBaseRef pins the fail-fast fix: an
+// unresolvable gate/review base ref is a config/infra problem, caught here
+// before any worker is spawned, not discovered later as a per-worker
+// measure_diff failure that reads exactly like a real review escalation.
+func TestPreflightRejectsUnresolvableBaseRef(t *testing.T) {
+	cfg := &Config{Base: "origin/does-not-exist", BaseSource: BaseSourceDefault}
+	plans := plansWithRepoRoot(gitWorktreeWithDiff(t))
+	err := Preflight(context.Background(), cfg, plans)
+	if err == nil {
+		t.Fatal("an unresolvable base ref should fail preflight, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{`"origin/does-not-exist"`, "does not exist", "resolved from: flag default"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestPreflightAcceptsResolvableBaseRef pins the non-error path alongside
+// TestPreflightRejectsUnresolvableBaseRef: a real, resolvable base ref must
+// not be flagged.
+func TestPreflightAcceptsResolvableBaseRef(t *testing.T) {
+	cfg := &Config{Base: "HEAD", BaseSource: BaseSourceFlag}
+	plans := plansWithRepoRoot(gitWorktreeWithDiff(t))
+	if err := Preflight(context.Background(), cfg, plans); err != nil {
+		t.Fatalf("a resolvable base ref should pass preflight, got %v", err)
+	}
+}
+
+// TestPreflightSkipsBaseCheckOnBadRepoRoot pins checkRepoRoot's own error
+// staying the only one reported when --repo is already invalid: verifying a
+// base ref against a repo root that doesn't exist would only produce a
+// second, misleading "bad base" message on top of the real "bad --repo" one.
+func TestPreflightSkipsBaseCheckOnBadRepoRoot(t *testing.T) {
+	cfg := &Config{Base: "origin/does-not-exist", BaseSource: BaseSourceDefault}
+	plans := plansWithRepoRoot(filepath.Join(t.TempDir(), "does-not-exist"))
+	err := Preflight(context.Background(), cfg, plans)
+	var errs PreflightErrors
+	if !errors.As(err, &errs) {
+		t.Fatalf("want PreflightErrors, got %T (%v)", err, err)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("want exactly the 1 bad-repo-root problem, not also a base-ref problem, got %d: %v", len(errs), errs)
+	}
+}

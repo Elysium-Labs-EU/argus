@@ -142,3 +142,99 @@ func TestResolveBaseFallsBackToMainWhenRepoRootFails(t *testing.T) {
 		t.Errorf("ResolveBase = %q, want the literal fallback %q when RepoRoot errors", got, "main")
 	}
 }
+
+func TestResolveGateBaseExplicitFlagWinsOutright(t *testing.T) {
+	repo := newRepoWithOriginHEAD(t)
+	rc := repoconfig.Config{BaseBranch: "develop"}
+	got := ResolveGateBase(context.Background(), true, "origin/explicit", repo, &rc)
+	if got.Ref != "origin/explicit" || got.Source != BaseSourceFlag {
+		t.Errorf("ResolveGateBase = %+v, want {origin/explicit flag}", got)
+	}
+}
+
+func TestResolveGateBasePrefersRepoConfig(t *testing.T) {
+	repo := newRepoWithOriginHEAD(t)
+	rc := repoconfig.Config{BaseBranch: "develop"}
+	got := ResolveGateBase(context.Background(), false, "origin/main", repo, &rc)
+	if got.Ref != "origin/develop" || got.Source != BaseSourceConfig {
+		t.Errorf("ResolveGateBase = %+v, want {origin/develop config}", got)
+	}
+}
+
+func TestResolveGateBaseFallsBackToDetectedOriginHEAD(t *testing.T) {
+	repo := newRepoWithOriginHEAD(t)
+	got := ResolveGateBase(context.Background(), false, "origin/main", repo, &repoconfig.Config{})
+	if got.Ref != "origin/trunk" || got.Source != BaseSourceDetected {
+		t.Errorf("ResolveGateBase = %+v, want {origin/trunk detected}", got)
+	}
+}
+
+func TestResolveGateBaseFallsBackToFlagDefault(t *testing.T) {
+	got := ResolveGateBase(context.Background(), false, "origin/main", "", &repoconfig.Config{})
+	if got.Ref != "origin/main" || got.Source != BaseSourceDefault {
+		t.Errorf("ResolveGateBase = %+v, want {origin/main default} when nothing else resolves", got)
+	}
+}
+
+// TestResolveGateBaseAgreesForSupervisePathAndReworkPath pins the actual
+// point of the fix: supervise and rework both feed --base's explicit flag,
+// this repo's config, and the same resolved repoRoot into this one function,
+// so calling it the way each command does — for the identical repo/config —
+// can never again independently diverge the way rework's own bespoke
+// (pre-fix) resolution used to.
+func TestResolveGateBaseAgreesForSupervisePathAndReworkPath(t *testing.T) {
+	repo := newRepoWithOriginHEAD(t)
+	if err := repoconfig.Save(repoconfig.Path(repo), &repoconfig.Config{BaseBranch: "develop"}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+	rc, err := repoconfig.Load(repoconfig.Path(repo))
+	if err != nil {
+		t.Fatalf("repoconfig.Load: %v", err)
+	}
+
+	// supervise's own call shape (cmd/supervise.go's newSuperviseCmd RunE):
+	// no --base passed.
+	superviseBase := ResolveGateBase(context.Background(), false, "origin/main", repo, &rc)
+	// rework's own call shape (cmd/rework.go's buildReworkConfig): same
+	// flag/default, same repo, same loaded config.
+	reworkBase := ResolveGateBase(context.Background(), false, "origin/main", repo, &rc)
+
+	if superviseBase != reworkBase {
+		t.Errorf("supervise resolved %+v, rework resolved %+v — must agree", superviseBase, reworkBase)
+	}
+	if superviseBase.Ref != "origin/develop" {
+		t.Errorf("resolved ref = %q, want origin/develop from base_branch config", superviseBase.Ref)
+	}
+}
+
+func TestVerifyBaseRefAcceptsExistingRef(t *testing.T) {
+	repo := newRepoWithOriginHEAD(t)
+	if err := VerifyBaseRef(context.Background(), repo, ResolvedBase{Ref: "origin/trunk", Source: BaseSourceDetected}); err != nil {
+		t.Errorf("VerifyBaseRef should accept an existing ref, got %v", err)
+	}
+}
+
+func TestVerifyBaseRefNoopsOnEmptyRef(t *testing.T) {
+	repo := newRepoWithOriginHEAD(t)
+	if err := VerifyBaseRef(context.Background(), repo, ResolvedBase{}); err != nil {
+		t.Errorf("VerifyBaseRef should no-op on an empty ref, got %v", err)
+	}
+}
+
+// TestVerifyBaseRefRejectsMissingRef pins the fail-fast fix's error shape: a
+// base ref that doesn't exist must fail with a message naming both the
+// resolved ref and where it came from, not git's raw "fatal: bad revision"
+// text — see the escalation gap this closes in measureReconcileDiffs.
+func TestVerifyBaseRefRejectsMissingRef(t *testing.T) {
+	repo := newRepoWithOriginHEAD(t)
+	err := VerifyBaseRef(context.Background(), repo, ResolvedBase{Ref: "origin/does-not-exist", Source: BaseSourceDefault})
+	if err == nil {
+		t.Fatal("want an error for a base ref that doesn't exist, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{`"origin/does-not-exist"`, "does not exist", "resolved from: flag default"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}

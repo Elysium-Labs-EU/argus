@@ -277,11 +277,13 @@ func gitInitDir(t *testing.T) string {
 func TestRunDryRunHasNoSideEffects(t *testing.T) {
 	rr := &recordingRunner{paneList: twoPaneList}
 	var buf bytes.Buffer
+	// Base left empty: this test is about dry-run side effects, not base-ref
+	// resolution, and gitInitDir's bare repos below have no commit for a real
+	// ref to resolve against.
 	cfg := &Config{
 		Out:      &buf,
 		Now:      time.Now,
 		Client:   herdr.NewWithRunner(rr.run),
-		Base:     "origin/main",
 		Interval: time.Second,
 	}
 	repoA, repoB := gitInitDir(t), gitInitDir(t)

@@ -105,7 +105,7 @@ func TestSuperviseDryRunPrintsPlan(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs([]string{"--dry-run", "--repo", repo, "--tasks", "t", "--branches", "feat-t"})
+	cmd.SetArgs([]string{"--dry-run", "--repo", repo, "--tasks", "t", "--branches", "feat-t", "--base", "HEAD"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("dry-run supervise: %v", err)
 	}
