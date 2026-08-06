@@ -37,7 +37,7 @@ where it belongs, not a silent no-op.
   don't vary by worker phase and aren't tied to any one argus operation:
   `base_branch`, `worker_placement`, `forge`, `status_page`, `worktree_dir`,
   `owner_stale_after`, `worktree_bootstrap_command`, `launcher`, `allow`,
-  `brief_note`.
+  `brief_note`, `experimental_worker_sandbox`, `sandbox_allow_write`.
 - **`phases:`** — worker permission contexts, *only*: one nested block per
   phase name (`planning`, `working`, `self_test`, `awaiting_review`,
   `blocked`), each holding just that phase's own live `allow`/`deny`/`skip`
@@ -209,6 +209,37 @@ setting.
   silently swapped for the default — unlike `rework.budget`, `0` has no
   "disabled" meaning here, since a loop that runs zero rounds can never
   dispatch a worker at all.
+
+- **`experimental_worker_sandbox`** (EXPERIMENTAL, default `false`) — opts
+  every spawned worker into Claude Code's own OS sandbox (seatbelt on macOS,
+  bubblewrap on Linux). This complements the `dontAsk` permission model
+  above and the in-process Read/Edit credential deny floor
+  (`protocol.CredentialDenyFloor`): both of those only cover argus's own tool
+  gating and Claude Code's Read/Edit tools, neither confines a worker's raw
+  Bash subprocesses. With the sandbox on, a worker cannot `cat ~/.ssh/id_ed25519`
+  or similar even via a shelled-out command — the sandbox denies read access
+  to a fixed set of credential paths (`~/.ssh`, `~/.aws`, `~/.azure`,
+  `~/.config/gh`, `~/.git-credentials`, `~/.gnupg`, `~/.docker/config.json`,
+  `~/.kube`, `~/.npmrc`, `~/.pypirc`, `~/.gem/credentials`) regardless of
+  `sandbox_allow_write`. It renders no home-directory whitelist and no
+  `filesystem.denyRead` — a whole-home deny was tested and breaks ordinary
+  toolchain cache reads/writes for no extra security over the targeted
+  credential-path deny above. Precedence: an explicit `--experimental-sandbox`
+  flag on `supervise`, then this key, then the default (off). Experimental:
+  behavior and defaults may still change.
+- **`sandbox_allow_write`** (EXPERIMENTAL) — filesystem paths the OS sandbox
+  (see `experimental_worker_sandbox`) must grant write access to on top of
+  the worktree itself. Only consulted once the sandbox is on. The typical use
+  case is a toolchain's shared build cache that lives outside the worktree —
+  e.g. Go's build cache:
+  ```yaml
+  experimental_worker_sandbox: true
+  sandbox_allow_write:
+    - "/Users/me/Library/Caches/go-build"   # go env GOCACHE
+    - "/Users/me/go/pkg/mod"                # go env GOMODCACHE
+  ```
+  Without this, a sandboxed worker's `go build`/`go test` would fail trying
+  to write to a cache directory the sandbox denies by default.
 
 ## Worker permissions: `dontAsk` and the per-phase allow set
 

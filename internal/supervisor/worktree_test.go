@@ -36,7 +36,7 @@ func TestEnsureDistinctWorktreesRefusesCollision(t *testing.T) {
 
 func TestSettingsForConfinesToWorktree(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt, nil, nil, nil)
+	s := settingsFor(wt, nil, nil, nil, false, nil)
 
 	wantAllow := "Edit(" + absPathPattern(wt+"/**") + ")"
 	if !slices.Contains(s.Permissions.Allow, wantAllow) {
@@ -64,7 +64,7 @@ func TestSettingsForConfinesToWorktree(t *testing.T) {
 // the uncommitted working tree, so only read-only git plumbing is floor.
 func TestSettingsForNoRepoAllowIsToolchainNeutral(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt, nil, nil, nil)
+	s := settingsFor(wt, nil, nil, nil, false, nil)
 
 	for _, unwanted := range []string{"Bash(go build *)", "Bash(go test *)", "Bash(go vet *)", "Bash(go get *)", "Bash(make *)", "Bash(git add*)"} {
 		if slices.Contains(s.Permissions.Allow, unwanted) {
@@ -80,7 +80,7 @@ func TestSettingsForNoRepoAllowIsToolchainNeutral(t *testing.T) {
 
 func TestSettingsForAppendsRepoAndExtraAllow(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt, nil, []string{"Bash(task *)"}, []string{"Bash(npm *)"})
+	s := settingsFor(wt, nil, []string{"Bash(task *)"}, []string{"Bash(npm *)"}, false, nil)
 
 	for _, want := range []string{"Bash(task *)", "Bash(npm *)"} {
 		if !slices.Contains(s.Permissions.Allow, want) {
@@ -121,7 +121,7 @@ func TestRunWorktreeBootstrapCommandFailureCarriesOutput(t *testing.T) {
 
 func TestWriteSettingsWritesConfinedFile(t *testing.T) {
 	wt := t.TempDir()
-	if err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"}); err != nil {
+	if err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"}, false, nil); err != nil {
 		t.Fatalf("WriteSettings: %v", err)
 	}
 	path := filepath.Join(wt, ".claude", "settings.local.json")
@@ -155,7 +155,7 @@ func TestWriteSettingsWrapsMkdirAllError(t *testing.T) {
 		t.Fatalf("seeding blocking file: %v", err)
 	}
 
-	err := WriteSettings(wt, nil, nil, nil)
+	err := WriteSettings(wt, nil, nil, nil, false, nil)
 	if err == nil {
 		t.Fatal("want error when settings dir can't be created, got nil")
 	}
@@ -173,7 +173,7 @@ func TestWriteSettingsWrapsWriteFileError(t *testing.T) {
 		t.Fatalf("seeding blocking dir: %v", err)
 	}
 
-	err := WriteSettings(wt, nil, nil, nil)
+	err := WriteSettings(wt, nil, nil, nil, false, nil)
 	if err == nil {
 		t.Fatal("want error when settings file can't be written, got nil")
 	}
@@ -195,7 +195,7 @@ func TestWriteSettingsWrapsSaveExtraAllowError(t *testing.T) {
 		t.Fatalf("seeding blocking file: %v", err)
 	}
 
-	err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"})
+	err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"}, false, nil)
 	if err == nil {
 		t.Fatal("want error when extra_allow.json's parent dir can't be created, got nil")
 	}
@@ -211,7 +211,7 @@ type fakeFailingAgent struct{}
 
 func (fakeFailingAgent) DefaultLauncher() string { return "" }
 
-func (fakeFailingAgent) RenderSettings(string, protocol.PhaseConfig, []string, []string) (string, []byte, error) {
+func (fakeFailingAgent) RenderSettings(string, protocol.PhaseConfig, []string, []string, bool, []string) (string, []byte, error) {
 	return "", nil, errors.New("boom")
 }
 
@@ -222,7 +222,7 @@ func TestWriteSettingsWrapsRenderSettingsError(t *testing.T) {
 	defer func() { defaultAgent = orig }()
 	defaultAgent = fakeFailingAgent{}
 
-	err := WriteSettings(t.TempDir(), nil, nil, nil)
+	err := WriteSettings(t.TempDir(), nil, nil, nil, false, nil)
 	if err == nil {
 		t.Fatal("want error when RenderSettings fails, got nil")
 	}

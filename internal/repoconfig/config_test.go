@@ -143,6 +143,59 @@ func TestSaveLoadRoundTripTitlePrefixTemplate(t *testing.T) {
 	}
 }
 
+func TestExperimentalWorkerSandboxDefaultsFalseAndEmpty(t *testing.T) {
+	got, err := loadContent(t, "base_branch: \"develop\"\n")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.ExperimentalWorkerSandbox {
+		t.Error("ExperimentalWorkerSandbox default = true, want false when unset")
+	}
+	if got.SandboxAllowWrite != nil {
+		t.Errorf("SandboxAllowWrite default = %v, want nil when unset", got.SandboxAllowWrite)
+	}
+}
+
+func TestLoadExperimentalWorkerSandboxAndSandboxAllowWrite(t *testing.T) {
+	got, err := loadContent(t, "experimental_worker_sandbox: true\nsandbox_allow_write:\n  - \"/home/me/go/pkg/mod\"\n  - \"/home/me/.cache/go-build\"\n")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !got.ExperimentalWorkerSandbox {
+		t.Error("ExperimentalWorkerSandbox = false, want true")
+	}
+	want := []string{"/home/me/go/pkg/mod", "/home/me/.cache/go-build"}
+	if !reflect.DeepEqual(got.SandboxAllowWrite, want) {
+		t.Errorf("SandboxAllowWrite = %v, want %v", got.SandboxAllowWrite, want)
+	}
+}
+
+func TestSaveLoadRoundTripExperimentalWorkerSandbox(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	want := Config{ExperimentalWorkerSandbox: true, SandboxAllowWrite: []string{"/home/me/go/pkg/mod"}}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestExperimentalWorkerSandboxInvalidBoolErrors(t *testing.T) {
+	_, err := loadContent(t, "experimental_worker_sandbox: not-a-bool\n")
+	if err == nil {
+		t.Fatal("Load(experimental_worker_sandbox: not-a-bool): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "experimental_worker_sandbox") {
+		t.Errorf("Load error = %q, want it to mention experimental_worker_sandbox", err.Error())
+	}
+}
+
 func TestSaveLoadRoundTripOwnerStaleAfter(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".argus", "config.yml")

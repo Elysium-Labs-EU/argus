@@ -1160,6 +1160,26 @@ func TestResolveWorkerPlacementFallsBackToFlagDefault(t *testing.T) {
 	}
 }
 
+func TestResolveExperimentalSandboxExplicitFlagWinsOutright(t *testing.T) {
+	rc := repoconfig.Config{ExperimentalWorkerSandbox: true}
+	if got := resolveExperimentalSandbox(true, false, &rc); got != false {
+		t.Errorf("resolveExperimentalSandbox = %v, want the explicit flag value even with a repo config default", got)
+	}
+}
+
+func TestResolveExperimentalSandboxPrefersRepoConfig(t *testing.T) {
+	rc := repoconfig.Config{ExperimentalWorkerSandbox: true}
+	if got := resolveExperimentalSandbox(false, false, &rc); got != true {
+		t.Errorf("resolveExperimentalSandbox = %v, want the repo config value when the flag was not passed", got)
+	}
+}
+
+func TestResolveExperimentalSandboxFallsBackToFlagDefault(t *testing.T) {
+	if got := resolveExperimentalSandbox(false, false, &repoconfig.Config{}); got != false {
+		t.Errorf("resolveExperimentalSandbox = %v, want the flag's own default (false) when config sets nothing", got)
+	}
+}
+
 func TestResolveReviewEffortExplicitFlagWinsOutright(t *testing.T) {
 	rc := repoconfig.Config{ReviewEffort: "max"}
 	got := resolveReviewEffort(true, "low", &rc)
@@ -1298,6 +1318,24 @@ func TestSuperviseWorktreeSetupCmdFlagDeprecatedAliasStillWorks(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "deprecated") || !strings.Contains(buf.String(), "worktree-bootstrap-command") {
 		t.Errorf("output = %q, want a deprecation warning pointing at --worktree-bootstrap-command", buf.String())
+	}
+}
+
+// TestSuperviseExperimentalSandboxFlagDefaultsOffAndMarkedExperimental pins
+// two things: --experimental-sandbox defaults to false (opt-in, never on by
+// accident), and its --help text names it experimental, per the brief's
+// requirement that both the flag and the config key say so explicitly.
+func TestSuperviseExperimentalSandboxFlagDefaultsOffAndMarkedExperimental(t *testing.T) {
+	cmd := newSuperviseCmd()
+	f := cmd.Flags().Lookup("experimental-sandbox")
+	if f == nil {
+		t.Fatal("expected --experimental-sandbox flag to be registered")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("--experimental-sandbox default = %q, want %q", f.DefValue, "false")
+	}
+	if !strings.Contains(strings.ToUpper(f.Usage), "EXPERIMENTAL") {
+		t.Errorf("--experimental-sandbox usage = %q, want it to say EXPERIMENTAL", f.Usage)
 	}
 }
 

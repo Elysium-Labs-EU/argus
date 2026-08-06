@@ -75,13 +75,11 @@ type Config struct {
 	Log      *eventlog.Logger
 	Policy   *ReviewPolicy
 	Client   herdr.Client
-	Base     string
-	// BaseSource labels where Base came from (see ResolveGateBase) — used
-	// only so Preflight's/Attach's base-ref-exists check (VerifyBaseRef) can
-	// name the actual thing to fix in its error, not just the bare ref.
-	BaseSource BaseSource
-	Home       string
-	Launcher   string
+	// RepoPhases is the repo's own .argus/config.yml phases.<name>.allow/deny/
+	// skip policy (see internal/repoconfig, protocol.PhaseConfig), the
+	// per-phase addition ResolvedAllowForPhase layers on top of RepoAllow and
+	// the structural floor for exactly the phase a worker currently reports.
+	RepoPhases protocol.PhaseConfig
 	// OwnerID and OwnerLabel identify this supervise invocation for the
 	// ownership lease (see internal/ownership) prepareWorktree writes into
 	// every worktree it creates. Resolved once by cmd/supervise.go — via
@@ -89,8 +87,19 @@ type Config struct {
 	// worker is spawned, so every worker this one invocation spawns shares
 	// the same lease identity instead of each worktree claiming a fresh
 	// generated id of its own.
-	OwnerID    string
 	OwnerLabel string
+	// WorkerRuntime names a worker-runtime adapter (see
+	// docs/worker-runtime-protocol.md): argus execs argus-runtime-<name> to
+	// isolate the worker instead of running it directly in the host shell.
+	// Empty (or "none") means today's unwrapped behavior — the default, so
+	// existing installs are unaffected until an operator opts in.
+	WorkerRuntime string
+	Launcher      string
+	OwnerID       string
+	// BaseSource labels where Base came from (see ResolveGateBase) — used
+	// only so Preflight's/Attach's base-ref-exists check (VerifyBaseRef) can
+	// name the actual thing to fix in its error, not just the bare ref.
+	BaseSource BaseSource
 	// ReviewNote is the repo's own .argus/config.yml review_note (see
 	// internal/repoconfig), forwarded verbatim to each ReviewRequest so
 	// reviewOne's prompt carries it. Empty means no repo-specific review
@@ -115,35 +124,39 @@ type Config struct {
 	// new top-level workspace (see prepareWorktree's use of herdr.Client.PaneMove).
 	// Empty means today's behavior: each worker keeps its own top-level workspace.
 	ParentWorkspace string
-	// WorkerRuntime names a worker-runtime adapter (see
-	// docs/worker-runtime-protocol.md): argus execs argus-runtime-<name> to
-	// isolate the worker instead of running it directly in the host shell.
-	// Empty (or "none") means today's unwrapped behavior — the default, so
-	// existing installs are unaffected until an operator opts in.
-	WorkerRuntime string
-	ScrubEnv      []string // env vars withheld from each worker (e.g. forge tokens it never needs)
+	Home            string
+	Base            string
 	// RepoAllow is the repo's own .argus/config.yml top-level (phase-independent)
 	// allow list (see internal/repoconfig), unioned into every phase's resolved
 	// allow set — replacing the hardcoded Go/make literal argus used to assume
 	// for every repo regardless of toolchain.
 	RepoAllow []string
-	// RepoPhases is the repo's own .argus/config.yml phases.<name>.allow/deny/
-	// skip policy (see internal/repoconfig, protocol.PhaseConfig), the
-	// per-phase addition ResolvedAllowForPhase layers on top of RepoAllow and
-	// the structural floor for exactly the phase a worker currently reports.
-	RepoPhases protocol.PhaseConfig
+	ScrubEnv  []string // env vars withheld from each worker (e.g. forge tokens it never needs)
 	// ExtraAllow appends operator-supplied CLI --allow patterns (e.g.
 	// "Bash(task *)", "Bash(npm *)") to every worker's generated allowlist, on
 	// top of RepoAllow and RepoPhases, for a one-off run.
 	ExtraAllow []string
-	Interval   time.Duration
-	Timeout    time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
+	// SandboxAllowWrite is this repo's own .argus/config.yml
+	// sandbox_allow_write (see internal/repoconfig) — filesystem paths the OS
+	// sandbox grants write access to on top of the worktree itself, e.g. a
+	// toolchain's shared build cache. Only consulted when ExperimentalSandbox
+	// is true.
+	SandboxAllowWrite []string
+	Interval          time.Duration
+	Timeout           time.Duration // per-worker wall-clock deadline; 0 = wait indefinitely
 	// ReviewConcurrency bounds how many LLM --review calls run at once. 0 uses
 	// defaultReviewConcurrency. Gate checks (the deterministic, free/local half
 	// of judgment) are never bound by this — only the `claude -p` calls are,
 	// since those are the expensive, slow step a batch of escalations could
 	// otherwise pile up unbounded.
 	ReviewConcurrency int
+	// ExperimentalSandbox opts every spawned worker into Claude Code's own OS
+	// sandbox (see settingsFor/sandboxBlockFor) — an explicit
+	// --experimental-sandbox flag on supervise, else this repo's own
+	// .argus/config.yml experimental_worker_sandbox (see internal/repoconfig).
+	// Default false: a worker's Bash subprocesses run unsandboxed, today's
+	// behavior, until a repo (or operator) opts in.
+	ExperimentalSandbox bool
 }
 
 // WorkerPlan is the fully-resolved intent for one worker: the concrete worktree
@@ -209,8 +222,11 @@ func hasTraversalSegment(s string) bool {
 // the task text plus the shared status-writing contract so writer and reader
 // can't drift. project, baseAllow, and extraAllow are forwarded to settingsFor
 // so every worker's allowlist reflects the same repo-config and
-// operator-supplied extension the dry-run preview shows.
-func BuildPlan(workers []Worker, base string, project protocol.PhaseConfig, baseAllow, extraAllow []string) ([]WorkerPlan, error) {
+// operator-supplied extension the dry-run preview shows. sandboxEnabled and
+// sandboxAllowWrite are the experimental OS-sandbox toggle (see
+// Config.ExperimentalSandbox), forwarded to settingsFor unchanged so a
+// --dry-run preview renders the same sandbox block a real spawn would write.
+func BuildPlan(workers []Worker, base string, project protocol.PhaseConfig, baseAllow, extraAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) ([]WorkerPlan, error) {
 	plans := make([]WorkerPlan, len(workers))
 	for i := range workers {
 		w := workers[i]
@@ -237,7 +253,7 @@ func BuildPlan(workers []Worker, base string, project protocol.PhaseConfig, base
 		}
 		plans[i] = WorkerPlan{
 			Worker:   w,
-			Settings: settingsFor(w.Worktree, project, baseAllow, extraAllow),
+			Settings: settingsFor(w.Worktree, project, baseAllow, extraAllow, sandboxEnabled, sandboxAllowWrite),
 			Brief:    briefFor(&w, base, project, baseAllow, extraAllow),
 		}
 	}
@@ -515,7 +531,7 @@ func envMap(env []string) map[string]string {
 // worker, watches and judges each one's status independently until it reaches a
 // terminal phase or ctx is canceled, then prints a metrics report.
 func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error {
-	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow)
+	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow, cfg.ExperimentalSandbox, cfg.SandboxAllowWrite)
 	if err != nil {
 		return err
 	}
@@ -606,7 +622,7 @@ func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 // or grinding on an existing PR branch — under the same deterministic observation
 // instead of eyeballing its pane scrollback.
 func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
-	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow)
+	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow, cfg.ExperimentalSandbox, cfg.SandboxAllowWrite)
 	if err != nil {
 		return err
 	}
@@ -1236,7 +1252,7 @@ func provisionWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) error {
 	if err := protocol.Write(protocol.StatusPath(p.Worktree), &protocol.Status{Base: baseBranch, Phase: protocol.PhasePlanning}); err != nil {
 		return fmt.Errorf("recording base branch for %s: %w", p.Task, err)
 	}
-	if err := WriteSettings(p.Worktree, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow); err != nil {
+	if err := WriteSettings(p.Worktree, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow, cfg.ExperimentalSandbox, cfg.SandboxAllowWrite); err != nil {
 		return fmt.Errorf("writing settings for %s: %w", p.Task, err)
 	}
 	if err := WriteBrief(p.Worktree, p.Brief); err != nil {

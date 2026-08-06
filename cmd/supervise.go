@@ -62,6 +62,7 @@ func newSuperviseCmd() *cobra.Command {
 		forgeKind             string
 		allow                 []string
 		credentialEnv         map[string]string
+		experimentalSandbox   bool
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -177,8 +178,10 @@ cannot be disabled by repo config.`,
 				review: review, reviewModel: reviewModel, reviewEffort: resolveReviewEffort(cmd.Flags().Changed("review-effort"), reviewEffort, &rc), reviewConcurrency: reviewConcurrency,
 				policy: policy, gateVerifyCommand: gateVerifyCommand, worktreeBootstrapCmd: worktreeBootstrapCommand,
 				allow: allow, repoAllow: rc.Allow, repoPhases: rc.Phases, credentialEnv: overrides,
-				workerPlacement: resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
-				reviewNote:      resolveReviewNote(cmd.Flags().Changed("review-note"), reviewNote, &rc),
+				workerPlacement:     resolveWorkerPlacement(cmd.Flags().Changed("worker-placement"), workerPlacement, &rc),
+				reviewNote:          resolveReviewNote(cmd.Flags().Changed("review-note"), reviewNote, &rc),
+				experimentalSandbox: resolveExperimentalSandbox(cmd.Flags().Changed("experimental-sandbox"), experimentalSandbox, &rc),
+				sandboxAllowWrite:   rc.SandboxAllowWrite,
 			})
 		},
 	}
@@ -223,6 +226,7 @@ cannot be disabled by repo config.`,
 	cmd.Flags().StringSliceVar(&allow, "allow", nil, "extra Claude Code permission patterns appended to every worker's generated allowlist, on top of this repo's .argus/config.yml allow list if any (e.g. --allow \"Bash(task *)\",\"Bash(npm *)\" for a one-off run)")
 	cmd.Flags().StringToStringVar(&credentialEnv, "credential-env", nil, credentialEnvFlagHelp)
 	cmd.Flags().StringVar(&forgeKind, "forge", "", "force the forge API shape for a self-hosted host when fetching --issues: \"gitlab\" or \"gitea\" (default: auto-detect, which only recognizes github.com/gitlab.com/codeberg.org and refuses every other host). Without this flag, this repo's .argus/config.yml forge key wins, then auto-detect")
+	cmd.Flags().BoolVar(&experimentalSandbox, "experimental-sandbox", false, "EXPERIMENTAL, default false: opt every spawned worker into Claude Code's own OS sandbox (seatbelt on macOS, bubblewrap on Linux), confining its Bash/subprocess vector so it cannot read ~/.ssh and other credential paths even via a shelled-out command. Without this flag, this repo's .argus/config.yml experimental_worker_sandbox wins, then this default (off)")
 	addDebugFlag(cmd)
 	return cmd
 }
@@ -247,6 +251,7 @@ type superviseOpts struct {
 	reviewModel          string
 	repoAllow            []string
 	allow                []string
+	sandboxAllowWrite    []string
 	interval             time.Duration
 	timeout              time.Duration
 	reviewConcurrency    int
@@ -254,6 +259,7 @@ type superviseOpts struct {
 	dryRun               bool
 	noCredProxy          bool
 	review               bool
+	experimentalSandbox  bool
 }
 
 // --worker-placement values. workerPlacementPane is accepted so the flag's
@@ -329,6 +335,18 @@ func resolveWorkerPlacement(explicit bool, flagValue string, rc *repoconfig.Conf
 		return rc.WorkerPlacement
 	}
 	return flagValue
+}
+
+// resolveExperimentalSandbox applies --experimental-sandbox > this repo's
+// .argus/config.yml experimental_worker_sandbox > the flag's own default
+// (false), the same explicit-flag-wins precedence resolveWorkerPlacement
+// uses. explicit is cmd.Flags().Changed("experimental-sandbox"). rc is a
+// pointer solely to avoid copying the struct at the call site.
+func resolveExperimentalSandbox(explicit, flagValue bool, rc *repoconfig.Config) bool {
+	if explicit {
+		return flagValue
+	}
+	return rc.ExperimentalWorkerSandbox
 }
 
 // resolveReviewEffort applies --review-effort > this repo's .argus/config.yml
@@ -419,6 +437,8 @@ func runSupervision(cmd *cobra.Command, client herdr.Client, workers []superviso
 		ReviewNote:               o.reviewNote,
 		GateVerifyCommand:        o.gateVerifyCommand,
 		WorktreeBootstrapCommand: o.worktreeBootstrapCmd,
+		ExperimentalSandbox:      o.experimentalSandbox,
+		SandboxAllowWrite:        o.sandboxAllowWrite,
 		// Resolved once for this whole invocation (supervise has no --owner
 		// flag of its own — see ownership.ResolveOwnerID's doc) so every
 		// worker this run spawns shares one lease identity rather than each

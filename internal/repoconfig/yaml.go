@@ -98,6 +98,10 @@ func encodeYAML(cfg *Config) string {
 	if cfg.OwnerStaleAfter != "" {
 		fmt.Fprintf(&b, "owner_stale_after: %s\n", quoteYAML(cfg.OwnerStaleAfter))
 	}
+	if cfg.ExperimentalWorkerSandbox {
+		fmt.Fprintf(&b, "experimental_worker_sandbox: %t\n", cfg.ExperimentalWorkerSandbox)
+	}
+	writeYAMLList(&b, "sandbox_allow_write", cfg.SandboxAllowWrite)
 	writeYAMLList(&b, "allow", cfg.Allow)
 	if cfg.BriefNote != "" {
 		fmt.Fprintf(&b, "brief_note: %s\n", quoteYAML(cfg.BriefNote))
@@ -350,6 +354,8 @@ func listFieldFor(cfg *Config, key string) *[]string {
 		return &cfg.ProofRequiredPaths
 	case "always_review_paths":
 		return &cfg.AlwaysReviewPaths
+	case "sandbox_allow_write":
+		return &cfg.SandboxAllowWrite
 	default:
 		return nil
 	}
@@ -870,6 +876,12 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 		cfg.TitlePrefixTemplate = value
 	case "owner_stale_after":
 		cfg.OwnerStaleAfter = value
+	case "experimental_worker_sandbox":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return true, fmt.Errorf("config: line %d: experimental_worker_sandbox: %w", line, err)
+		}
+		cfg.ExperimentalWorkerSandbox = b
 	case "review_effort":
 		cfg.ReviewEffort = value
 	case "max_diff_lines":

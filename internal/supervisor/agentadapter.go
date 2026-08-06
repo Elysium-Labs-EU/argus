@@ -34,8 +34,11 @@ type AgentAdapter interface {
 	// phase's own resolved allow (see ResolvedAllowForPhase) — the static
 	// session-wide file can't itself be phase-conditional, so the live
 	// PreToolUse hook (argus worker check-tool) narrows it back down to the
-	// worker's actual current phase on every call.
-	RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) (path string, content []byte, err error)
+	// worker's actual current phase on every call. sandboxEnabled and
+	// sandboxAllowWrite are the repo's (or --experimental-sandbox's)
+	// experimental OS-sandbox toggle and its filesystem write-allow list —
+	// see settingsFor.
+	RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) (path string, content []byte, err error)
 
 	// PlanEvidence reports whether any session transcript for worktree
 	// contains a real todo-list tool call — the unfakeable backstop for the
@@ -56,8 +59,8 @@ func (claudeCodeAdapter) DefaultLauncher() string {
 	return DefaultLauncher
 }
 
-func (claudeCodeAdapter) RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) (string, []byte, error) {
-	settings := settingsFor(worktree, project, baseAllow, extraAllow)
+func (claudeCodeAdapter) RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) (string, []byte, error) {
+	settings := settingsFor(worktree, project, baseAllow, extraAllow, sandboxEnabled, sandboxAllowWrite)
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", nil, fmt.Errorf("encoding settings: %w", err)
@@ -88,9 +91,106 @@ func (claudeCodeAdapter) PlanEvidence(home, worktree string) (bool, int, error) 
 // prompt, so left unset it hangs at agent_status idle forever with
 // status.json never written, indistinguishable from "hasn't started yet".
 type permissionSettings struct {
-	Permissions                permissionBlock `json:"permissions"`
-	Hooks                      hooksBlock      `json:"hooks"`
-	EnableAllProjectMcpServers bool            `json:"enableAllProjectMcpServers"`
+	Sandbox                    *sandboxSettings `json:"sandbox,omitempty"`
+	Permissions                permissionBlock  `json:"permissions"`
+	Hooks                      hooksBlock       `json:"hooks"`
+	EnableAllProjectMcpServers bool             `json:"enableAllProjectMcpServers"`
+}
+
+// sandboxSettings mirrors the "sandbox" key Claude Code reads from
+// settings.local.json to enable its own OS sandbox (seatbelt on macOS,
+// bubblewrap on Linux) around a worker's Bash subprocesses — the vector
+// protocol.CredentialDenyFloor's in-process Read/Edit deny does not cover
+// (a worker can still `cat ~/.ssh/id_ed25519` via Bash without it). Rendered
+// by settingsFor only when the repo (or --experimental-sandbox) opts in;
+// omitted entirely otherwise, via permissionSettings.Sandbox's omitempty.
+//
+// Filesystem is deliberately narrow: no denyRead and no whole-home
+// whitelist. A denyRead of the home directory was tested and breaks
+// toolchain cache reads/writes with no security gain over Credentials'
+// already-targeted deny list.
+type sandboxSettings struct {
+	Filesystem               *sandboxFilesystem `json:"filesystem,omitempty"`
+	Credentials              sandboxCredentials `json:"credentials"`
+	Enabled                  bool               `json:"enabled"`
+	AutoAllowBashIfSandboxed bool               `json:"autoAllowBashIfSandboxed"`
+	AllowUnsandboxedCommands bool               `json:"allowUnsandboxedCommands"`
+	FailIfUnavailable        bool               `json:"failIfUnavailable"`
+}
+
+// sandboxCredentials is sandboxSettings' credential-file deny list — see
+// credentialDenyPaths for the fixed set of paths it always carries.
+type sandboxCredentials struct {
+	Files []sandboxCredentialFile `json:"files"`
+}
+
+// sandboxCredentialFile is one denied credential path entry. Mode is always
+// "deny": this block only ever blocks read access to a fixed, known-secret
+// path, never grants one.
+type sandboxCredentialFile struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
+}
+
+// sandboxFilesystem carries only the sandbox's write-allow list — see
+// sandboxSettings' own doc comment for why denyRead and a home whitelist are
+// deliberately absent. Referenced only via permissionSettings.Sandbox's own
+// pointer field, and itself omitted (nil) whenever sandboxAllowWrite is
+// empty, so an experimental-sandbox repo with no extra write paths renders
+// no filesystem block at all rather than an empty one.
+type sandboxFilesystem struct {
+	AllowWrite []string `json:"allowWrite"`
+}
+
+// sandboxCredentialMode is the only Mode sandboxCredentialFile ever carries:
+// this block exists to deny read access to known-secret paths, never to
+// grant one.
+const sandboxCredentialMode = "deny"
+
+// credentialDenyPaths are the credential files/directories the experimental
+// OS sandbox always denies read access to, regardless of
+// sandboxAllowWrite — the same class of path
+// protocol.CredentialDenyFloor already denies to the in-process Read/Edit
+// tools, extended here to the Bash/subprocess vector those tools don't
+// cover. Fixed and non-configurable: a repo opts the sandbox on or off as a
+// whole, not path by path.
+var credentialDenyPaths = []string{
+	"~/.ssh",
+	"~/.aws",
+	"~/.azure",
+	"~/.config/gh",
+	"~/.git-credentials",
+	"~/.gnupg",
+	"~/.docker/config.json",
+	"~/.kube",
+	"~/.npmrc",
+	"~/.pypirc",
+	"~/.gem/credentials",
+}
+
+// sandboxBlockFor builds the sandbox settings block, or nil when enabled is
+// false — the pointer settingsFor assigns straight to
+// permissionSettings.Sandbox, whose own omitempty then drops the whole
+// "sandbox" key from a disabled worker's rendered settings.local.json.
+func sandboxBlockFor(enabled bool, allowWrite []string) *sandboxSettings {
+	if !enabled {
+		return nil
+	}
+	files := make([]sandboxCredentialFile, len(credentialDenyPaths))
+	for i, p := range credentialDenyPaths {
+		files[i] = sandboxCredentialFile{Path: p, Mode: sandboxCredentialMode}
+	}
+	s := &sandboxSettings{
+		Enabled:                  true,
+		AutoAllowBashIfSandboxed: true,
+		AllowUnsandboxedCommands: false,
+		FailIfUnavailable:        true,
+		Credentials:              sandboxCredentials{Files: files},
+	}
+	if len(allowWrite) > 0 {
+		s.Filesystem = &sandboxFilesystem{AllowWrite: allowWrite}
+	}
+	return s
 }
 
 // permissionBlock has no Ask field: dontAsk never prompts, so an "ask" list
@@ -196,7 +296,11 @@ func recordPlanHooks() []hookMatcher {
 // file is read once at session launch and can't itself vary by the worker's
 // current phase — checkToolHook is what actually narrows a live Bash call
 // down to what the *current* phase's own resolved set allows.
-func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) permissionSettings {
+//
+// sandboxEnabled and sandboxAllowWrite are the experimental, default-off OS
+// sandbox toggle (see sandboxBlockFor): false renders no "sandbox" key at
+// all, leaving today's behavior unchanged.
+func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) permissionSettings {
 	allow := ResolvedAllowSet(project, baseAllow, extraAllow, worktree)
 
 	// Deny wins over allow in Claude Code regardless of pattern specificity
@@ -247,6 +351,7 @@ func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extra
 			Deny:  deny,
 		},
 		Hooks:                      hooksBlock{PreToolUse: checkToolHooks(), PostToolUse: recordPlanHooks()},
+		Sandbox:                    sandboxBlockFor(sandboxEnabled, sandboxAllowWrite),
 		EnableAllProjectMcpServers: true,
 	}
 }

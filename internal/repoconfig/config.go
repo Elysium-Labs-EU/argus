@@ -68,15 +68,57 @@ import (
 // failure. Empty means no command is configured — the prior behavior, a
 // bare `git worktree add` with no bootstrap step.
 type Config struct {
-	BaseBranch        string
-	WorkerPlacement   string
-	BriefNote         string
-	ReviewNote        string
-	ShipVerifyCommand string
-	GateVerifyCommand string
+	MaxDiffLines *int
+	// Phases adds Bash-command denials on top of protocol.DeniedInPhase's
+	// hardcoded floor, per phase — see protocol.ResolvedDenyForPhase. A repo
+	// can only add restrictions this way, never remove the floor: Skip drops
+	// this repo's own addition for that phase, not the floor itself.
+	Phases protocol.PhaseConfig
+	// MaxReworkRounds overrides rework's own --max-rounds default (one
+	// invocation's dispatch-and-judge loop ceiling) — unlike ReworkBudget,
+	// this was flag-only until this field existed, so it has no deprecated
+	// flat/dotted alias to preserve. Lives at rework.max_rounds. A pointer for
+	// the same "0 is not the same as unset" reason as ReworkBudget/
+	// MaxDiffLines, even though rework.go's own validation currently rejects
+	// a resolved value <=0 either way.
+	MaxReworkRounds *int
+	// ReworkBudget overrides how many rework rounds a worktree may be
+	// dispatched for in total, across every separate `argus rework`
+	// invocation over its lifetime — not the same knob as rework's own
+	// --max-rounds, which only bounds one invocation's internal loop. Canonical
+	// location is rework.budget; the top-level rework_budget key still works
+	// as a deprecated alias (see legacyFlatKeys). A pointer for the same
+	// reason as MaxDiffLines: 0 is a legal value (disables the budget
+	// entirely) that must stay distinguishable from "key not present". See
+	// supervisor.DefaultMaxReworkBudget for the default when neither this nor
+	// --max-rework-budget is set.
+	ReworkBudget *int
+	// TitlePrefixTemplate, when set, is a required prefix ship mechanically
+	// enforces on the PR/commit title it ends up using — worker-reported
+	// (protocol.Status.Title), forge-fetched, branch-derived, or an explicit
+	// --title override — before opening the PR. A repo's own title
+	// convention (e.g. a ticket-key prefix) previously lived only in
+	// brief_note prose a worker could get wrong like any other instruction;
+	// this key gives the same convention a mechanical, unbypassable check.
+	// The literal substring "{issue}" is replaced with --jira-issue's key if
+	// set, else "#<--issue>" if --issue is set, else the empty string. A
+	// title that already starts with the rendered prefix is left alone;
+	// otherwise the prefix is prepended. Empty means no enforcement, the
+	// same "not configured" default every other key here has.
+	TitlePrefixTemplate string
+	// OwnerStaleAfter overrides how long a worktree's owner-lease heartbeat
+	// (see internal/ownership) may go quiet before a mismatched caller is let
+	// through instead of refused, same "not configured, skip" plain-string
+	// shape as VerifyCommand/ShipLint — empty falls back to
+	// ownership.DefaultStaleAfter. Stored as a Go duration string (e.g.
+	// "30m") rather than a parsed time.Duration so a malformed value is only
+	// ever an error at the one place it's consumed (resolveOwnerStaleAfter),
+	// not at Load time for every command that merely reads other keys. An
+	// explicit --owner-stale-after flag always overrides this.
+	OwnerStaleAfter string
 	// WorktreeBootstrapCommand runs once, synchronously, in a freshly created
 	// worktree, right after `git worktree add` succeeds and before the
-	// worker's agent is spawned (see supervisor.RunWorktreeBootstrapCommand) — with
+	// worker's agent is spawned (see supervisor.RunWorktreeBootstrapCommand), so
 	// cwd already at the resolved WorktreeDir location, since `git worktree
 	// add` already succeeded there. It must never attempt to create or
 	// relocate the worktree itself (git will refuse). A script that
@@ -121,51 +163,13 @@ type Config struct {
 	// shifts the worktree's nesting depth relative to the original checkout
 	// — see WorktreeBootstrapCommand's own comment if that command hardcodes a
 	// relative hop count back to it.
-	WorktreeDir string
-	// TitlePrefixTemplate, when set, is a required prefix ship mechanically
-	// enforces on the PR/commit title it ends up using — worker-reported
-	// (protocol.Status.Title), forge-fetched, branch-derived, or an explicit
-	// --title override — before opening the PR. A repo's own title
-	// convention (e.g. a ticket-key prefix) previously lived only in
-	// brief_note prose a worker could get wrong like any other instruction;
-	// this key gives the same convention a mechanical, unbypassable check.
-	// The literal substring "{issue}" is replaced with --jira-issue's key if
-	// set, else "#<--issue>" if --issue is set, else the empty string. A
-	// title that already starts with the rendered prefix is left alone;
-	// otherwise the prefix is prepended. Empty means no enforcement, the
-	// same "not configured" default every other key here has.
-	TitlePrefixTemplate string
-	// OwnerStaleAfter overrides how long a worktree's owner-lease heartbeat
-	// (see internal/ownership) may go quiet before a mismatched caller is let
-	// through instead of refused, same "not configured, skip" plain-string
-	// shape as VerifyCommand/ShipLint — empty falls back to
-	// ownership.DefaultStaleAfter. Stored as a Go duration string (e.g.
-	// "30m") rather than a parsed time.Duration so a malformed value is only
-	// ever an error at the one place it's consumed (resolveOwnerStaleAfter),
-	// not at Load time for every command that merely reads other keys. An
-	// explicit --owner-stale-after flag always overrides this.
-	OwnerStaleAfter string
-	MaxDiffLines    *int
-	// ReworkBudget overrides how many rework rounds a worktree may be
-	// dispatched for in total, across every separate `argus rework`
-	// invocation over its lifetime — not the same knob as rework's own
-	// --max-rounds, which only bounds one invocation's internal loop. Canonical
-	// location is rework.budget; the top-level rework_budget key still works
-	// as a deprecated alias (see legacyFlatKeys). A pointer for the same
-	// reason as MaxDiffLines: 0 is a legal value (disables the budget
-	// entirely) that must stay distinguishable from "key not present". See
-	// supervisor.DefaultMaxReworkBudget for the default when neither this nor
-	// --max-rework-budget is set.
-	ReworkBudget *int
-	// MaxReworkRounds overrides rework's own --max-rounds default (one
-	// invocation's dispatch-and-judge loop ceiling) — unlike ReworkBudget,
-	// this was flag-only until this field existed, so it has no deprecated
-	// flat/dotted alias to preserve. Lives at rework.max_rounds. A pointer for
-	// the same "0 is not the same as unset" reason as ReworkBudget/
-	// MaxDiffLines, even though rework.go's own validation currently rejects
-	// a resolved value <=0 either way.
-	MaxReworkRounds *int
-	Allow           []string
+	WorktreeDir       string
+	BaseBranch        string
+	GateVerifyCommand string
+	ShipVerifyCommand string
+	ReviewNote        string
+	BriefNote         string
+	WorkerPlacement   string
 	// ProofRequiredPaths, when set, entirely replaces
 	// supervisor.DefaultReviewPolicy's own built-in list rather than merging
 	// with it — the same "config wins outright, no additive merge" shape
@@ -178,16 +182,27 @@ type Config struct {
 	// independent of this list, so a repo's own AlwaysReviewPaths can never
 	// silently drop that check by omission — see supervisor's selfConfigPath.
 	AlwaysReviewPaths []string
-	// Phases adds Bash-command denials on top of protocol.DeniedInPhase's
-	// hardcoded floor, per phase — see protocol.ResolvedDenyForPhase. A repo
-	// can only add restrictions this way, never remove the floor: Skip drops
-	// this repo's own addition for that phase, not the floor itself.
-	Phases protocol.PhaseConfig
+	Allow             []string
 	// Deprecated is populated only by Load/parseYAML reading an old-named or
 	// old-located key (see legacyFlatKeys) — never set by anything that
 	// constructs a Config directly, such as runInit's own suggested/cfg
 	// values.
 	Deprecated []DeprecatedKeyUse
+	// SandboxAllowWrite names filesystem paths the OS sandbox must grant
+	// write access to on top of the worktree itself — e.g. a toolchain's
+	// shared build cache outside it (GOCACHE, ~/.cache/go-build) — only
+	// consulted when ExperimentalWorkerSandbox is true. Empty renders no
+	// filesystem allowWrite block at all.
+	SandboxAllowWrite []string
+	// ExperimentalWorkerSandbox opts a worker into Claude Code's own OS
+	// sandbox (seatbelt on macOS, bubblewrap on Linux), rendered into
+	// settings.local.json by settingsFor when true — see
+	// internal/supervisor/agentadapter.go. It complements the in-process
+	// Read/Edit credential deny floor (protocol.CredentialDenyFloor) by
+	// confining the Bash/subprocess vector: a worker cannot `cat ~/.ssh/id_ed25519`
+	// even via a shelled-out command. Experimental and default false: an
+	// explicit --experimental-sandbox flag on supervise always overrides this.
+	ExperimentalWorkerSandbox bool
 }
 
 // DeprecatedKeyUse records one old-named .argus/config.yml key parseYAML
