@@ -1125,15 +1125,18 @@ func issueStatusPageConfigDefault(ctx context.Context, repoPath string) string {
 }
 
 // issuesToTasks renders each issue into a worker brief, a default branch
-// name, and a bare ticket-key label ("#<n>") — the herdr-visible identifier
-// a fleet operator scanning `herdr workspace list` can pick this worker out
-// by, instead of BuildPlan's task-derived (or branch) fallback. It takes the
-// forge as a parameter so it is testable without a network. repoPath
-// resolves this repo's optional brief_note (see repoBriefNote) — argus
-// itself supplies no toolchain-flavored text of its own when no config is
-// present, only the fixed "don't commit" invariant.
+// name, and a herdr-visible label — the identifier a fleet operator scanning
+// `herdr workspace list` can pick this worker out by, instead of BuildPlan's
+// task-derived (or branch) fallback. The label defaults to a bare ticket key
+// ("#<n>"), the same as before workspace_label_template existed; if this
+// repo's .argus/config.yml sets that key, it is rendered instead (see
+// renderWorkspaceLabel). It takes the forge as a parameter so it is testable
+// without a network. repoPath resolves this repo's optional brief_note (see
+// repoBriefNote) — argus itself supplies no toolchain-flavored text of its
+// own when no config is present, only the fixed "don't commit" invariant.
 func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, name, repoPath string, issues []int, bn briefNoteOverride) (tasks, branches, labels []string, err error) {
 	tail := fixedBriefTail(repoBriefNote(out, repoPath, bn))
+	labelTemplate := workspaceLabelTemplateConfigDefault(repoPath)
 	for _, n := range issues {
 		iss, ferr := f.FetchIssue(ctx, owner, name, n)
 		if ferr != nil {
@@ -1143,9 +1146,107 @@ func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, nam
 			"Fix %s/%s issue #%d: %s\n\n%s\n\n%s",
 			owner, name, n, iss.Title, iss.Body, tail))
 		branches = append(branches, fmt.Sprintf("%s-fix-issue-%d", name, n))
-		labels = append(labels, fmt.Sprintf("#%d", n))
+		issueRef := fmt.Sprintf("#%d", n)
+		label := issueRef
+		if labelTemplate != "" {
+			label = renderWorkspaceLabel(labelTemplate, issueRef, name, iss.Title)
+		}
+		labels = append(labels, label)
 	}
 	return tasks, branches, labels, nil
+}
+
+// workspaceLabelTemplateConfigDefault reads repoPath's .argus/config.yml
+// workspace_label_template key, best-effort like repoBriefNote's own load: a
+// repoPath with no config file (or one that fails to parse) just means no
+// template applies, leaving issuesToTasks/jiraIssuesToTasks's bare "#<n>"/
+// ticket-key label exactly as it was before this key existed.
+func workspaceLabelTemplateConfigDefault(repoPath string) string {
+	rc, err := repoconfig.Load(repoconfig.Path(repoPath))
+	if err != nil {
+		return ""
+	}
+	return rc.WorkspaceLabelTemplate
+}
+
+// workspaceLabelIssuePlaceholder, workspaceLabelProjectPlaceholder, and
+// workspaceLabelSummaryPlaceholder are the literal template substrings
+// renderWorkspaceLabel replaces, mirroring cmd/ship.go's
+// titlePrefixIssuePlaceholder for the equivalent ship.title_prefix_template
+// key.
+const (
+	workspaceLabelIssuePlaceholder   = "{issue}"
+	workspaceLabelProjectPlaceholder = "{project}"
+	workspaceLabelSummaryPlaceholder = "{summary}"
+)
+
+// renderWorkspaceLabel substitutes a repo's configured workspace_label_
+// template's {issue}/{project}/{summary} placeholders for one --issues/
+// --jira-issues spawned worker's herdr-visible label (see
+// createAndPlaceWorktree's TabRename reuse of the identical Label value in
+// internal/supervisor/loop.go). issueRef is the same value ship.go's
+// titlePrefixIssueRef resolves for {issue} there — a Jira key, or "#<n>" for
+// a numeric --issue; project is the repo name; summaryTitle is the issue's
+// own title, reduced to a short slug by summarySlug for {summary}.
+func renderWorkspaceLabel(template, issueRef, project, summaryTitle string) string {
+	label := strings.ReplaceAll(template, workspaceLabelIssuePlaceholder, issueRef)
+	label = strings.ReplaceAll(label, workspaceLabelProjectPlaceholder, project)
+	label = strings.ReplaceAll(label, workspaceLabelSummaryPlaceholder, summarySlug(summaryTitle))
+	return label
+}
+
+// workspaceLabelSummaryWords caps how many leading words of an issue's title
+// summarySlug keeps — {summary} feeds a herdr tab label, not prose, so it
+// stays short enough to scan at a glance in `herdr workspace list` rather
+// than reproducing the whole title the way taskLabel
+// (internal/supervisor/loop.go) does for a plain --tasks worker's status
+// line.
+const workspaceLabelSummaryWords = 3
+
+// workspaceLabelSummaryMaxLen caps summarySlug's total output length after
+// word-capping, since a run of long words can still overflow a reasonable
+// tab-label width.
+const workspaceLabelSummaryMaxLen = 30
+
+// summarySlug renders title's first few words as a lowercase, hyphenated,
+// punctuation-free slug for workspace_label_template's {summary}
+// placeholder — the same length-capping spirit as taskLabel's own cap on a
+// plain task string, but word-capped and slug-shaped since this ends up in
+// a herdr tab label rather than a status line a human reads as prose.
+func summarySlug(title string) string {
+	fields := strings.Fields(title)
+	if len(fields) > workspaceLabelSummaryWords {
+		fields = fields[:workspaceLabelSummaryWords]
+	}
+	var b strings.Builder
+	for _, f := range fields {
+		word := slugWord(f)
+		if word == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('-')
+		}
+		b.WriteString(word)
+	}
+	slug := b.String()
+	if len(slug) > workspaceLabelSummaryMaxLen {
+		slug = strings.TrimRight(slug[:workspaceLabelSummaryMaxLen], "-")
+	}
+	return slug
+}
+
+// slugWord lowercases one word and strips everything but ASCII letters and
+// digits, so summarySlug's hyphen-joined output carries no punctuation a
+// herdr TabRename call would need to escape.
+func slugWord(word string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(word) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // jiraIssueFetcher is the subset of *jira.Client that jiraIssuesToTasks needs
@@ -1196,10 +1297,14 @@ func repoBranchPrefix(ctx context.Context, repoPath string) string {
 }
 
 // jiraIssuesToTasks renders each Jira issue into a worker brief, a default
-// branch name, and a bare ticket-key label (the Jira key itself, e.g.
-// "AP-1207" — already the bare form issuesToTasks has to synthesize with a
-// leading "#" for a numeric issue), mirroring issuesToTasks for the
-// git-forge issue pipeline. The label is routed through
+// branch name, and a herdr-visible label, mirroring issuesToTasks for the
+// git-forge issue pipeline. The label defaults to a bare ticket key (the
+// Jira key itself, e.g. "AP-1207" — already the bare form issuesToTasks has
+// to synthesize with a leading "#" for a numeric issue), the same as before
+// workspace_label_template existed; if this repo's .argus/config.yml sets
+// that key, it is rendered instead (see renderWorkspaceLabel), with
+// {project} filled from branchPrefix (this repo's own name, the same value
+// used for the default branch). The bare key is routed through
 // supervisor.TicketKey — the same extraction rework uses on a worktree's
 // status.json task — rather than using key verbatim, so the two agree on
 // casing even though a bare Jira key already carries no colon suffix for
@@ -1216,6 +1321,7 @@ func repoBranchPrefix(ctx context.Context, repoPath string) string {
 // optional brief_note the same way issuesToTasks does.
 func jiraIssuesToTasks(ctx context.Context, out io.Writer, c jiraSpawnClient, repoPath, branchPrefix string, keys []string, jiraSpawn jiraSpawnOpts, bn briefNoteOverride) (tasks, branches, labels []string, err error) {
 	tail := fixedBriefTail(repoBriefNote(out, repoPath, bn))
+	labelTemplate := workspaceLabelTemplateConfigDefault(repoPath)
 
 	var callerAccountID string
 	if jiraSpawn.assignToCaller {
@@ -1247,6 +1353,9 @@ func jiraIssuesToTasks(ctx context.Context, out io.Writer, c jiraSpawnClient, re
 		label := supervisor.TicketKey(key)
 		if label == "" {
 			label = key
+		}
+		if labelTemplate != "" {
+			label = renderWorkspaceLabel(labelTemplate, label, branchPrefix, iss.Title)
 		}
 		labels = append(labels, label)
 	}
