@@ -91,6 +91,53 @@ func TestMatchesDeniedCommand(t *testing.T) {
 	}
 }
 
+// TestCredentialDenyFloor pins the representative entries CredentialDenyFloor
+// must carry — one home-anchored file, one home-anchored directory
+// (Read+Edit), one location-agnostic wildcard, and ~/.claude/** — and guards
+// against a wildcarded .claude form ever creeping in, since a worker must
+// still be able to read its own worktree's .claude/ directory.
+func TestCredentialDenyFloor(t *testing.T) {
+	got := CredentialDenyFloor()
+
+	want := []string{
+		"Read(~/.ssh/**)",
+		"Edit(~/.ssh/**)",
+		"Read(~/.claude/**)",
+		"Read(**/.git-credentials)",
+	}
+	for _, entry := range want {
+		if !slices.Contains(got, entry) {
+			t.Errorf("CredentialDenyFloor() = %v, missing %q", got, entry)
+		}
+	}
+
+	for _, bad := range []string{"Read(**/.claude/**)", "Edit(**/.claude/**)"} {
+		if slices.Contains(got, bad) {
+			t.Errorf("CredentialDenyFloor() = %v, must not contain wildcard .claude form %q (a worktree's own .claude/ must stay readable)", got, bad)
+		}
+	}
+}
+
+// TestCredentialDenyFloorReturnsCopy guards the same mutation hazard
+// DenyFloor's own slices.Clone protects against: a caller mutating the
+// returned slice must never corrupt the package-level backing data other
+// callers read next.
+func TestCredentialDenyFloorReturnsCopy(t *testing.T) {
+	got := CredentialDenyFloor()
+	if len(got) == 0 {
+		t.Fatal("CredentialDenyFloor() returned an empty slice")
+	}
+	got[0] = "mutated"
+
+	again := CredentialDenyFloor()
+	if len(again) == 0 {
+		t.Fatal("CredentialDenyFloor() returned an empty slice")
+	}
+	if again[0] == "mutated" {
+		t.Error("CredentialDenyFloor() leaked its backing array; want an independent copy each call")
+	}
+}
+
 func TestResolvedDenyForPhase(t *testing.T) {
 	if got := ResolvedDenyForPhase(PhaseWorking, nil); !slices.Equal(got, DenyFloor()) {
 		t.Errorf("no project config, working phase = %v, want exactly the DenyFloor() floor %v", got, DenyFloor())

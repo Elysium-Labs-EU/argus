@@ -118,6 +118,34 @@ func TestSettingsForDenyListMatchesDenyFloor(t *testing.T) {
 	}
 }
 
+// TestSettingsForDeniesCredentialFiles confirms settingsFor carries every
+// protocol.CredentialDenyFloor() entry into the rendered Permissions.Deny,
+// alongside (not instead of) the pre-existing control-plane/self-settings
+// deny entries — a worker's Read tool bypasses the OS sandbox entirely, so
+// this static list is the only thing standing between it and the
+// orchestrator's own ~/.ssh, ~/.aws, and similar credential files.
+func TestSettingsForDeniesCredentialFiles(t *testing.T) {
+	wt := "/repo/.claude/worktrees/feat-x"
+	settings := settingsFor(wt, nil, nil, nil)
+
+	for _, entry := range protocol.CredentialDenyFloor() {
+		if !slices.Contains(settings.Permissions.Deny, entry) {
+			t.Errorf("deny list missing credential-floor entry %q; got %v", entry, settings.Permissions.Deny)
+		}
+	}
+
+	preExisting := []string{
+		"Bash(rm -rf *)",
+		"Edit(" + absPathPattern(wt+"/.claude/settings.local.json") + ")",
+		"Edit(" + absPathPattern(wt+"/.claude/argus/**") + ")",
+	}
+	for _, entry := range preExisting {
+		if !slices.Contains(settings.Permissions.Deny, entry) {
+			t.Errorf("deny list lost pre-existing entry %q after adding credential floor; got %v", entry, settings.Permissions.Deny)
+		}
+	}
+}
+
 // TestSettingsForAllowUnionsEveryPhase confirms the static, session-wide
 // allow list is the union of every protocol.ConfigurablePhases value's own
 // resolved allow — since this file can't itself vary by the worker's

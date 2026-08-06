@@ -240,6 +240,11 @@ func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extra
 	// unremovable regardless of what any phase's allow config says, so they
 	// are denied natively here too, not only caught live by the hook.
 	deny = append(deny, bashGlobEntries(protocol.DenyFloor())...)
+	// Read/Edit deny-wins-with-no-re-allow floor for operator credential
+	// files (~/.ssh, ~/.aws, and similar) a worker's Edit/Write(worktree)
+	// glob never grants but its Read tool could otherwise still reach — see
+	// protocol.CredentialDenyFloor.
+	deny = append(deny, protocol.CredentialDenyFloor()...)
 
 	return permissionSettings{
 		Permissions: permissionBlock{
