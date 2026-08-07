@@ -428,6 +428,52 @@ func GrantRebaseAllow(worktree, base, shipVerifyCommand, gateVerifyCommand strin
 	return nil
 }
 
+// AbortInProgressMerge clears a leftover unresolved `git merge --no-commit`
+// out of worktree before a rebase worker is (re)dispatched into it. A prior
+// dispatch can leave one behind — the worker was blocked before it could
+// finish resolving, or the run otherwise ended mid-conflict — and the
+// worker's very first instructed command, `git merge origin/<base>
+// --no-commit`, refuses to start a second merge while MERGE_HEAD is still
+// set, wedging every retry against that worktree identically. A worktree
+// with no merge in progress is left untouched.
+func AbortInProgressMerge(ctx context.Context, worktree string) error {
+	inProgress, err := mergeInProgress(ctx, worktree)
+	if err != nil {
+		return err
+	}
+	if !inProgress {
+		return nil
+	}
+	if _, err := git(ctx, worktree, "merge", "--abort"); err != nil {
+		return fmt.Errorf("aborting in-progress merge before rebase dispatch: %w", err)
+	}
+	return nil
+}
+
+// mergeInProgress reports whether worktree has an unresolved merge, i.e.
+// MERGE_HEAD is present under its git dir. Resolved via `git rev-parse
+// --git-dir` rather than assuming <worktree>/.git/MERGE_HEAD: a linked
+// worktree's ".git" is a file pointing elsewhere, so MERGE_HEAD lives under
+// the main repo's .git/worktrees/<name>/ directory, not inside worktree
+// itself.
+func mergeInProgress(ctx context.Context, worktree string) (bool, error) {
+	gitDir, err := git(ctx, worktree, "rev-parse", "--git-dir")
+	if err != nil {
+		return false, fmt.Errorf("resolving git dir: %w", err)
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(worktree, gitDir)
+	}
+	_, err = os.Stat(filepath.Join(gitDir, "MERGE_HEAD"))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("checking for an in-progress merge: %w", err)
+}
+
 // InvalidateStatus removes a worktree's status and verdict files, if present,
 // before a rebase worker is dispatched into it. Without this, a worker
 // re-dispatched into a worktree that already carries a terminal status.json

@@ -40,11 +40,14 @@ var allPhaseFloor = []string{
 // mutationPhases are the only phases in which a worker is actually building
 // its change, so Edit/Write(worktree) is the only structural-floor grant
 // that isn't blanket — every other phase (planning, awaiting_review,
-// blocked, rebase) is read/report-only, no repo config can extend it. Rebase
-// is deliberately excluded: RebaseBrief has the worker resolve conflicts by
-// re-running git merge, not by using the Edit/Write tools, so it stays on
-// the rebase phase's own narrower grant (see RebasePhaseAllow).
-var mutationPhases = []protocol.Phase{protocol.PhaseWorking, protocol.PhaseSelfTest}
+// blocked) is read/report-only, no repo config can extend it. Rebase is
+// included: RebaseBrief tells the worker to resolve a real content conflict
+// so both sides' changes coexist, and only `--ours`/`--theirs` (which
+// clobbers one side) avoids touching file contents — genuine resolution
+// needs the Edit/Write tools, on top of the rebase phase's own narrower git
+// grant (see RebasePhaseAllow, which still covers only fetch/merge/verify,
+// never commit/push).
+var mutationPhases = []protocol.Phase{protocol.PhaseWorking, protocol.PhaseSelfTest, protocol.PhaseRebase}
 
 // PhaseAllowsMutation reports whether phase is one of mutationPhases — the
 // live check-tool hook's answer to "is this worker allowed to Edit/Write at

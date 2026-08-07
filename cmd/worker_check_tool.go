@@ -155,7 +155,7 @@ func loadCurrentPhase(worktree string) (protocol.Status, error) {
 // denyReason's Bash-command messages.
 func mutationDenyReason(phase protocol.Phase) string {
 	return fmt.Sprintf(
-		"argus: file edits are denied during phase %q — only working and self_test allow mutating tracked files.\n"+
+		"argus: file edits are denied during phase %q — only working, self_test, and rebase allow mutating tracked files.\n"+
 			"If you genuinely need to edit a file here, report `blocked` and explain why.",
 		phase,
 	)

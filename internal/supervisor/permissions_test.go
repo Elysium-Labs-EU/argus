@@ -50,16 +50,18 @@ func TestStructuralFloorCoversWriterBriefCommands(t *testing.T) {
 	}
 }
 
-// TestResolvedAllowForPhase_EditWriteOnlyWorkingAndSelfTest is the phase-
+// TestResolvedAllowForPhase_EditWriteOnlyDuringMutationPhases is the phase-
 // scoping guarantee at the center of this package: a worker may only mutate
-// tracked files while actually building the change.
-func TestResolvedAllowForPhase_EditWriteOnlyWorkingAndSelfTest(t *testing.T) {
+// tracked files while actually building the change or resolving a rebase
+// conflict.
+func TestResolvedAllowForPhase_EditWriteOnlyDuringMutationPhases(t *testing.T) {
 	worktree := "/tmp/wt"
 	editEntry := "Edit(" + absPathPattern(worktree+"/**") + ")"
 	writeEntry := "Write(" + absPathPattern(worktree+"/**") + ")"
 	mutating := map[protocol.Phase]bool{
 		protocol.PhaseWorking:  true,
 		protocol.PhaseSelfTest: true,
+		protocol.PhaseRebase:   true,
 	}
 	for _, p := range allReportedAndRebasePhases {
 		got := ResolvedAllowForPhase(p, worktree, nil, nil, nil)
@@ -342,7 +344,7 @@ func TestPhaseAllowsMutation(t *testing.T) {
 		protocol.PhaseSelfTest:       true,
 		protocol.PhaseAwaitingReview: false,
 		protocol.PhaseBlocked:        false,
-		protocol.PhaseRebase:         false,
+		protocol.PhaseRebase:         true,
 	}
 	for phase, want := range cases {
 		if got := PhaseAllowsMutation(phase); got != want {
