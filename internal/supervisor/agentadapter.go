@@ -138,9 +138,9 @@ type hookEntry struct {
 // status.json live instead: DeniedInPhase's floor and ResolvedAllowForPhase's
 // own per-phase scoping for Bash, and PhaseAllowsMutation for Edit/Write —
 // the static Allow list can grant Edit/Write(worktree) for the whole
-// session (it has to, since working/self_test genuinely need it and the
-// file can't be re-rendered mid-session), so only this live check actually
-// keeps a worker from mutating tracked files outside working/self_test.
+// session (it has to, since working/self_test/rebase genuinely need it and
+// the file can't be re-rendered mid-session), so only this live check
+// actually keeps a worker from mutating tracked files outside those phases.
 // One hookMatcher per tool name rather than a single combined matcher
 // pattern, since Claude Code's own matcher syntax is documented per exact
 // tool name, not as a general regex.

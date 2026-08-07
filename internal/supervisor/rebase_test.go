@@ -1373,3 +1373,135 @@ func TestIsStaleStatErrorReturnsFalse(t *testing.T) {
 		t.Error("a path that can't be stat'd should not be treated as stale")
 	}
 }
+
+// setupConflictedMerge builds a worktree mid a real, genuinely conflicting
+// `git merge --no-commit` (not just ConflictsWith's own merge-tree check,
+// which never touches the working tree) — MERGE_HEAD is left set exactly as
+// a rebase worker blocked before finishing conflict resolution (or any run
+// that ends mid-conflict) would leave it for the next dispatch to find.
+func setupConflictedMerge(t *testing.T) (worktree, base string) {
+	t.Helper()
+	ctx := context.Background()
+	wt, base := initGitRepo(t)
+	origin := mustRemote(t, wt)
+	other := gitTempDir(t)
+	gitDo(t, filepath.Dir(other), "clone", "-q", origin, filepath.Base(other))
+	if err := os.WriteFile(filepath.Join(other, "f.txt"), []byte("origin-change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, other, "add", "-A")
+	gitDo(t, other, "commit", "-q", "-m", "origin edits line1")
+	gitDo(t, other, "push", "-q", "origin", base)
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("branch-change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, wt, "add", "-A")
+	gitDo(t, wt, "commit", "-q", "-m", "branch edits line1")
+	if err := FetchBase(ctx, wt, base); err != nil {
+		t.Fatalf("FetchBase: %v", err)
+	}
+
+	// A real conflicting merge exits non-zero by design (that's what leaves
+	// MERGE_HEAD set for the worker to resolve) — the non-zero exit here is
+	// the expected outcome, not a test failure, so this bypasses gitDo's own
+	// t.Fatalf-on-error wrapper. The identity env matches gitDo/initGitRepo:
+	// without it, a CI runner with no configured git identity makes the merge
+	// fail on "Committer identity unknown" before it ever writes MERGE_HEAD,
+	// which reads as the expected conflict here but isn't one.
+	mergeCmd := exec.CommandContext(ctx, "git", "-C", wt, "merge", "origin/"+base, "--no-commit")
+	mergeCmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	if mergeErr := mergeCmd.Run(); mergeErr == nil {
+		t.Fatal("test setup: expected the merge to conflict, but it succeeded cleanly")
+	}
+	return wt, base
+}
+
+// TestMergeInProgressAndAbort confirms mergeInProgress sees a real
+// conflicted merge and AbortInProgressMerge clears it back out.
+func TestMergeInProgressAndAbort(t *testing.T) {
+	ctx := context.Background()
+	wt, _ := setupConflictedMerge(t)
+
+	during, err := mergeInProgress(ctx, wt)
+	if err != nil {
+		t.Fatalf("mergeInProgress during conflict: %v", err)
+	}
+	if !during {
+		t.Fatal("expected MERGE_HEAD to be set after a conflicting merge attempt")
+	}
+
+	if abortErr := AbortInProgressMerge(ctx, wt); abortErr != nil {
+		t.Fatalf("AbortInProgressMerge: %v", abortErr)
+	}
+
+	after, err := mergeInProgress(ctx, wt)
+	if err != nil {
+		t.Fatalf("mergeInProgress after abort: %v", err)
+	}
+	if after {
+		t.Error("expected AbortInProgressMerge to clear MERGE_HEAD")
+	}
+}
+
+// TestAbortInProgressMergePropagatesMergeInProgressError confirms
+// AbortInProgressMerge surfaces mergeInProgress's own error rather than
+// masking it — the branch TestMergeInProgressNotGitRepoErrorWrapped exercises
+// directly against mergeInProgress, exercised here through the caller that
+// actually matters (dispatchRebaseWorker only ever calls AbortInProgressMerge,
+// never mergeInProgress itself).
+func TestAbortInProgressMergePropagatesMergeInProgressError(t *testing.T) {
+	err := AbortInProgressMerge(context.Background(), t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error for a non-git worktree")
+	}
+	if !strings.Contains(err.Error(), "resolving git dir") {
+		t.Errorf("error should propagate mergeInProgress's own wrapped error, got %v", err)
+	}
+}
+
+// TestAbortInProgressMergePropagatesAbortFailure forces `git merge --abort`
+// itself to fail (not merely mergeInProgress's own check) by deleting the
+// index file it needs to reset — confirmed empirically to make the abort
+// fail deterministically ("Could not reset index file to revision 'HEAD'"),
+// unlike a HEAD/ORIG_HEAD content corruption (git still resolves those via
+// other state) or a permission-based trick (a no-op under a root test
+// runner).
+func TestAbortInProgressMergePropagatesAbortFailure(t *testing.T) {
+	wt, _ := setupConflictedMerge(t)
+	if err := os.Remove(filepath.Join(wt, ".git", "index")); err != nil {
+		t.Fatalf("removing index: %v", err)
+	}
+
+	err := AbortInProgressMerge(context.Background(), wt)
+	if err == nil {
+		t.Fatal("expected AbortInProgressMerge to fail when git merge --abort can't reset the index")
+	}
+	if !strings.Contains(err.Error(), "aborting in-progress merge before rebase dispatch") {
+		t.Errorf("error should wrap the git merge --abort failure, got %v", err)
+	}
+}
+
+// TestAbortInProgressMergeNoopWhenNoneInProgress confirms a clean worktree
+// (the common case — most dispatches aren't retries into a stuck merge) is
+// left alone rather than erroring on "nothing to abort".
+func TestAbortInProgressMergeNoopWhenNoneInProgress(t *testing.T) {
+	wt, _ := initGitRepo(t)
+	if err := AbortInProgressMerge(context.Background(), wt); err != nil {
+		t.Fatalf("AbortInProgressMerge on a clean worktree: %v", err)
+	}
+}
+
+// TestMergeInProgressNotGitRepoErrorWrapped confirms a directory that isn't
+// a git repository at all surfaces a wrapped error rather than silently
+// reporting no merge in progress — that would let AbortInProgressMerge fail
+// open on a genuinely broken --worktree instead of surfacing it.
+func TestMergeInProgressNotGitRepoErrorWrapped(t *testing.T) {
+	_, err := mergeInProgress(context.Background(), t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error resolving git dir for a non-git directory")
+	}
+	if !strings.Contains(err.Error(), "resolving git dir") {
+		t.Errorf("error should wrap the git-dir resolution failure, got %v", err)
+	}
+}

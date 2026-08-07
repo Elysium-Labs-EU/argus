@@ -279,6 +279,14 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	if ierr := supervisor.InvalidateStatus(opts.worktree); ierr != nil {
 		return fmt.Errorf("invalidating stale status before rebase dispatch: %w", ierr)
 	}
+	// A retry into a worktree a prior rebase dispatch left mid-conflict
+	// (blocked before the worker could finish resolving) still has MERGE_HEAD
+	// set — the worker's own `git merge origin/<base> --no-commit` refuses to
+	// start a second merge on top of that, so this dispatch would wedge
+	// identically to the last one without clearing it first.
+	if merr := supervisor.AbortInProgressMerge(ctx, opts.worktree); merr != nil {
+		return fmt.Errorf("clearing leftover merge before rebase dispatch: %w", merr)
+	}
 	// InvalidateStatus above removes status.json entirely, which would
 	// otherwise silently drop the worktree's recorded Base — a worker's own
 	// `argus worker report` carries the field forward but never sets it
