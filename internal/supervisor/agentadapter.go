@@ -30,12 +30,15 @@ type AgentAdapter interface {
 	// phases.<name>.allow policy (see internal/repoconfig); baseAllow is its
 	// phase-independent top-level allow list; extraAllow appends
 	// operator-supplied CLI --allow patterns on top of both, for a one-off
-	// run. The rendered allow list is the union of every configurable
-	// phase's own resolved allow (see ResolvedAllowForPhase) — the static
-	// session-wide file can't itself be phase-conditional, so the live
-	// PreToolUse hook (argus worker check-tool) narrows it back down to the
-	// worker's actual current phase on every call.
-	RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) (path string, content []byte, err error)
+	// run; rebaseAllow is RebasePhaseAllow's own git-command grant for this
+	// worktree's base, unioned in unconditionally (see ResolvedAllowSet's
+	// doc comment for why it can't wait for a live PreToolUse decision). The
+	// rendered allow list is the union of every configurable phase's own
+	// resolved allow (see ResolvedAllowForPhase) plus rebaseAllow — the
+	// static session-wide file can't itself be phase-conditional, so the
+	// live PreToolUse hook (argus worker check-tool) narrows it back down to
+	// the worker's actual current phase on every call.
+	RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string) (path string, content []byte, err error)
 
 	// PlanEvidence reports whether any session transcript for worktree
 	// contains a real todo-list tool call — the unfakeable backstop for the
@@ -56,8 +59,8 @@ func (claudeCodeAdapter) DefaultLauncher() string {
 	return DefaultLauncher
 }
 
-func (claudeCodeAdapter) RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) (string, []byte, error) {
-	settings := settingsFor(worktree, project, baseAllow, extraAllow)
+func (claudeCodeAdapter) RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string) (string, []byte, error) {
+	settings := settingsFor(worktree, project, baseAllow, extraAllow, rebaseAllow)
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", nil, fmt.Errorf("encoding settings: %w", err)
@@ -189,15 +192,19 @@ func recordPlanHooks() []hookMatcher {
 // floor: enough to edit files and be gated, no repo toolchain command —
 // skipping setup makes a worker *more* restricted, never less. extraAllow
 // appends operator-supplied CLI --allow patterns on top of both, for a
-// one-off run.
+// one-off run. rebaseAllow is RebasePhaseAllow's own grant for this
+// worktree's base, unioned in unconditionally rather than gated by phase —
+// see ResolvedAllowSet's doc comment for why the rebase phase can't wait for
+// a live PreToolUse decision the way every other phase does.
 //
 // The rendered Allow list is ResolvedAllowSet's union of every
-// protocol.ConfigurablePhases value's own ResolvedAllowForPhase, since this
-// file is read once at session launch and can't itself vary by the worker's
-// current phase — checkToolHook is what actually narrows a live Bash call
-// down to what the *current* phase's own resolved set allows.
-func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) permissionSettings {
-	allow := ResolvedAllowSet(project, baseAllow, extraAllow, worktree)
+// protocol.ConfigurablePhases value's own ResolvedAllowForPhase plus
+// rebaseAllow, since this file is read once at session launch and can't
+// itself vary by the worker's current phase — checkToolHook is what
+// actually narrows a live Bash call down to what the *current* phase's own
+// resolved set allows.
+func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string) permissionSettings {
+	allow := ResolvedAllowSet(project, baseAllow, extraAllow, rebaseAllow, worktree)
 
 	// Deny wins over allow in Claude Code regardless of pattern specificity
 	// (deny/allow are checked in that order, first match wins), so these

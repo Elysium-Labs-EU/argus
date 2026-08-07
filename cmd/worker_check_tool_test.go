@@ -364,6 +364,41 @@ func TestRunWorkerCheckToolRebaseDispatchAllowsFetchMergeDeniesCommitPush(t *tes
 	}
 }
 
+// TestRunWorkerCheckToolDeniesRebaseGitCommandsOutsideRebasePhase is the
+// other half of the dontAsk-era rebase deadlock's acceptance criteria: now
+// that provisionWorktree bakes RebasePhaseAllow's git fetch/merge grant into
+// the *static* settings.local.json unconditionally (see ResolvedAllowSet's
+// doc comment), the live check-tool hook is what must still deny those exact
+// commands whenever the worker reports a phase other than rebase — the
+// static file being broadly permissive must never leak into what a live
+// call for the "working" phase actually resolves to.
+func TestRunWorkerCheckToolDeniesRebaseGitCommandsOutsideRebasePhase(t *testing.T) {
+	origExit := osExit
+	t.Cleanup(func() { osExit = origExit })
+	var exitCode int
+	osExit = func(code int) { exitCode = code }
+
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Base: "main", Phase: protocol.PhaseWorking}); err != nil {
+		t.Fatalf("seeding working-phase status: %v", err)
+	}
+
+	for _, cmd := range []string{"git fetch origin main", "git merge origin/main --no-commit"} {
+		exitCode = 0
+		stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":%q}}`, wt, cmd))
+		var stderr bytes.Buffer
+		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+			t.Fatalf("runWorkerCheckTool(%q): %v", cmd, err)
+		}
+		if exitCode != 2 {
+			t.Errorf("cmd %q during working: exit code = %d, want 2 — rebase's git grant must not leak outside the rebase phase", cmd, exitCode)
+		}
+		if !strings.Contains(stderr.String(), "not in the resolved allow set") {
+			t.Errorf("cmd %q: stderr = %q, want the allow-scope block reason", cmd, stderr.String())
+		}
+	}
+}
+
 // TestRunWorkerCheckToolRebaseDispatchGrantsConfiguredVerifyCommand confirms
 // the rebase phase also grants whichever of the repo's ship_verify_command/
 // gate_verify_command is configured, so the worker can actually confirm the

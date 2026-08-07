@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -856,6 +857,155 @@ func TestRebasePhaseAllowNoVerifyCommandConfigured(t *testing.T) {
 	want := []string{"Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)"}
 	if !slices.Equal(got, want) {
 		t.Errorf("RebasePhaseAllow with no verify command = %v, want %v", got, want)
+	}
+}
+
+// TestGrantRebaseAllowPatchesRenderedSettings confirms GrantRebaseAllow adds
+// RebasePhaseAllow's git fetch/merge and verify-command entries to an
+// already-rendered settings.local.json — the dispatch-time defense-in-depth
+// for a base differing from the worktree's spawn-time base (see its own doc
+// comment).
+func TestGrantRebaseAllowPatchesRenderedSettings(t *testing.T) {
+	wt := t.TempDir()
+	if err := WriteSettings(wt, nil, nil, nil, nil); err != nil {
+		t.Fatalf("WriteSettings: %v", err)
+	}
+	settingsPath := filepath.Join(wt, ".claude", "settings.local.json")
+
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("reading rendered settings: %v", err)
+	}
+	for _, cmd := range rebaseGitCommands("main") {
+		if strings.Contains(string(before), cmd) {
+			t.Fatalf("test setup: rendered settings already cover %q before GrantRebaseAllow ran", cmd)
+		}
+	}
+
+	if gerr := GrantRebaseAllow(wt, "main", "make ci", ""); gerr != nil {
+		t.Fatalf("GrantRebaseAllow: %v", gerr)
+	}
+
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("reading patched settings: %v", err)
+	}
+	var settings permissionSettings
+	if err := json.Unmarshal(after, &settings); err != nil {
+		t.Fatalf("parsing patched settings: %v", err)
+	}
+	for _, want := range []string{"Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)", "Bash(make ci)"} {
+		if !slices.Contains(settings.Permissions.Allow, want) {
+			t.Errorf("patched settings allow missing %q: %v", want, settings.Permissions.Allow)
+		}
+	}
+}
+
+// TestGrantRebaseAllowIdempotent confirms a retried dispatch's second grant
+// doesn't duplicate the entries.
+func TestGrantRebaseAllowIdempotent(t *testing.T) {
+	wt := t.TempDir()
+	if err := WriteSettings(wt, nil, nil, nil, nil); err != nil {
+		t.Fatalf("WriteSettings: %v", err)
+	}
+	if err := GrantRebaseAllow(wt, "main", "", ""); err != nil {
+		t.Fatalf("first GrantRebaseAllow: %v", err)
+	}
+	if err := GrantRebaseAllow(wt, "main", "", ""); err != nil {
+		t.Fatalf("second GrantRebaseAllow: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(wt, ".claude", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("reading patched settings: %v", err)
+	}
+	var settings permissionSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parsing patched settings: %v", err)
+	}
+	count := 0
+	for _, a := range settings.Permissions.Allow {
+		if a == "Bash(git fetch origin main)" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("want the git fetch entry exactly once after two grants, got %d in %v", count, settings.Permissions.Allow)
+	}
+}
+
+// TestGrantRebaseAllowMissingSettingsFileNoop confirms a worktree never
+// provisioned through argus's normal spawn path (no settings.local.json at
+// all) is left alone rather than erroring: under dontAsk it can't run any
+// Bash command regardless of this grant, so there is nothing to patch.
+func TestGrantRebaseAllowMissingSettingsFileNoop(t *testing.T) {
+	if err := GrantRebaseAllow(t.TempDir(), "main", "", ""); err != nil {
+		t.Errorf("GrantRebaseAllow on a worktree with no settings.local.json should no-op, got %v", err)
+	}
+}
+
+// TestGrantRebaseAllowCorruptSettingsFileErrors confirms a settings.local.json
+// that exists but fails to parse surfaces as a real error rather than
+// silently leaving the worker's grant unpatched.
+func TestGrantRebaseAllowCorruptSettingsFileErrors(t *testing.T) {
+	wt := t.TempDir()
+	settingsPath := filepath.Join(wt, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("not json"), 0o644); err != nil {
+		t.Fatalf("seeding corrupt settings: %v", err)
+	}
+
+	err := GrantRebaseAllow(wt, "main", "", "")
+	if err == nil {
+		t.Fatal("want an error for a corrupt settings.local.json, got nil")
+	}
+	if !strings.Contains(err.Error(), "parsing settings") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+// TestGrantRebaseAllowStripsDenyFloorOverlappingVerifyCommand is the
+// regression test for the review finding that GrantRebaseAllow used to skip
+// stripDenyFloor: a misconfigured gate_verify_command (or ship_verify_command)
+// whose prefix overlaps a DenyFloor family — here, one starting with "git
+// push" — must never end up granted in the patched static settings.local.json,
+// the same backstop ResolvedAllowSet/ResolvedAllowForPhase already apply to
+// every other allow source. Without the fix, this exact string would have
+// been written unfiltered, reachable through the check-tool hook's own
+// fail-open path (a corrupt/unreadable status.json) as well as any dontAsk
+// call the static file itself gates.
+func TestGrantRebaseAllowStripsDenyFloorOverlappingVerifyCommand(t *testing.T) {
+	wt := t.TempDir()
+	if err := WriteSettings(wt, nil, nil, nil, nil); err != nil {
+		t.Fatalf("WriteSettings: %v", err)
+	}
+
+	maliciousVerify := "git push origin main --force"
+	if err := GrantRebaseAllow(wt, "main", "", maliciousVerify); err != nil {
+		t.Fatalf("GrantRebaseAllow: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(wt, ".claude", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("reading patched settings: %v", err)
+	}
+	var settings permissionSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parsing patched settings: %v", err)
+	}
+
+	overlapping := "Bash(" + maliciousVerify + ")"
+	if slices.Contains(settings.Permissions.Allow, overlapping) {
+		t.Errorf("patched settings allow must not carry a DenyFloor-overlapping verify command %q: %v", overlapping, settings.Permissions.Allow)
+	}
+	// The legitimate git fetch/merge grant for base must still land — only
+	// the DenyFloor-overlapping verify entry should be stripped.
+	for _, want := range []string{"Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)"} {
+		if !slices.Contains(settings.Permissions.Allow, want) {
+			t.Errorf("patched settings allow missing legitimate grant %q: %v", want, settings.Permissions.Allow)
+		}
 	}
 }
 

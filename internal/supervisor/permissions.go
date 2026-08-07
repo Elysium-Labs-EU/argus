@@ -107,26 +107,38 @@ func ResolvedAllowForPhase(phase protocol.Phase, worktree string, project protoc
 }
 
 // ResolvedAllowSet unions every protocol.ConfigurablePhases value's own
-// ResolvedAllowForPhase for worktree — the same computation settingsFor
-// bakes into settings.local.json, since that file is written once at
-// session launch and can't itself vary by a worker's current phase (the
-// live PreToolUse hook is what actually narrows a call back down to the
-// worker's current phase — see checkToolHook/PhaseAllowsMutation).
-// protocol.ConfigurablePhases deliberately excludes protocol.PhaseRebase:
-// this union backs a normal dispatch's static settings file and worker
-// brief, neither of which should preemptively advertise argus's own
-// rebase-dispatch mechanics to a worker that was never dispatched to
-// rebase. Exported so the worker brief (see briefFor) can state each
-// phase's own set in its own wording, sourced from the identical resolver
-// settingsFor renders from, rather than an independently maintained
-// sentence that could silently drift from what the rendered settings file
-// actually grants.
-func ResolvedAllowSet(project protocol.PhaseConfig, baseAllow, extraAllow []string, worktree string) []string {
+// ResolvedAllowForPhase for worktree, plus rebaseAllow — the same
+// computation settingsFor bakes into settings.local.json, since that file
+// is written once at session launch and can't itself vary by a worker's
+// current phase.
+//
+// protocol.ConfigurablePhases itself still excludes protocol.PhaseRebase —
+// it is argus-stamped at dispatch time, never a phase a worker reports or a
+// repo's .argus/config.yml phases.<name> policy can target (see its own doc
+// comment) — but the rebase phase's own git-command grant (rebaseAllow,
+// built by RebasePhaseAllow) is unioned in separately, unconditionally, not
+// gated behind the worker ever actually reaching PhaseRebase. That's
+// required, not merely convenient: the check-tool PreToolUse hook
+// (runWorkerCheckTool) is deny-only — it exits 2 to block a call, or exits 0
+// to defer to --permission-mode dontAsk's own decision, and dontAsk denies
+// anything absent from this static file outright, before the hook is even
+// asked. A hook can subtract from what dontAsk would otherwise allow; it can
+// never add to it. So rebaseAllow being present here is what makes the
+// rebase git commands reachable at all — the hook's own live recompute of
+// RebasePhaseAllow (see runWorkerCheckTool) is what then narrows enforcement
+// back down to only the rebase phase, denying the exact same commands (with
+// argus's own message, not dontAsk's generic one) for every other phase.
+// Exported so the worker brief (see briefFor) can state each phase's own set
+// in its own wording, sourced from the identical resolver settingsFor
+// renders from, rather than an independently maintained sentence that could
+// silently drift from what the rendered settings file actually grants.
+func ResolvedAllowSet(project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string, worktree string) []string {
 	var unioned []string
 	for _, p := range protocol.ConfigurablePhases {
 		unioned = append(unioned, ResolvedAllowForPhase(p, worktree, project, baseAllow, extraAllow)...)
 	}
-	return dedupeStrings(unioned)
+	unioned = append(unioned, rebaseAllow...)
+	return stripDenyFloor(dedupeStrings(unioned))
 }
 
 // dedupeStrings returns items with duplicates removed, keeping each value's
