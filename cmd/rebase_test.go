@@ -583,7 +583,7 @@ func TestDispatchRebaseWorkerGrantsRebaseAllowForDispatchBase(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()
 	initGitDirAt(t, worktree)
-	if err := supervisor.WriteSettings(worktree, nil, nil, nil, nil); err != nil {
+	if err := supervisor.WriteSettings(worktree, nil, nil, nil, nil, false, nil); err != nil {
 		t.Fatalf("seeding settings.local.json: %v", err)
 	}
 

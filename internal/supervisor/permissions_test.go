@@ -284,7 +284,7 @@ func TestResolvedAllowSet_IncludesGivenRebaseAllow(t *testing.T) {
 func TestResolvedAllowSet_MatchesSettingsForAllow(t *testing.T) {
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
 	rebaseAllow := RebasePhaseAllow("main", "", "")
-	settings := settingsFor("/tmp/wt", project, []string{"Bash(make *)"}, nil, rebaseAllow)
+	settings := settingsFor("/tmp/wt", project, []string{"Bash(make *)"}, nil, rebaseAllow, false, nil)
 	for _, want := range ResolvedAllowSet(project, []string{"Bash(make *)"}, nil, rebaseAllow, "/tmp/wt") {
 		if !slices.Contains(settings.Permissions.Allow, want) {
 			t.Errorf("settingsFor's rendered Allow %v missing %q from ResolvedAllowSet — brief and settings file must read the same resolved set", settings.Permissions.Allow, want)

@@ -867,7 +867,7 @@ func TestRebasePhaseAllowNoVerifyCommandConfigured(t *testing.T) {
 // comment).
 func TestGrantRebaseAllowPatchesRenderedSettings(t *testing.T) {
 	wt := t.TempDir()
-	if err := WriteSettings(wt, nil, nil, nil, nil); err != nil {
+	if err := WriteSettings(wt, nil, nil, nil, nil, false, nil); err != nil {
 		t.Fatalf("WriteSettings: %v", err)
 	}
 	settingsPath := filepath.Join(wt, ".claude", "settings.local.json")
@@ -905,7 +905,7 @@ func TestGrantRebaseAllowPatchesRenderedSettings(t *testing.T) {
 // doesn't duplicate the entries.
 func TestGrantRebaseAllowIdempotent(t *testing.T) {
 	wt := t.TempDir()
-	if err := WriteSettings(wt, nil, nil, nil, nil); err != nil {
+	if err := WriteSettings(wt, nil, nil, nil, nil, false, nil); err != nil {
 		t.Fatalf("WriteSettings: %v", err)
 	}
 	if err := GrantRebaseAllow(wt, "main", "", ""); err != nil {
@@ -978,7 +978,7 @@ func TestGrantRebaseAllowCorruptSettingsFileErrors(t *testing.T) {
 // call the static file itself gates.
 func TestGrantRebaseAllowStripsDenyFloorOverlappingVerifyCommand(t *testing.T) {
 	wt := t.TempDir()
-	if err := WriteSettings(wt, nil, nil, nil, nil); err != nil {
+	if err := WriteSettings(wt, nil, nil, nil, nil, false, nil); err != nil {
 		t.Fatalf("WriteSettings: %v", err)
 	}
 

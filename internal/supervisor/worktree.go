@@ -63,8 +63,12 @@ func RunWorktreeBootstrapCommand(ctx context.Context, worktree, cmdStr string) e
 // so the live PreToolUse hook (argus worker check-tool) can fold it into its
 // own phase-scoped allow check later — that hook runs as a fresh subprocess
 // per Bash call, with no access to this invocation's own --allow flags.
-func WriteSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string) error {
-	relPath, content, err := defaultAgent.RenderSettings(worktree, project, baseAllow, extraAllow, rebaseAllow)
+//
+// sandboxEnabled and sandboxAllowWrite are the experimental OS-sandbox
+// toggle (see Config.ExperimentalSandbox) and its filesystem write-allow
+// list, forwarded to RenderSettings unchanged.
+func WriteSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) error {
+	relPath, content, err := defaultAgent.RenderSettings(worktree, project, baseAllow, extraAllow, rebaseAllow, sandboxEnabled, sandboxAllowWrite)
 	if err != nil {
 		return fmt.Errorf("rendering settings: %w", err)
 	}

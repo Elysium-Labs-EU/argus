@@ -64,6 +64,17 @@
       "minimum": 0,
       "examples": [6, 0]
     },
+    "experimental_worker_sandbox": {
+      "type": "boolean",
+      "description": "EXPERIMENTAL, default false. Opts every spawned worker into Claude Code's own OS sandbox (seatbelt on macOS, bubblewrap on Linux), confining its Bash/subprocess vector so a worker cannot `cat ~/.ssh/id_ed25519` or similar even via a shelled-out command — complementing the in-process Read/Edit credential deny floor, which covers neither. Denies read access to a fixed set of credential files/directories (~/.ssh, ~/.aws, ~/.azure, ~/.config/gh, ~/.git-credentials, ~/.gnupg, ~/.docker/config.json, ~/.kube, ~/.npmrc, ~/.pypirc, ~/.gem/credentials); grants no broader filesystem allow/deny beyond that. An explicit --experimental-sandbox flag on supervise always overrides this.",
+      "examples": [true, false]
+    },
+    "sandbox_allow_write": {
+      "type": "array",
+      "description": "EXPERIMENTAL. Filesystem paths the OS sandbox (see experimental_worker_sandbox) must grant write access to on top of the worktree itself — e.g. a toolchain's shared build cache outside the worktree. Only consulted when experimental_worker_sandbox is true (via config or --experimental-sandbox).",
+      "items": { "type": "string" },
+      "examples": [["/Users/me/go/pkg/mod", "/Users/me/.cache/go-build"]]
+    },
     "allow": {
       "type": "array",
       "description": "Tool-permission patterns granted to every worker in every phase, on top of the code-guaranteed structural floor (read-only git, argus worker self-calls) — a static, phase-independent base list unioned with phases.<name>.allow's own per-phase addition for whichever phase a worker currently reports (see phases.working.allow below and supervisor.ResolvedAllowForPhase). An entry that could authorize a deny-floor command (git commit/push, argus ship/rework/review/supervise) is stripped after the union — it can never survive into a worker's actual resolved allow set, regardless of what this list says.",

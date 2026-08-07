@@ -98,6 +98,10 @@ func encodeYAML(cfg *Config) string {
 	if cfg.OwnerStaleAfter != "" {
 		fmt.Fprintf(&b, "owner_stale_after: %s\n", quoteYAML(cfg.OwnerStaleAfter))
 	}
+	if cfg.ExperimentalWorkerSandbox {
+		fmt.Fprintf(&b, "experimental_worker_sandbox: %t\n", cfg.ExperimentalWorkerSandbox)
+	}
+	writeYAMLList(&b, "sandbox_allow_write", cfg.SandboxAllowWrite)
 	writeYAMLList(&b, "allow", cfg.Allow)
 	if cfg.BriefNote != "" {
 		fmt.Fprintf(&b, "brief_note: %s\n", quoteYAML(cfg.BriefNote))
@@ -353,6 +357,8 @@ func listFieldFor(cfg *Config, key string) *[]string {
 		return &cfg.ProofRequiredPaths
 	case "always_review_paths":
 		return &cfg.AlwaysReviewPaths
+	case "sandbox_allow_write":
+		return &cfg.SandboxAllowWrite
 	default:
 		return nil
 	}
@@ -834,49 +840,60 @@ func assignAwaitingReviewKey(cfg *Config, key, value string, lines []string, nex
 	return 0, nil
 }
 
-// assignScalarField sets cfg's field for one of parseYAML's scalar keys
-// (base_branch, worker_placement, launcher, forge, status_page, worktree_dir,
-// brief_note, workspace_label_template, review_note, ship_verify_command,
-// gate_verify_command, worktree_bootstrap_command, title_prefix_template,
-// owner_stale_after, review_effort, max_diff_lines, rework_budget — key is already the
-// canonical field name by the time it reaches here, legacyFlatKeys having
-// been applied by the caller for a deprecated flat key, and this same switch
-// being reused directly by assignAwaitingReviewKey for these keys' current
-// nested location), reporting whether key was recognized so parseYAML can
-// error on an unrecognized top-level key instead of silently ignoring it.
-// line is the 1-based source line, for error messages.
+// scalarStringFields maps each of assignScalarField's plain string-valued
+// keys (base_branch, worker_placement, launcher, forge, status_page,
+// worktree_dir, brief_note, workspace_label_template, review_note,
+// ship_verify_command, gate_verify_command, worktree_bootstrap_command,
+// title_prefix_template, owner_stale_after, review_effort) to its
+// destination cfg field. Collapsed out of assignScalarField's own switch
+// into a lookup table so that function's cyclomatic complexity tracks the
+// keys that actually need parsing/conversion (experimental_worker_sandbox as
+// bool, max_diff_lines/rework_budget as int), not the total count of
+// plain-string keys — a straight "key: value" assignment carries no
+// branching of its own. Built fresh per call since each points at one cfg's
+// own fields.
+func scalarStringFields(cfg *Config) map[string]*string {
+	return map[string]*string{
+		"base_branch":                &cfg.BaseBranch,
+		"worker_placement":           &cfg.WorkerPlacement,
+		"launcher":                   &cfg.Launcher,
+		"forge":                      &cfg.Forge,
+		"status_page":                &cfg.StatusPage,
+		"worktree_dir":               &cfg.WorktreeDir,
+		"brief_note":                 &cfg.BriefNote,
+		"workspace_label_template":   &cfg.WorkspaceLabelTemplate,
+		"review_note":                &cfg.ReviewNote,
+		"ship_verify_command":        &cfg.ShipVerifyCommand,
+		"gate_verify_command":        &cfg.GateVerifyCommand,
+		"worktree_bootstrap_command": &cfg.WorktreeBootstrapCommand,
+		"title_prefix_template":      &cfg.TitlePrefixTemplate,
+		"owner_stale_after":          &cfg.OwnerStaleAfter,
+		"review_effort":              &cfg.ReviewEffort,
+	}
+}
+
+// assignScalarField sets cfg's field for one of parseYAML's scalar keys —
+// either a plain string assignment (see scalarStringFields) or one of the
+// few keys that also parse/convert the value (experimental_worker_sandbox as
+// bool, max_diff_lines/rework_budget as int) — key is already the canonical
+// field name by the time it reaches here, legacyFlatKeys having been applied
+// by the caller for a deprecated flat key, and this same function being
+// reused directly by assignAwaitingReviewKey for these keys' current nested
+// location. Reports whether key was recognized so parseYAML can error on an
+// unrecognized top-level key instead of silently ignoring it. line is the
+// 1-based source line, for error messages.
 func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
+	if dst, ok := scalarStringFields(cfg)[key]; ok {
+		*dst = value
+		return true, nil
+	}
 	switch key {
-	case "base_branch":
-		cfg.BaseBranch = value
-	case "worker_placement":
-		cfg.WorkerPlacement = value
-	case "launcher":
-		cfg.Launcher = value
-	case "forge":
-		cfg.Forge = value
-	case "status_page":
-		cfg.StatusPage = value
-	case "worktree_dir":
-		cfg.WorktreeDir = value
-	case "brief_note":
-		cfg.BriefNote = value
-	case "workspace_label_template":
-		cfg.WorkspaceLabelTemplate = value
-	case "review_note":
-		cfg.ReviewNote = value
-	case "ship_verify_command":
-		cfg.ShipVerifyCommand = value
-	case "gate_verify_command":
-		cfg.GateVerifyCommand = value
-	case "worktree_bootstrap_command":
-		cfg.WorktreeBootstrapCommand = value
-	case "title_prefix_template":
-		cfg.TitlePrefixTemplate = value
-	case "owner_stale_after":
-		cfg.OwnerStaleAfter = value
-	case "review_effort":
-		cfg.ReviewEffort = value
+	case "experimental_worker_sandbox":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return true, fmt.Errorf("config: line %d: experimental_worker_sandbox: %w", line, err)
+		}
+		cfg.ExperimentalWorkerSandbox = b
 	case "max_diff_lines":
 		n, err := strconv.Atoi(value)
 		if err != nil {

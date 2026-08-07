@@ -22,9 +22,12 @@ import (
 // schemas/config.schema.json). Phases is no longer exempt: promptPhaseAllow
 // walks every protocol.ConfigurablePhases value's own allow list — only its
 // Deny/Skip subkeys stay hand-edit-only.
-var initPromptExemptFields = map[string]string{}
+var initPromptExemptFields = map[string]string{
+	"ExperimentalWorkerSandbox": "experimental, opt-in via --experimental-sandbox or a hand-edited config key, not part of the interactive setup wizard",
+	"SandboxAllowWrite":         "only meaningful once ExperimentalWorkerSandbox is on; hand-edit-only like the phases.*.deny/skip subkeys",
+}
 
-const wantConfigFieldCount = 23 // repoconfig.Config's current field count
+const wantConfigFieldCount = 25 // repoconfig.Config's current field count
 
 func writeMarker(t *testing.T, dir, name string) {
 	t.Helper()
