@@ -1404,8 +1404,13 @@ func setupConflictedMerge(t *testing.T) (worktree, base string) {
 	// A real conflicting merge exits non-zero by design (that's what leaves
 	// MERGE_HEAD set for the worker to resolve) — the non-zero exit here is
 	// the expected outcome, not a test failure, so this bypasses gitDo's own
-	// t.Fatalf-on-error wrapper.
-	mergeCmd := exec.Command("git", "-C", wt, "merge", "origin/"+base, "--no-commit")
+	// t.Fatalf-on-error wrapper. The identity env matches gitDo/initGitRepo:
+	// without it, a CI runner with no configured git identity makes the merge
+	// fail on "Committer identity unknown" before it ever writes MERGE_HEAD,
+	// which reads as the expected conflict here but isn't one.
+	mergeCmd := exec.CommandContext(ctx, "git", "-C", wt, "merge", "origin/"+base, "--no-commit")
+	mergeCmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
 	if mergeErr := mergeCmd.Run(); mergeErr == nil {
 		t.Fatal("test setup: expected the merge to conflict, but it succeeded cleanly")
 	}
