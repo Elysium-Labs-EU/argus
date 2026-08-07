@@ -103,6 +103,57 @@ func ResolvedDenyForPhase(p Phase, project PhaseConfig) []string {
 	return denied
 }
 
+// credentialDenyFloor is CredentialDenyFloor's backing data, seeded from
+// Trail of Bits' trailofbits/claude-code-config: Claude Code permission
+// rules are deny-wins with no re-allow, so a denylist is the only
+// expressible defense for the Read/Edit tools, which read straight through
+// the OS sandbox that gates every Bash subprocess (a worker inherits the
+// orchestrator's HOME, so without this a worker's Read/Edit tools can reach
+// ~/.ssh, ~/.aws, and similar operator credential files the sandbox never
+// sees). Deliberately non-exhaustive: this narrows the common, well-known
+// credential shapes, not every file that could ever hold a secret.
+//
+// The tilde-slash form is used literally rather than through
+// absPathPattern's filesystem-absolute rendering: Read/Edit rules resolve
+// "~/" themselves, with no HOME expansion needed on argus's side.
+// ~/.claude/** is intentionally home-anchored only, never a bare wildcard —
+// a worktree has its own .claude/ a worker must be able to read.
+var credentialDenyFloor = []string{
+	"Read(~/.ssh/**)", "Edit(~/.ssh/**)",
+	"Read(~/.aws/**)",
+	"Read(~/.azure/**)",
+	"Read(~/.config/gh/**)",
+	"Read(~/.git-credentials)",
+	"Read(~/.gnupg/**)",
+	"Read(~/.docker/config.json)",
+	"Read(~/.kube/**)",
+	"Read(~/.npmrc)",
+	"Read(~/.npm/**)",
+	"Read(~/.pypirc)",
+	"Read(~/.gem/credentials)",
+	"Read(~/.claude/**)",
+	"Read(~/Library/Keychains/**)",
+	"Read(~/Library/Application Support/**/metamask*/**)",
+	"Read(~/Library/Application Support/**/electrum*/**)",
+	"Read(~/Library/Application Support/**/exodus*/**)",
+	"Read(~/Library/Application Support/**/phantom*/**)",
+	"Read(~/Library/Application Support/**/solflare*/**)",
+	"Edit(~/.bashrc)",
+	"Edit(~/.zshrc)",
+	"Read(**/.ssh/**)", "Edit(**/.ssh/**)",
+	"Read(**/.aws/**)",
+	"Read(**/.config/gh/**)",
+	"Read(**/.git-credentials)",
+	"Read(**/.netrc)",
+}
+
+// CredentialDenyFloor returns the Claude Code Read/Edit permission-deny
+// patterns carving operator credential files out of every worker's
+// settings.local.json — see credentialDenyFloor's doc comment.
+func CredentialDenyFloor() []string {
+	return slices.Clone(credentialDenyFloor)
+}
+
 // MatchesDeniedCommand reports whether cmd starts with one of denied's
 // prefixes, so "git commit -m foo" matches "git commit".
 func MatchesDeniedCommand(cmd string, denied []string) (matched string, ok bool) {
