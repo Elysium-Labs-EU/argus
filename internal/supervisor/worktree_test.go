@@ -36,7 +36,7 @@ func TestEnsureDistinctWorktreesRefusesCollision(t *testing.T) {
 
 func TestSettingsForConfinesToWorktree(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt, nil, nil, nil)
+	s := settingsFor(wt, nil, nil, nil, nil)
 
 	wantAllow := "Edit(" + absPathPattern(wt+"/**") + ")"
 	if !slices.Contains(s.Permissions.Allow, wantAllow) {
@@ -64,7 +64,7 @@ func TestSettingsForConfinesToWorktree(t *testing.T) {
 // the uncommitted working tree, so only read-only git plumbing is floor.
 func TestSettingsForNoRepoAllowIsToolchainNeutral(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt, nil, nil, nil)
+	s := settingsFor(wt, nil, nil, nil, nil)
 
 	for _, unwanted := range []string{"Bash(go build *)", "Bash(go test *)", "Bash(go vet *)", "Bash(go get *)", "Bash(make *)", "Bash(git add*)"} {
 		if slices.Contains(s.Permissions.Allow, unwanted) {
@@ -80,11 +80,29 @@ func TestSettingsForNoRepoAllowIsToolchainNeutral(t *testing.T) {
 
 func TestSettingsForAppendsRepoAndExtraAllow(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	s := settingsFor(wt, nil, []string{"Bash(task *)"}, []string{"Bash(npm *)"})
+	s := settingsFor(wt, nil, []string{"Bash(task *)"}, []string{"Bash(npm *)"}, nil)
 
 	for _, want := range []string{"Bash(task *)", "Bash(npm *)"} {
 		if !slices.Contains(s.Permissions.Allow, want) {
 			t.Errorf("allow missing %q; got %v", want, s.Permissions.Allow)
+		}
+	}
+}
+
+// TestSettingsForIncludesRebaseAllow is the regression test for the
+// dontAsk-era rebase deadlock: RebasePhaseAllow's git fetch/merge grant must
+// land in the rendered static Allow list unconditionally, since the
+// check-tool PreToolUse hook is deny-only and can never grant what dontAsk's
+// static file doesn't already permit (see RebasePhaseAllow's own doc
+// comment).
+func TestSettingsForIncludesRebaseAllow(t *testing.T) {
+	wt := "/repo/.claude/worktrees/feat-x"
+	rebaseAllow := RebasePhaseAllow("main", "", "")
+	s := settingsFor(wt, nil, nil, nil, rebaseAllow)
+
+	for _, want := range rebaseAllow {
+		if !slices.Contains(s.Permissions.Allow, want) {
+			t.Errorf("settingsFor allow missing rebase grant %q; got %v", want, s.Permissions.Allow)
 		}
 	}
 }
@@ -121,7 +139,7 @@ func TestRunWorktreeBootstrapCommandFailureCarriesOutput(t *testing.T) {
 
 func TestWriteSettingsWritesConfinedFile(t *testing.T) {
 	wt := t.TempDir()
-	if err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"}); err != nil {
+	if err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"}, nil); err != nil {
 		t.Fatalf("WriteSettings: %v", err)
 	}
 	path := filepath.Join(wt, ".claude", "settings.local.json")
@@ -155,7 +173,7 @@ func TestWriteSettingsWrapsMkdirAllError(t *testing.T) {
 		t.Fatalf("seeding blocking file: %v", err)
 	}
 
-	err := WriteSettings(wt, nil, nil, nil)
+	err := WriteSettings(wt, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("want error when settings dir can't be created, got nil")
 	}
@@ -173,7 +191,7 @@ func TestWriteSettingsWrapsWriteFileError(t *testing.T) {
 		t.Fatalf("seeding blocking dir: %v", err)
 	}
 
-	err := WriteSettings(wt, nil, nil, nil)
+	err := WriteSettings(wt, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("want error when settings file can't be written, got nil")
 	}
@@ -195,7 +213,7 @@ func TestWriteSettingsWrapsSaveExtraAllowError(t *testing.T) {
 		t.Fatalf("seeding blocking file: %v", err)
 	}
 
-	err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"})
+	err := WriteSettings(wt, nil, nil, []string{"Bash(task *)"}, nil)
 	if err == nil {
 		t.Fatal("want error when extra_allow.json's parent dir can't be created, got nil")
 	}
@@ -211,7 +229,7 @@ type fakeFailingAgent struct{}
 
 func (fakeFailingAgent) DefaultLauncher() string { return "" }
 
-func (fakeFailingAgent) RenderSettings(string, protocol.PhaseConfig, []string, []string) (string, []byte, error) {
+func (fakeFailingAgent) RenderSettings(string, protocol.PhaseConfig, []string, []string, []string) (string, []byte, error) {
 	return "", nil, errors.New("boom")
 }
 
@@ -222,7 +240,7 @@ func TestWriteSettingsWrapsRenderSettingsError(t *testing.T) {
 	defer func() { defaultAgent = orig }()
 	defaultAgent = fakeFailingAgent{}
 
-	err := WriteSettings(t.TempDir(), nil, nil, nil)
+	err := WriteSettings(t.TempDir(), nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("want error when RenderSettings fails, got nil")
 	}

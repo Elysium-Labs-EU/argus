@@ -290,17 +290,26 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	//
 	// Phase is stamped rebase, not left empty: the worker check-tool hook
 	// resolves cmd/worker_check_tool.go's runWorkerCheckTool live off this
-	// same Base/Phase pair to compute supervisor.RebasePhaseAllow's git
-	// fetch/merge + verify-command grant — no separate GrantExtraAllow call
-	// is needed here any more, since that grant now reaches the worker
-	// through its own governed phase instead of a blanket, phase-independent
-	// extraAllow injection.
+	// same Base/Phase pair to narrow the git fetch/merge + verify-command
+	// grant back down to only this phase (see RebasePhaseAllow's own doc
+	// comment for how that live recompute relates to the static grant below).
 	baseBranch := strings.TrimPrefix(opts.base, "origin/")
 	if werr := protocol.Write(protocol.StatusPath(opts.worktree), &protocol.Status{Base: baseBranch, Phase: protocol.PhaseRebase}); werr != nil {
 		return fmt.Errorf("recording base branch before rebase dispatch: %w", werr)
 	}
 	if werr := supervisor.WriteBrief(opts.worktree, supervisor.RebaseBrief(branch, opts.base)); werr != nil {
 		return werr
+	}
+	// dispatchRebaseWorker reuses the worktree's existing pane rather than
+	// launching a fresh Claude Code session, so a static settings.local.json
+	// rendered before this rebase was ever needed won't otherwise pick up
+	// the grant provisionWorktree already bakes in for the worktree's
+	// *spawn-time* base — GrantRebaseAllow patches it in for baseBranch, the
+	// base this specific dispatch is actually targeting (see its own doc
+	// comment).
+	cfg := loadProjectConfig(ctx, opts.worktree)
+	if gerr := supervisor.GrantRebaseAllow(opts.worktree, baseBranch, cfg.ShipVerifyCommand, cfg.GateVerifyCommand); gerr != nil {
+		return fmt.Errorf("granting rebase allow before dispatch: %w", gerr)
 	}
 
 	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget()); err != nil {

@@ -55,13 +55,16 @@ func RunWorktreeBootstrapCommand(ctx context.Context, worktree, cmdStr string) e
 // run before the worker's agent starts, since settings are read once at
 // session launch. This is the generic (agent-agnostic) mechanics — path and
 // content are the agent's own concern; see AgentAdapter.RenderSettings.
+// rebaseAllow is RebasePhaseAllow's own grant for this worktree's base (see
+// ResolvedAllowSet's doc comment for why it must be baked in here rather
+// than left to the live PreToolUse hook).
 //
 // It also persists extraAllow into the worktree (see protocol.SaveExtraAllow)
 // so the live PreToolUse hook (argus worker check-tool) can fold it into its
 // own phase-scoped allow check later — that hook runs as a fresh subprocess
 // per Bash call, with no access to this invocation's own --allow flags.
-func WriteSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string) error {
-	relPath, content, err := defaultAgent.RenderSettings(worktree, project, baseAllow, extraAllow)
+func WriteSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string) error {
+	relPath, content, err := defaultAgent.RenderSettings(worktree, project, baseAllow, extraAllow, rebaseAllow)
 	if err != nil {
 		return fmt.Errorf("rendering settings: %w", err)
 	}

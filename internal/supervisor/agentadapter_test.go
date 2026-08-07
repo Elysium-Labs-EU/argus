@@ -17,7 +17,7 @@ func TestClaudeCodeAdapterDefaultLauncher(t *testing.T) {
 
 func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	path, content, err := (claudeCodeAdapter{}).RenderSettings(wt, nil, []string{"Bash(pnpm *)"}, []string{"Bash(task *)"})
+	path, content, err := (claudeCodeAdapter{}).RenderSettings(wt, nil, []string{"Bash(pnpm *)"}, []string{"Bash(task *)"}, nil)
 	if err != nil {
 		t.Fatalf("RenderSettings: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 
 func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	settings := settingsFor(wt, nil, nil, nil)
+	settings := settingsFor(wt, nil, nil, nil, nil)
 
 	want := []string{
 		"Edit(" + absPathPattern(wt+"/.claude/settings.local.json") + ")",
@@ -72,7 +72,7 @@ func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 // with no human present to answer it, every project MCP server must already
 // be pre-approved before the worker's launcher ever starts.
 func TestSettingsForEnablesAllProjectMcpServers(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil)
 	if !settings.EnableAllProjectMcpServers {
 		t.Error("expected EnableAllProjectMcpServers to be true so the first-run MCP consent gate never blocks a headless worker")
 	}
@@ -80,7 +80,7 @@ func TestSettingsForEnablesAllProjectMcpServers(t *testing.T) {
 
 func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	settings := settingsFor(wt, nil, nil, nil)
+	settings := settingsFor(wt, nil, nil, nil, nil)
 
 	want := []string{
 		"Edit(" + absPathPattern(wt+"/.claude/argus/**") + ")",
@@ -109,7 +109,7 @@ func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
 // slice AlwaysDeniedCommands/AskGatedCommands feed every brief's NeverRunBrief
 // clause, so the deny list and a brief's own wording can never drift apart.
 func TestSettingsForDenyListMatchesDenyFloor(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil)
 	for _, cmd := range protocol.DenyFloor() {
 		want := "Bash(" + cmd + ":*)"
 		if !slices.Contains(settings.Permissions.Deny, want) {
@@ -126,7 +126,7 @@ func TestSettingsForDenyListMatchesDenyFloor(t *testing.T) {
 // orchestrator's own ~/.ssh, ~/.aws, and similar credential files.
 func TestSettingsForDeniesCredentialFiles(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	settings := settingsFor(wt, nil, nil, nil)
+	settings := settingsFor(wt, nil, nil, nil, nil)
 
 	for _, entry := range protocol.CredentialDenyFloor() {
 		if !slices.Contains(settings.Permissions.Deny, entry) {
@@ -154,7 +154,7 @@ func TestSettingsForDeniesCredentialFiles(t *testing.T) {
 // worker's *current* phase; see cmd/worker_check_tool.go).
 func TestSettingsForAllowUnionsEveryPhase(t *testing.T) {
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", project, nil, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", project, nil, nil, nil)
 	if !slices.Contains(settings.Permissions.Allow, "Bash(go test*)") {
 		t.Errorf("allow list missing phases.working.allow entry; got %v", settings.Permissions.Allow)
 	}
@@ -169,7 +169,7 @@ func TestSettingsForAllowUnionsEveryPhase(t *testing.T) {
 // DeniedInPhase's/ResolvedAllowForPhase's live per-phase enforcement depends
 // on this hook actually being present in every rendered settings file.
 func TestSettingsForWiresCheckToolHook(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil)
 	if len(settings.Hooks.PreToolUse) != 3 {
 		t.Fatalf("PreToolUse hooks = %d, want 3", len(settings.Hooks.PreToolUse))
 	}
@@ -224,7 +224,7 @@ func TestRecordPlanHooksShape(t *testing.T) {
 // HasFreshPlanEvidence would have nothing to check against for a normal
 // argus-spawned worker.
 func TestSettingsForWiresRecordPlanHook(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil)
 	if len(settings.Hooks.PostToolUse) != 2 {
 		t.Fatalf("PostToolUse hooks = %d, want 2", len(settings.Hooks.PostToolUse))
 	}

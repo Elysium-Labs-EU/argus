@@ -570,6 +570,48 @@ func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
 	}
 }
 
+// TestDispatchRebaseWorkerGrantsRebaseAllowForDispatchBase is the regression
+// test for GrantRebaseAllow's dispatch-time role: dispatchRebaseWorker reuses
+// the worktree's existing pane rather than launching a fresh Claude Code
+// session, so a settings.local.json rendered before this rebase was ever
+// needed (or rendered for a different base than this specific `argus rebase`
+// call is targeting) must still end up carrying the grant for the base
+// actually in play here.
+func TestDispatchRebaseWorkerGrantsRebaseAllowForDispatchBase(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
+	if err := supervisor.WriteSettings(worktree, nil, nil, nil, nil); err != nil {
+		t.Fatalf("seeding settings.local.json: %v", err)
+	}
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		fresh := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now()}
+		_ = protocol.Write(protocol.StatusPath(worktree), fresh)
+	}()
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("dispatchRebaseWorker: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(worktree, ".claude", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("reading settings.local.json: %v", err)
+	}
+	for _, want := range []string{"Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("settings.local.json should carry the rebase grant after dispatch, missing %q:\n%s", want, data)
+		}
+	}
+}
+
 // setupRebaseUncommittedResolution builds a bare origin, publishes feat-x to
 // it, then leaves an uncommitted file change in the worktree — the shape
 // RebaseBrief now asks a worker to leave behind (conflict resolved, merge

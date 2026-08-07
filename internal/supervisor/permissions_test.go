@@ -238,7 +238,7 @@ func TestResolvedAllowSet_UnionsAcrossPhases(t *testing.T) {
 		protocol.PhaseWorking:  {Allow: []string{"Bash(go test*)"}},
 		protocol.PhasePlanning: {Allow: []string{"Bash(go vet*)"}},
 	}
-	got := ResolvedAllowSet(project, []string{"Bash(make *)"}, []string{"Bash(npm ci*)"}, "/tmp/wt")
+	got := ResolvedAllowSet(project, []string{"Bash(make *)"}, []string{"Bash(npm ci*)"}, nil, "/tmp/wt")
 	for _, want := range []string{"Bash(go test*)", "Bash(go vet*)", "Bash(make *)", "Bash(npm ci*)"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("resolved allow set %v missing %q — must union across every configurable phase, not just one", got, want)
@@ -246,27 +246,44 @@ func TestResolvedAllowSet_UnionsAcrossPhases(t *testing.T) {
 	}
 }
 
-// TestResolvedAllowSet_ExcludesRebase confirms the static-file/brief union
-// never preemptively advertises argus's own rebase-dispatch mechanics to a
-// worker that was never dispatched to rebase — ResolvedAllowSet unions
-// protocol.ConfigurablePhases, which deliberately excludes protocol.PhaseRebase.
-func TestResolvedAllowSet_ExcludesRebase(t *testing.T) {
+// TestResolvedAllowSet_ExcludesRebaseWhenNotGiven confirms
+// protocol.ConfigurablePhases itself still excludes protocol.PhaseRebase — a
+// nil rebaseAllow (no worktree base known yet) carries no rebase-only grant
+// through the per-phase union.
+func TestResolvedAllowSet_ExcludesRebaseWhenNotGiven(t *testing.T) {
 	if slices.Contains(protocol.ConfigurablePhases, protocol.PhaseRebase) {
 		t.Fatal("protocol.ConfigurablePhases must not include PhaseRebase — rebase is argus-stamped, never worker-reported or repo-configurable")
 	}
 	rebaseOnly := RebasePhaseAllow("main", "", "")
-	got := ResolvedAllowSet(nil, nil, nil, "/tmp/wt")
+	got := ResolvedAllowSet(nil, nil, nil, nil, "/tmp/wt")
 	for _, cmd := range rebaseOnly {
 		if slices.Contains(got, cmd) {
-			t.Errorf("ResolvedAllowSet unexpectedly includes rebase-only grant %q: %v", cmd, got)
+			t.Errorf("ResolvedAllowSet unexpectedly includes rebase-only grant %q with no rebaseAllow given: %v", cmd, got)
+		}
+	}
+}
+
+// TestResolvedAllowSet_IncludesGivenRebaseAllow is the regression test for
+// the dontAsk pre-hook deadlock: the check-tool PreToolUse hook is deny-only
+// (see RebasePhaseAllow's own doc comment), so the rebase phase's git grant
+// must be present in the static Allow list ResolvedAllowSet builds — a live
+// hook recompute can narrow it back down per phase but can never add it in
+// the first place.
+func TestResolvedAllowSet_IncludesGivenRebaseAllow(t *testing.T) {
+	rebaseAllow := RebasePhaseAllow("main", "", "make ci")
+	got := ResolvedAllowSet(nil, nil, nil, rebaseAllow, "/tmp/wt")
+	for _, cmd := range rebaseAllow {
+		if !slices.Contains(got, cmd) {
+			t.Errorf("ResolvedAllowSet missing given rebaseAllow entry %q: %v", cmd, got)
 		}
 	}
 }
 
 func TestResolvedAllowSet_MatchesSettingsForAllow(t *testing.T) {
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
-	settings := settingsFor("/tmp/wt", project, []string{"Bash(make *)"}, nil)
-	for _, want := range ResolvedAllowSet(project, []string{"Bash(make *)"}, nil, "/tmp/wt") {
+	rebaseAllow := RebasePhaseAllow("main", "", "")
+	settings := settingsFor("/tmp/wt", project, []string{"Bash(make *)"}, nil, rebaseAllow)
+	for _, want := range ResolvedAllowSet(project, []string{"Bash(make *)"}, nil, rebaseAllow, "/tmp/wt") {
 		if !slices.Contains(settings.Permissions.Allow, want) {
 			t.Errorf("settingsFor's rendered Allow %v missing %q from ResolvedAllowSet — brief and settings file must read the same resolved set", settings.Permissions.Allow, want)
 		}
