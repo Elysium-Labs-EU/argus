@@ -2,11 +2,13 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -329,13 +331,30 @@ decision only the supervisor can make.
 // RebaseBrief instructs the rebase worker to run for base, plus the repo's
 // own configured verify command (shipVerifyCommand, or gateVerifyCommand if
 // that's unset — either confirms the merge, so either is granted whenever
-// set) — no more. cmd/worker_check_tool.go's runWorkerCheckTool computes
-// this live, from the worktree's own status.Base and its repo's config, and
-// folds it into ResolvedAllowForPhase's extraAllow only while the worker is
-// actually reporting protocol.PhaseRebase — dispatchRebaseWorker itself
-// grants nothing statically, unlike the blanket extraAllow injection this
-// replaced, which reached every phase because the rebase worker used to run
-// in the ungoverned Phase(""), not a phase any resolution could target.
+// set) — no more. Three call sites share this identical list for three
+// different jobs, none of which can substitute for either of the others:
+//
+//   - provisionWorktree (loop.go) bakes it into the worktree's static
+//     settings.local.json at spawn, unconditionally — see ResolvedAllowSet's
+//     doc comment for why: cmd/worker_check_tool.go's runWorkerCheckTool
+//     (the PreToolUse hook) is deny-only, it can exit 2 to block a call or
+//     exit 0 to defer to --permission-mode dontAsk's own decision, and
+//     dontAsk denies anything absent from the static file outright before
+//     the hook is ever asked. A hook can never grant what the static file
+//     doesn't already permit.
+//   - runWorkerCheckTool itself recomputes the identical list live, from the
+//     worktree's own status.Base and its repo's config, folding it into
+//     ResolvedAllowForPhase's extraAllow only while the worker is actually
+//     reporting protocol.PhaseRebase. This is what narrows enforcement back
+//     down to the rebase phase specifically: the same fetch/merge commands
+//     dontAsk's static file now permits in every phase are still denied
+//     live, with argus's own message, whenever the worker reports anything
+//     other than rebase.
+//   - GrantRebaseAllow patches the identical list into the worktree's
+//     static file again at actual rebase-dispatch time, for the base that
+//     specific `argus rebase` invocation is targeting — a safety net for a
+//     --base differing from the worktree's original spawn base, or a
+//     worktree whose settings.local.json predates this whole mechanism.
 func RebasePhaseAllow(base, shipVerifyCommand, gateVerifyCommand string) []string {
 	cmds := rebaseGitCommands(base)
 	allow := []string{"Bash(" + cmds[0] + ")", "Bash(" + cmds[1] + ")"}
@@ -345,6 +364,114 @@ func RebasePhaseAllow(base, shipVerifyCommand, gateVerifyCommand string) []strin
 		}
 	}
 	return dedupeStrings(allow)
+}
+
+// GrantRebaseAllow patches worktree's already-rendered settings.local.json,
+// adding RebasePhaseAllow's git fetch/merge and verify-command entries to
+// its static Allow list for the base this specific rebase dispatch is
+// actually targeting. provisionWorktree already bakes the same grant in at
+// spawn time, for the worktree's own spawn-time base (see RebasePhaseAllow's
+// own doc comment for why the static file needs it at all) — so in the
+// common case, where `argus rebase` targets the same base the worktree was
+// originally spawned against, this call is a no-op dedupe. It earns its
+// keep in two narrower cases a spawn-time-only bake can't cover: an explicit
+// `argus rebase --base` naming a different branch than the worktree spawned
+// against (rebaseGitCommands renders an *exact*, unwildcarded command string
+// per base, so a mismatched base's grant is simply absent), and a worktree
+// whose settings.local.json was rendered before this mechanism existed at
+// all. dispatchRebaseWorker calls this right before redispatching into the
+// worktree's existing pane.
+//
+// A worktree with no settings.local.json yet (never provisioned through
+// argus's normal spawn path, e.g. --attach) has nothing to patch and can't
+// run any Bash command under dontAsk regardless of this grant, so that case
+// is left alone rather than treated as an error. Any other read/parse/write
+// failure is returned, since a rebase dispatch into a worktree whose
+// permission file argus itself can't update would otherwise silently
+// dispatch a worker that's guaranteed to get stuck.
+//
+// The patched Allow list is run through stripDenyFloor, same as
+// ResolvedAllowSet's own union: this static file isn't just what a
+// well-behaved live hook narrows down from, it's also the backstop the
+// check-tool hook's fail-open path (a corrupt/unreadable status.json, a
+// malformed hook payload) falls all the way back to, so a repo's own
+// misconfigured ship_verify_command/gate_verify_command can't smuggle a
+// DenyFloor-overlapping command (e.g. one containing "git push") into it.
+func GrantRebaseAllow(worktree, base, shipVerifyCommand, gateVerifyCommand string) error {
+	path := filepath.Join(worktree, ".claude", "settings.local.json")
+	data, err := os.ReadFile(path) //nolint:gosec // worktree-scoped settings path, argus-derived
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("reading settings before granting rebase allow: %w", err)
+	}
+	var settings permissionSettings
+	if uerr := json.Unmarshal(data, &settings); uerr != nil {
+		return fmt.Errorf("parsing settings before granting rebase allow: %w", uerr)
+	}
+	// stripDenyFloor, not just dedupeStrings: settings.Permissions.Allow here
+	// is untrusted the same way ResolvedAllowSet's own union is — a
+	// misconfigured ship_verify_command/gate_verify_command could otherwise
+	// widen far enough to cover a DenyFloor family (e.g. a verify command
+	// containing "git push"), and this file is also the backstop the
+	// PreToolUse hook's own fail-open path (a corrupt/unreadable status.json)
+	// falls back on, not just RebasePhaseAllow's two fixed git strings.
+	settings.Permissions.Allow = stripDenyFloor(dedupeStrings(append(settings.Permissions.Allow, RebasePhaseAllow(base, shipVerifyCommand, gateVerifyCommand)...)))
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding settings after granting rebase allow: %w", err)
+	}
+	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil { //nolint:gosec // local settings file, not a secret
+		return fmt.Errorf("writing settings after granting rebase allow: %w", err)
+	}
+	return nil
+}
+
+// AbortInProgressMerge clears a leftover unresolved `git merge --no-commit`
+// out of worktree before a rebase worker is (re)dispatched into it. A prior
+// dispatch can leave one behind — the worker was blocked before it could
+// finish resolving, or the run otherwise ended mid-conflict — and the
+// worker's very first instructed command, `git merge origin/<base>
+// --no-commit`, refuses to start a second merge while MERGE_HEAD is still
+// set, wedging every retry against that worktree identically. A worktree
+// with no merge in progress is left untouched.
+func AbortInProgressMerge(ctx context.Context, worktree string) error {
+	inProgress, err := mergeInProgress(ctx, worktree)
+	if err != nil {
+		return err
+	}
+	if !inProgress {
+		return nil
+	}
+	if _, err := git(ctx, worktree, "merge", "--abort"); err != nil {
+		return fmt.Errorf("aborting in-progress merge before rebase dispatch: %w", err)
+	}
+	return nil
+}
+
+// mergeInProgress reports whether worktree has an unresolved merge, i.e.
+// MERGE_HEAD is present under its git dir. Resolved via `git rev-parse
+// --git-dir` rather than assuming <worktree>/.git/MERGE_HEAD: a linked
+// worktree's ".git" is a file pointing elsewhere, so MERGE_HEAD lives under
+// the main repo's .git/worktrees/<name>/ directory, not inside worktree
+// itself.
+func mergeInProgress(ctx context.Context, worktree string) (bool, error) {
+	gitDir, err := git(ctx, worktree, "rev-parse", "--git-dir")
+	if err != nil {
+		return false, fmt.Errorf("resolving git dir: %w", err)
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(worktree, gitDir)
+	}
+	_, err = os.Stat(filepath.Join(gitDir, "MERGE_HEAD"))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("checking for an in-progress merge: %w", err)
 }
 
 // InvalidateStatus removes a worktree's status and verdict files, if present,

@@ -97,11 +97,23 @@ func runWorkerCheckTool(ctx context.Context, stdin io.Reader, stderr io.Writer) 
 	// loadProjectConfig takes for an unresolvable repo config.
 	extraAllow, _ := protocol.LoadExtraAllow(in.CWD)
 	if cur.Phase == protocol.PhaseRebase {
-		// The rebase phase's own grant is computed live, here, from this
-		// worktree's own recorded Base and its repo's configured verify
-		// command — never persisted or blanket-injected — so it reaches the
-		// worker only while it is actually reporting rebase, not every
-		// phase the way the extraAllow injection this replaced once did.
+		// This hook is deny-only: it either exits 2 to block a call, or
+		// exits 0 to defer to --permission-mode dontAsk's own decision — it
+		// can never force-allow something dontAsk's static settings.local.json
+		// doesn't already permit. provisionWorktree bakes RebasePhaseAllow's
+		// git fetch/merge grant into that static file unconditionally, for
+		// every worker regardless of phase (see ResolvedAllowSet's doc
+		// comment), which is what makes these commands reachable at all.
+		// Recomputing the identical grant live here, from this worktree's
+		// own recorded Base and its repo's configured verify command, is
+		// what narrows enforcement back down to only the rebase phase: below,
+		// evaluateToolGate blocks any command absent from `allowed` — without
+		// this branch, git fetch/merge would fall through as "not in the
+		// resolved allow set" and exit 2 even while the worker is actually
+		// reporting rebase; every other phase deliberately omits this branch,
+		// so the exact same commands the static file broadly permits still
+		// get blocked here, with argus's own message rather than dontAsk's
+		// generic one.
 		extraAllow = append(slices.Clone(extraAllow), supervisor.RebasePhaseAllow(cur.Base, cfg.ShipVerifyCommand, cfg.GateVerifyCommand)...)
 	}
 
@@ -143,7 +155,7 @@ func loadCurrentPhase(worktree string) (protocol.Status, error) {
 // denyReason's Bash-command messages.
 func mutationDenyReason(phase protocol.Phase) string {
 	return fmt.Sprintf(
-		"argus: file edits are denied during phase %q — only working and self_test allow mutating tracked files.\n"+
+		"argus: file edits are denied during phase %q — only working, self_test, and rebase allow mutating tracked files.\n"+
 			"If you genuinely need to edit a file here, report `blocked` and explain why.",
 		phase,
 	)

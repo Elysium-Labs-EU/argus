@@ -222,11 +222,16 @@ func hasTraversalSegment(s string) bool {
 // the task text plus the shared status-writing contract so writer and reader
 // can't drift. project, baseAllow, and extraAllow are forwarded to settingsFor
 // so every worker's allowlist reflects the same repo-config and
-// operator-supplied extension the dry-run preview shows. sandboxEnabled and
-// sandboxAllowWrite are the experimental OS-sandbox toggle (see
-// Config.ExperimentalSandbox), forwarded to settingsFor unchanged so a
-// --dry-run preview renders the same sandbox block a real spawn would write.
-func BuildPlan(workers []Worker, base string, project protocol.PhaseConfig, baseAllow, extraAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) ([]WorkerPlan, error) {
+// operator-supplied extension the dry-run preview shows. gateVerifyCommand
+// feeds RebasePhaseAllow (alongside base) so the plan's own Settings preview
+// matches what provisionWorktree actually renders (see its own rebaseAllow
+// computation) — a fresh worker never uses a ship_verify_command of its own
+// at this point, only the gate's. sandboxEnabled and sandboxAllowWrite are
+// the experimental OS-sandbox toggle (see Config.ExperimentalSandbox),
+// forwarded to settingsFor unchanged so a --dry-run preview renders the same
+// sandbox block a real spawn would write.
+func BuildPlan(workers []Worker, base string, project protocol.PhaseConfig, baseAllow, extraAllow []string, gateVerifyCommand string, sandboxEnabled bool, sandboxAllowWrite []string) ([]WorkerPlan, error) {
+	rebaseAllow := RebasePhaseAllow(strings.TrimPrefix(base, "origin/"), "", gateVerifyCommand)
 	plans := make([]WorkerPlan, len(workers))
 	for i := range workers {
 		w := workers[i]
@@ -253,7 +258,7 @@ func BuildPlan(workers []Worker, base string, project protocol.PhaseConfig, base
 		}
 		plans[i] = WorkerPlan{
 			Worker:   w,
-			Settings: settingsFor(w.Worktree, project, baseAllow, extraAllow, sandboxEnabled, sandboxAllowWrite),
+			Settings: settingsFor(w.Worktree, project, baseAllow, extraAllow, rebaseAllow, sandboxEnabled, sandboxAllowWrite),
 			Brief:    briefFor(&w, base, project, baseAllow, extraAllow),
 		}
 	}
@@ -531,7 +536,7 @@ func envMap(env []string) map[string]string {
 // worker, watches and judges each one's status independently until it reaches a
 // terminal phase or ctx is canceled, then prints a metrics report.
 func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error {
-	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow, cfg.ExperimentalSandbox, cfg.SandboxAllowWrite)
+	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow, cfg.GateVerifyCommand, cfg.ExperimentalSandbox, cfg.SandboxAllowWrite)
 	if err != nil {
 		return err
 	}
@@ -622,7 +627,7 @@ func judgeEach(ctx context.Context, cfg *Config, states []*workerState) {
 // or grinding on an existing PR branch — under the same deterministic observation
 // instead of eyeballing its pane scrollback.
 func Attach(ctx context.Context, cfg *Config, workers []Worker) error {
-	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow, cfg.ExperimentalSandbox, cfg.SandboxAllowWrite)
+	plans, err := BuildPlan(workers, cfg.Base, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow, cfg.GateVerifyCommand, cfg.ExperimentalSandbox, cfg.SandboxAllowWrite)
 	if err != nil {
 		return err
 	}
@@ -1252,7 +1257,13 @@ func provisionWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) error {
 	if err := protocol.Write(protocol.StatusPath(p.Worktree), &protocol.Status{Base: baseBranch, Phase: protocol.PhasePlanning}); err != nil {
 		return fmt.Errorf("recording base branch for %s: %w", p.Task, err)
 	}
-	if err := WriteSettings(p.Worktree, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow, cfg.ExperimentalSandbox, cfg.SandboxAllowWrite); err != nil {
+	// Baked into the rendered settings file unconditionally, not gated
+	// behind this worker ever actually reaching PhaseRebase — see
+	// ResolvedAllowSet's doc comment for why a dontAsk worktree needs the
+	// rebase phase's own git-command grant present from spawn, not just
+	// computed live once a rebase is dispatched.
+	rebaseAllow := RebasePhaseAllow(baseBranch, "", cfg.GateVerifyCommand)
+	if err := WriteSettings(p.Worktree, cfg.RepoPhases, cfg.RepoAllow, cfg.ExtraAllow, rebaseAllow, cfg.ExperimentalSandbox, cfg.SandboxAllowWrite); err != nil {
 		return fmt.Errorf("writing settings for %s: %w", p.Task, err)
 	}
 	if err := WriteBrief(p.Worktree, p.Brief); err != nil {

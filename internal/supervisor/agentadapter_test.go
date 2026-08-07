@@ -17,7 +17,7 @@ func TestClaudeCodeAdapterDefaultLauncher(t *testing.T) {
 
 func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	path, content, err := (claudeCodeAdapter{}).RenderSettings(wt, nil, []string{"Bash(pnpm *)"}, []string{"Bash(task *)"}, false, nil)
+	path, content, err := (claudeCodeAdapter{}).RenderSettings(wt, nil, []string{"Bash(pnpm *)"}, []string{"Bash(task *)"}, nil, false, nil)
 	if err != nil {
 		t.Fatalf("RenderSettings: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestClaudeCodeAdapterRenderSettings(t *testing.T) {
 
 func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	settings := settingsFor(wt, nil, nil, nil, false, nil)
+	settings := settingsFor(wt, nil, nil, nil, nil, false, nil)
 
 	want := []string{
 		"Edit(" + absPathPattern(wt+"/.claude/settings.local.json") + ")",
@@ -72,7 +72,7 @@ func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 // with no human present to answer it, every project MCP server must already
 // be pre-approved before the worker's launcher ever starts.
 func TestSettingsForEnablesAllProjectMcpServers(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, false, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil, false, nil)
 	if !settings.EnableAllProjectMcpServers {
 		t.Error("expected EnableAllProjectMcpServers to be true so the first-run MCP consent gate never blocks a headless worker")
 	}
@@ -80,7 +80,7 @@ func TestSettingsForEnablesAllProjectMcpServers(t *testing.T) {
 
 func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
 	wt := "/repo/.claude/worktrees/feat-x"
-	settings := settingsFor(wt, nil, nil, nil, false, nil)
+	settings := settingsFor(wt, nil, nil, nil, nil, false, nil)
 
 	want := []string{
 		"Edit(" + absPathPattern(wt+"/.claude/argus/**") + ")",
@@ -109,11 +109,39 @@ func TestSettingsForDeniesEditOfControlPlaneFiles(t *testing.T) {
 // slice AlwaysDeniedCommands/AskGatedCommands feed every brief's NeverRunBrief
 // clause, so the deny list and a brief's own wording can never drift apart.
 func TestSettingsForDenyListMatchesDenyFloor(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, false, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil, false, nil)
 	for _, cmd := range protocol.DenyFloor() {
 		want := "Bash(" + cmd + ":*)"
 		if !slices.Contains(settings.Permissions.Deny, want) {
 			t.Errorf("deny list missing %q for DenyFloor entry %q; got %v", want, cmd, settings.Permissions.Deny)
+		}
+	}
+}
+
+// TestSettingsForDeniesCredentialFiles confirms settingsFor carries every
+// protocol.CredentialDenyFloor() entry into the rendered Permissions.Deny,
+// alongside (not instead of) the pre-existing control-plane/self-settings
+// deny entries — a worker's Read tool bypasses the OS sandbox entirely, so
+// this static list is the only thing standing between it and the
+// orchestrator's own ~/.ssh, ~/.aws, and similar credential files.
+func TestSettingsForDeniesCredentialFiles(t *testing.T) {
+	wt := "/repo/.claude/worktrees/feat-x"
+	settings := settingsFor(wt, nil, nil, nil, nil, false, nil)
+
+	for _, entry := range protocol.CredentialDenyFloor() {
+		if !slices.Contains(settings.Permissions.Deny, entry) {
+			t.Errorf("deny list missing credential-floor entry %q; got %v", entry, settings.Permissions.Deny)
+		}
+	}
+
+	preExisting := []string{
+		"Bash(rm -rf *)",
+		"Edit(" + absPathPattern(wt+"/.claude/settings.local.json") + ")",
+		"Edit(" + absPathPattern(wt+"/.claude/argus/**") + ")",
+	}
+	for _, entry := range preExisting {
+		if !slices.Contains(settings.Permissions.Deny, entry) {
+			t.Errorf("deny list lost pre-existing entry %q after adding credential floor; got %v", entry, settings.Permissions.Deny)
 		}
 	}
 }
@@ -126,7 +154,7 @@ func TestSettingsForDenyListMatchesDenyFloor(t *testing.T) {
 // worker's *current* phase; see cmd/worker_check_tool.go).
 func TestSettingsForAllowUnionsEveryPhase(t *testing.T) {
 	project := protocol.PhaseConfig{protocol.PhaseWorking: {Allow: []string{"Bash(go test*)"}}}
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", project, nil, nil, false, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", project, nil, nil, nil, false, nil)
 	if !slices.Contains(settings.Permissions.Allow, "Bash(go test*)") {
 		t.Errorf("allow list missing phases.working.allow entry; got %v", settings.Permissions.Allow)
 	}
@@ -141,7 +169,7 @@ func TestSettingsForAllowUnionsEveryPhase(t *testing.T) {
 // DeniedInPhase's/ResolvedAllowForPhase's live per-phase enforcement depends
 // on this hook actually being present in every rendered settings file.
 func TestSettingsForWiresCheckToolHook(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, false, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil, false, nil)
 	if len(settings.Hooks.PreToolUse) != 3 {
 		t.Fatalf("PreToolUse hooks = %d, want 3", len(settings.Hooks.PreToolUse))
 	}
@@ -196,7 +224,7 @@ func TestRecordPlanHooksShape(t *testing.T) {
 // HasFreshPlanEvidence would have nothing to check against for a normal
 // argus-spawned worker.
 func TestSettingsForWiresRecordPlanHook(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, false, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil, false, nil)
 	if len(settings.Hooks.PostToolUse) != 2 {
 		t.Fatalf("PostToolUse hooks = %d, want 2", len(settings.Hooks.PostToolUse))
 	}
@@ -223,7 +251,7 @@ func TestSettingsForWiresRecordPlanHook(t *testing.T) {
 // unconfigured or non-opted-in repo's worker is unaffected by this feature
 // existing.
 func TestSettingsForSandboxDisabledByDefault(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, false, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil, false, nil)
 	if settings.Sandbox != nil {
 		t.Errorf("Sandbox = %+v, want nil (no sandbox key rendered) when the toggle is off", settings.Sandbox)
 	}
@@ -234,7 +262,7 @@ func TestSettingsForSandboxDisabledByDefault(t *testing.T) {
 // filesystem.allowWrite populated from sandbox_allow_write.
 func TestSettingsForSandboxEnabledRendersFullBlock(t *testing.T) {
 	allowWrite := []string{"/home/me/go/pkg/mod", "/home/me/.cache/go-build"}
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, true, allowWrite)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil, true, allowWrite)
 	if settings.Sandbox == nil {
 		t.Fatal("Sandbox = nil, want a rendered block when the toggle is on")
 	}
@@ -286,7 +314,7 @@ func TestSettingsForSandboxEnabledRendersFullBlock(t *testing.T) {
 // sandbox_allow_write has no entries — see sandboxSettings' own doc comment
 // on why no whole-home whitelist or denyRead is ever rendered either.
 func TestSettingsForSandboxEnabledOmitsFilesystemWhenAllowWriteEmpty(t *testing.T) {
-	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, true, nil)
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil, true, nil)
 	if settings.Sandbox == nil {
 		t.Fatal("Sandbox = nil, want a rendered block when the toggle is on")
 	}

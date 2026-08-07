@@ -106,6 +106,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.BriefNote != "" {
 		fmt.Fprintf(&b, "brief_note: %s\n", quoteYAML(cfg.BriefNote))
 	}
+	if cfg.WorkspaceLabelTemplate != "" {
+		fmt.Fprintf(&b, "workspace_label_template: %s\n", quoteYAML(cfg.WorkspaceLabelTemplate))
+	}
 	writeShipBlock(&b, cfg)
 	writeReworkBlock(&b, cfg)
 	writeReviewBlock(&b, cfg)
@@ -392,9 +395,9 @@ func indentOf(line string) int {
 // parseYAML parses the minimal subset of YAML encodeYAML produces: comments
 // (# to end of line, outside quotes), blank lines, region 1's top-level
 // `key: value` scalars (base_branch, worker_placement, launcher, forge,
-// status_page, worktree_dir, brief_note, worktree_bootstrap_command,
-// owner_stale_after, rework_budget; value optionally quoted) and its one
-// top-level list key (`allow`); a top-level `ship:` block (see
+// status_page, worktree_dir, brief_note, workspace_label_template,
+// worktree_bootstrap_command, owner_stale_after, rework_budget; value
+// optionally quoted) and its one top-level list key (`allow`); a top-level `ship:` block (see
 // parseShipBlock) and a top-level `phases:` block (see parsePhasesBlock,
 // parsePhaseSubBlock); legacyFlatKeys' deprecated flat top-level keys and
 // the deprecated dotted `phase.<name>.skip`/`phase.<name>.deny` key (see
@@ -839,15 +842,16 @@ func assignAwaitingReviewKey(cfg *Config, key, value string, lines []string, nex
 
 // scalarStringFields maps each of assignScalarField's plain string-valued
 // keys (base_branch, worker_placement, launcher, forge, status_page,
-// worktree_dir, brief_note, review_note, ship_verify_command,
-// gate_verify_command, worktree_bootstrap_command, title_prefix_template,
-// owner_stale_after, review_effort) to its destination cfg field. Collapsed
-// out of assignScalarField's own switch into a lookup table so that
-// function's cyclomatic complexity tracks the keys that actually need
-// parsing/conversion (experimental_worker_sandbox as bool, max_diff_lines/
-// rework_budget as int), not the total count of plain-string keys — a
-// straight "key: value" assignment carries no branching of its own. Built
-// fresh per call since each points at one cfg's own fields.
+// worktree_dir, brief_note, workspace_label_template, review_note,
+// ship_verify_command, gate_verify_command, worktree_bootstrap_command,
+// title_prefix_template, owner_stale_after, review_effort) to its
+// destination cfg field. Collapsed out of assignScalarField's own switch
+// into a lookup table so that function's cyclomatic complexity tracks the
+// keys that actually need parsing/conversion (experimental_worker_sandbox as
+// bool, max_diff_lines/rework_budget as int), not the total count of
+// plain-string keys — a straight "key: value" assignment carries no
+// branching of its own. Built fresh per call since each points at one cfg's
+// own fields.
 func scalarStringFields(cfg *Config) map[string]*string {
 	return map[string]*string{
 		"base_branch":                &cfg.BaseBranch,
@@ -857,6 +861,7 @@ func scalarStringFields(cfg *Config) map[string]*string {
 		"status_page":                &cfg.StatusPage,
 		"worktree_dir":               &cfg.WorktreeDir,
 		"brief_note":                 &cfg.BriefNote,
+		"workspace_label_template":   &cfg.WorkspaceLabelTemplate,
 		"review_note":                &cfg.ReviewNote,
 		"ship_verify_command":        &cfg.ShipVerifyCommand,
 		"gate_verify_command":        &cfg.GateVerifyCommand,

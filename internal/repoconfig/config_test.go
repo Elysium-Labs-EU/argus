@@ -186,6 +186,22 @@ func TestSaveLoadRoundTripExperimentalWorkerSandbox(t *testing.T) {
 	}
 }
 
+func TestSaveLoadRoundTripWorkspaceLabelTemplate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	want := Config{WorkspaceLabelTemplate: "{project}/{issue}-{summary}"}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
 func TestExperimentalWorkerSandboxInvalidBoolErrors(t *testing.T) {
 	_, err := loadContent(t, "experimental_worker_sandbox: not-a-bool\n")
 	if err == nil {

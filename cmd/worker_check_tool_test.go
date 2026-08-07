@@ -315,8 +315,8 @@ func TestRunWorkerCheckTool(t *testing.T) {
 // call. It confirms both of RebaseBrief's instructed git commands pass, git
 // commit/push stay denied, the structural floor's git ls-files entry (every
 // worker brief's shared diff_stat instruction) also passes, and — since
-// rebase is excluded from mutationPhases — Edit/Write is still denied even
-// though the worker is actively resolving a conflict.
+// rebase is a mutation phase — Edit/Write is allowed too, so the worker can
+// actually resolve a real content conflict rather than only ever auto-merge.
 func TestRunWorkerCheckToolRebaseDispatchAllowsFetchMergeDeniesCommitPush(t *testing.T) {
 	origExit := osExit
 	t.Cleanup(func() { osExit = origExit })
@@ -359,8 +359,43 @@ func TestRunWorkerCheckToolRebaseDispatchAllowsFetchMergeDeniesCommitPush(t *tes
 	if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
 		t.Fatalf("runWorkerCheckTool(Edit): %v", err)
 	}
-	if exitCode != 2 {
-		t.Errorf("Edit during rebase: exit code = %d, want 2 — rebase is not a mutation phase (resolution happens via git merge, not the Edit tool)", exitCode)
+	if exitCode != 0 {
+		t.Errorf("Edit during rebase: exit code = %d, want 0 — rebase is a mutation phase, so a worker can actually resolve a real content conflict", exitCode)
+	}
+}
+
+// TestRunWorkerCheckToolDeniesRebaseGitCommandsOutsideRebasePhase is the
+// other half of the dontAsk-era rebase deadlock's acceptance criteria: now
+// that provisionWorktree bakes RebasePhaseAllow's git fetch/merge grant into
+// the *static* settings.local.json unconditionally (see ResolvedAllowSet's
+// doc comment), the live check-tool hook is what must still deny those exact
+// commands whenever the worker reports a phase other than rebase — the
+// static file being broadly permissive must never leak into what a live
+// call for the "working" phase actually resolves to.
+func TestRunWorkerCheckToolDeniesRebaseGitCommandsOutsideRebasePhase(t *testing.T) {
+	origExit := osExit
+	t.Cleanup(func() { osExit = origExit })
+	var exitCode int
+	osExit = func(code int) { exitCode = code }
+
+	wt := t.TempDir()
+	if err := protocol.Write(protocol.StatusPath(wt), &protocol.Status{Base: "main", Phase: protocol.PhaseWorking}); err != nil {
+		t.Fatalf("seeding working-phase status: %v", err)
+	}
+
+	for _, cmd := range []string{"git fetch origin main", "git merge origin/main --no-commit"} {
+		exitCode = 0
+		stdin := strings.NewReader(fmt.Sprintf(`{"cwd":%q,"tool_input":{"command":%q}}`, wt, cmd))
+		var stderr bytes.Buffer
+		if err := runWorkerCheckTool(context.Background(), stdin, &stderr); err != nil {
+			t.Fatalf("runWorkerCheckTool(%q): %v", cmd, err)
+		}
+		if exitCode != 2 {
+			t.Errorf("cmd %q during working: exit code = %d, want 2 — rebase's git grant must not leak outside the rebase phase", cmd, exitCode)
+		}
+		if !strings.Contains(stderr.String(), "not in the resolved allow set") {
+			t.Errorf("cmd %q: stderr = %q, want the allow-scope block reason", cmd, stderr.String())
+		}
 	}
 }
 
@@ -408,9 +443,9 @@ func TestRunWorkerCheckToolRebaseDispatchGrantsConfiguredVerifyCommand(t *testin
 }
 
 // TestRunWorkerCheckToolMutationGate exercises the Edit/Write live gate
-// directly: mutation is denied outside working/self_test and allowed inside
-// them, regardless of what the static settings.local.json Allow list — which
-// can't itself narrow by phase — says.
+// directly: mutation is denied outside working/self_test/rebase and allowed
+// inside them, regardless of what the static settings.local.json Allow list
+// — which can't itself narrow by phase — says.
 func TestRunWorkerCheckToolMutationGate(t *testing.T) {
 	origExit := osExit
 	t.Cleanup(func() { osExit = origExit })
@@ -432,8 +467,8 @@ func TestRunWorkerCheckToolMutationGate(t *testing.T) {
 		return exitCode
 	}
 
-	denyPhases := []protocol.Phase{protocol.PhasePlanning, protocol.PhaseAwaitingReview, protocol.PhaseBlocked, protocol.PhaseRebase}
-	allowPhases := []protocol.Phase{protocol.PhaseWorking, protocol.PhaseSelfTest}
+	denyPhases := []protocol.Phase{protocol.PhasePlanning, protocol.PhaseAwaitingReview, protocol.PhaseBlocked}
+	allowPhases := []protocol.Phase{protocol.PhaseWorking, protocol.PhaseSelfTest, protocol.PhaseRebase}
 	for _, tool := range []string{"Edit", "Write"} {
 		for _, p := range denyPhases {
 			if got := run(t, p, tool); got != 2 {

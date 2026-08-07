@@ -106,6 +106,22 @@ type Config struct {
 	// otherwise the prefix is prepended. Empty means no enforcement, the
 	// same "not configured" default every other key here has.
 	TitlePrefixTemplate string
+	// WorkspaceLabelTemplate overrides the herdr-visible label a
+	// --issues/--jira-issues spawned worker's workspace/tab gets (see
+	// issuesToTasks/jiraIssuesToTasks in cmd/supervise.go, and
+	// createAndPlaceWorktree's TabRename reuse of the identical Label value
+	// when a worker is nested into an existing workspace as a tab, in
+	// internal/supervisor/loop.go). Same "not configured" plain-string shape
+	// as TitlePrefixTemplate: empty renders nothing different from today's
+	// bare "#<n>" (--issues) / raw ticket key (--jira-issues) label, so every
+	// existing repo's label format is unchanged until an operator opts in.
+	// Three literal placeholders are substituted when set: "{issue}" (the
+	// same value TitlePrefixTemplate's own "{issue}" resolves to — a Jira
+	// key, or "#<n>" for a numeric --issue), "{project}" (the repo name),
+	// and "{summary}" (a short slugified prefix of the issue's own title).
+	// Scoped to the --issues/--jira-issues label-construction path only;
+	// BuildPlan's own plain-`--tasks` fallback (taskLabel) never reads this.
+	WorkspaceLabelTemplate string
 	// OwnerStaleAfter overrides how long a worktree's owner-lease heartbeat
 	// (see internal/ownership) may go quiet before a mismatched caller is let
 	// through instead of refused, same "not configured, skip" plain-string

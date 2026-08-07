@@ -30,15 +30,18 @@ type AgentAdapter interface {
 	// phases.<name>.allow policy (see internal/repoconfig); baseAllow is its
 	// phase-independent top-level allow list; extraAllow appends
 	// operator-supplied CLI --allow patterns on top of both, for a one-off
-	// run. The rendered allow list is the union of every configurable
-	// phase's own resolved allow (see ResolvedAllowForPhase) — the static
-	// session-wide file can't itself be phase-conditional, so the live
-	// PreToolUse hook (argus worker check-tool) narrows it back down to the
-	// worker's actual current phase on every call. sandboxEnabled and
+	// run; rebaseAllow is RebasePhaseAllow's own git-command grant for this
+	// worktree's base, unioned in unconditionally (see ResolvedAllowSet's
+	// doc comment for why it can't wait for a live PreToolUse decision). The
+	// rendered allow list is the union of every configurable phase's own
+	// resolved allow (see ResolvedAllowForPhase) plus rebaseAllow — the
+	// static session-wide file can't itself be phase-conditional, so the
+	// live PreToolUse hook (argus worker check-tool) narrows it back down to
+	// the worker's actual current phase on every call. sandboxEnabled and
 	// sandboxAllowWrite are the repo's (or --experimental-sandbox's)
 	// experimental OS-sandbox toggle and its filesystem write-allow list —
 	// see settingsFor.
-	RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) (path string, content []byte, err error)
+	RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) (path string, content []byte, err error)
 
 	// PlanEvidence reports whether any session transcript for worktree
 	// contains a real todo-list tool call — the unfakeable backstop for the
@@ -59,8 +62,8 @@ func (claudeCodeAdapter) DefaultLauncher() string {
 	return DefaultLauncher
 }
 
-func (claudeCodeAdapter) RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) (string, []byte, error) {
-	settings := settingsFor(worktree, project, baseAllow, extraAllow, sandboxEnabled, sandboxAllowWrite)
+func (claudeCodeAdapter) RenderSettings(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) (string, []byte, error) {
+	settings := settingsFor(worktree, project, baseAllow, extraAllow, rebaseAllow, sandboxEnabled, sandboxAllowWrite)
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", nil, fmt.Errorf("encoding settings: %w", err)
@@ -235,9 +238,9 @@ type hookEntry struct {
 // status.json live instead: DeniedInPhase's floor and ResolvedAllowForPhase's
 // own per-phase scoping for Bash, and PhaseAllowsMutation for Edit/Write —
 // the static Allow list can grant Edit/Write(worktree) for the whole
-// session (it has to, since working/self_test genuinely need it and the
-// file can't be re-rendered mid-session), so only this live check actually
-// keeps a worker from mutating tracked files outside working/self_test.
+// session (it has to, since working/self_test/rebase genuinely need it and
+// the file can't be re-rendered mid-session), so only this live check
+// actually keeps a worker from mutating tracked files outside those phases.
 // One hookMatcher per tool name rather than a single combined matcher
 // pattern, since Claude Code's own matcher syntax is documented per exact
 // tool name, not as a general regex.
@@ -289,19 +292,23 @@ func recordPlanHooks() []hookMatcher {
 // floor: enough to edit files and be gated, no repo toolchain command —
 // skipping setup makes a worker *more* restricted, never less. extraAllow
 // appends operator-supplied CLI --allow patterns on top of both, for a
-// one-off run.
+// one-off run. rebaseAllow is RebasePhaseAllow's own grant for this
+// worktree's base, unioned in unconditionally rather than gated by phase —
+// see ResolvedAllowSet's doc comment for why the rebase phase can't wait for
+// a live PreToolUse decision the way every other phase does.
 //
 // The rendered Allow list is ResolvedAllowSet's union of every
-// protocol.ConfigurablePhases value's own ResolvedAllowForPhase, since this
-// file is read once at session launch and can't itself vary by the worker's
-// current phase — checkToolHook is what actually narrows a live Bash call
-// down to what the *current* phase's own resolved set allows.
+// protocol.ConfigurablePhases value's own ResolvedAllowForPhase plus
+// rebaseAllow, since this file is read once at session launch and can't
+// itself vary by the worker's current phase — checkToolHook is what
+// actually narrows a live Bash call down to what the *current* phase's own
+// resolved set allows.
 //
 // sandboxEnabled and sandboxAllowWrite are the experimental, default-off OS
 // sandbox toggle (see sandboxBlockFor): false renders no "sandbox" key at
 // all, leaving today's behavior unchanged.
-func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) permissionSettings {
-	allow := ResolvedAllowSet(project, baseAllow, extraAllow, worktree)
+func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extraAllow, rebaseAllow []string, sandboxEnabled bool, sandboxAllowWrite []string) permissionSettings {
+	allow := ResolvedAllowSet(project, baseAllow, extraAllow, rebaseAllow, worktree)
 
 	// Deny wins over allow in Claude Code regardless of pattern specificity
 	// (deny/allow are checked in that order, first match wins), so these
@@ -344,6 +351,11 @@ func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extra
 	// unremovable regardless of what any phase's allow config says, so they
 	// are denied natively here too, not only caught live by the hook.
 	deny = append(deny, bashGlobEntries(protocol.DenyFloor())...)
+	// Read/Edit deny-wins-with-no-re-allow floor for operator credential
+	// files (~/.ssh, ~/.aws, and similar) a worker's Edit/Write(worktree)
+	// glob never grants but its Read tool could otherwise still reach — see
+	// protocol.CredentialDenyFloor.
+	deny = append(deny, protocol.CredentialDenyFloor()...)
 
 	return permissionSettings{
 		Permissions: permissionBlock{

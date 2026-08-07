@@ -37,7 +37,8 @@ where it belongs, not a silent no-op.
   don't vary by worker phase and aren't tied to any one argus operation:
   `base_branch`, `worker_placement`, `forge`, `status_page`, `worktree_dir`,
   `owner_stale_after`, `worktree_bootstrap_command`, `launcher`, `allow`,
-  `brief_note`, `experimental_worker_sandbox`, `sandbox_allow_write`.
+  `brief_note`, `workspace_label_template`, `experimental_worker_sandbox`,
+  `sandbox_allow_write`.
 - **`phases:`** — worker permission contexts, *only*: one nested block per
   phase name (`planning`, `working`, `self_test`, `awaiting_review`,
   `blocked`), each holding just that phase's own live `allow`/`deny`/`skip`
@@ -142,6 +143,18 @@ setting.
   diff-counting guidance that mirrors `MeasureDiff`'s own untracked-file
   handling) always follow it — those are argus's own pipeline invariants, not
   something a repo can opt out of.
+- **`workspace_label_template`** — overrides the herdr-visible label a
+  `--issues`/`--jira-issues` spawned worker's workspace/tab gets (the same
+  value a fleet operator scanning `herdr workspace list` uses to find one
+  worker among several). Unset keeps today's bare `"#<n>"` (`--issues`) or
+  raw ticket key (`--jira-issues`) label. Three placeholders are substituted
+  when set: `{issue}` (the same value `ship.title_prefix_template`'s own
+  `{issue}` resolves to — a Jira key, or `"#<n>"` for a numeric `--issue`),
+  `{project}` (the repo name), and `{summary}` (a short, slugified prefix of
+  the issue's own title, e.g. `"fix-login-crash"`). Scoped to the
+  `--issues`/`--jira-issues` label-construction path only; a plain `--tasks`
+  worker with no explicit `--labels` entry still falls back to `BuildPlan`'s
+  own task-derived label, untouched by this key.
 - **`review.gate_verify_command`** — a shell command the gate re-runs inside
   a worker's worktree once it reaches a terminal phase (e.g. `"make lint"`,
   `"golangci-lint run"`), closing the gap where a diff earns a clean gate

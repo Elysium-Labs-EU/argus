@@ -520,10 +520,12 @@ func TestDispatchRebaseWorkerEmptyPane(t *testing.T) {
 
 func TestDispatchRebaseWorkerPaneRunError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("w1:p1", nil, errors.New("herdr: pane gone"))
 
-	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{worktree: t.TempDir(), base: "main", launcher: "claude"})
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{worktree: worktree, base: "main", launcher: "claude"})
 	if err == nil || !strings.Contains(err.Error(), "pane gone") {
 		t.Fatalf("want the PaneRun error propagated, got %v", err)
 	}
@@ -567,6 +569,48 @@ func TestDispatchRebaseWorkerSuccessTerminal(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "dispatched rebase worker") || !strings.Contains(buf.String(), "rebased and ready") {
 		t.Errorf("expected dispatch + outcome messages:\n%s", buf.String())
+	}
+}
+
+// TestDispatchRebaseWorkerGrantsRebaseAllowForDispatchBase is the regression
+// test for GrantRebaseAllow's dispatch-time role: dispatchRebaseWorker reuses
+// the worktree's existing pane rather than launching a fresh Claude Code
+// session, so a settings.local.json rendered before this rebase was ever
+// needed (or rendered for a different base than this specific `argus rebase`
+// call is targeting) must still end up carrying the grant for the base
+// actually in play here.
+func TestDispatchRebaseWorkerGrantsRebaseAllowForDispatchBase(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
+	if err := supervisor.WriteSettings(worktree, nil, nil, nil, nil, false, nil); err != nil {
+		t.Fatalf("seeding settings.local.json: %v", err)
+	}
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		fresh := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now()}
+		_ = protocol.Write(protocol.StatusPath(worktree), fresh)
+	}()
+
+	err := dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("dispatchRebaseWorker: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(worktree, ".claude", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("reading settings.local.json: %v", err)
+	}
+	for _, want := range []string{"Bash(git fetch origin main)", "Bash(git merge origin/main --no-commit)"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("settings.local.json should carry the rebase grant after dispatch, missing %q:\n%s", want, data)
+		}
 	}
 }
 
@@ -798,6 +842,7 @@ func TestDispatchRebaseWorkerZeroDivergenceSucceedsWithNoOriginRef(t *testing.T)
 func TestDispatchRebaseWorkerIgnoresStaleStatus(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
 	stale := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now().Add(-time.Hour)}
 	if err := protocol.Write(protocol.StatusPath(worktree), stale); err != nil {
 		t.Fatalf("seeding stale status.json: %v", err)
@@ -833,6 +878,7 @@ func TestDispatchRebaseWorkerIgnoresStaleStatus(t *testing.T) {
 func TestDispatchRebaseWorkerPersistsBaseAfterInvalidate(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
 
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("w1:p1", nil, nil)
@@ -867,6 +913,7 @@ func TestDispatchRebaseWorkerPersistsBaseAfterInvalidate(t *testing.T) {
 func TestDispatchRebaseWorkerStampsRebasePhase(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
 
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("w1:p1", nil, nil)
@@ -904,16 +951,94 @@ func TestDispatchRebaseWorkerStampsRebasePhase(t *testing.T) {
 // written, so WaitForStatus returns once ctx is canceled.
 func TestDispatchRebaseWorkerNoStatus(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("w1:p1", nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	err := dispatchRebaseWorker(ctx, logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
-		worktree: t.TempDir(), base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
 	})
 	if err == nil || !strings.Contains(err.Error(), "no status before the deadline") {
 		t.Fatalf("want the no-status error, got %v", err)
+	}
+}
+
+// TestDispatchRebaseWorkerAbortsLeftoverMergeBeforeDispatch is the regression
+// test for a retry into a worktree a prior rebase dispatch left mid-conflict:
+// it drives a real, genuinely conflicting `git merge --no-commit` to leave
+// MERGE_HEAD set exactly as an earlier blocked worker would, then confirms
+// dispatchRebaseWorker clears it before handing the worktree to the (fake)
+// worker pane — without this, the worker's own instructed `git merge
+// origin/main --no-commit` would refuse to start a second merge and every
+// retry would wedge identically to the last one.
+func TestDispatchRebaseWorkerAbortsLeftoverMergeBeforeDispatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := setupRebaseUncommittedResolution(t)
+	gitIn := func(dir string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	// setupRebaseUncommittedResolution leaves an unrelated uncommitted change
+	// in place (its own "resolved conflict" scenario) — discarded here since
+	// this test drives its own, real conflicting merge instead.
+	gitIn(worktree, "checkout", "--", "f.txt")
+
+	remoteOut, err := exec.Command("git", "-C", worktree, "remote", "get-url", "origin").Output()
+	if err != nil {
+		t.Fatalf("resolving origin url: %v", err)
+	}
+	remote := strings.TrimSpace(string(remoteOut))
+
+	// Advance origin/main past the worktree's own merge-base, editing the
+	// same line the worktree's branch also edits below — the same
+	// same-line-divergent-edit shape TestConflictsWithDetectsCleanAndConflicting
+	// uses to force a real (not merely merge-tree-detected) conflict.
+	other := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", remote, other).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+	gitIn(other, "config", "user.email", "t@t")
+	gitIn(other, "config", "user.name", "t")
+	gitIn(other, "checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(other, "f.txt"), []byte("origin-change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(other, "commit", "-q", "-am", "origin edits f.txt")
+	gitIn(other, "push", "-q", "origin", "main")
+
+	gitIn(worktree, "checkout", "-q", "feat-x")
+	if err := os.WriteFile(filepath.Join(worktree, "f.txt"), []byte("branch-change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(worktree, "commit", "-q", "-am", "branch edits f.txt")
+	gitIn(worktree, "fetch", "-q", "origin", "main")
+
+	mergeCmd := exec.Command("git", "-C", worktree, "merge", "origin/main", "--no-commit")
+	if mergeErr := mergeCmd.Run(); mergeErr == nil {
+		t.Fatal("test setup: expected the merge to conflict, but it succeeded cleanly")
+	}
+	mergeHead := filepath.Join(worktree, ".git", "MERGE_HEAD")
+	if _, statErr := os.Stat(mergeHead); statErr != nil {
+		t.Fatalf("test setup: MERGE_HEAD should exist after the conflicting merge: %v", statErr)
+	}
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := dispatchRebaseWorker(ctx, logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	}); err != nil && !strings.Contains(err.Error(), "no status before the deadline") {
+		t.Fatalf("dispatchRebaseWorker: %v", err)
+	}
+
+	if _, err := os.Stat(mergeHead); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("MERGE_HEAD should be cleared before dispatch, stat error = %v", err)
 	}
 }
 
@@ -961,12 +1086,14 @@ func fakeRebaseClientStuckPane(paneID, agentStatus string) herdr.Client {
 // out the threshold.
 func TestDispatchRebaseWorkerHerdrStuckFailsFast(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClientStuckPane("w1:p1", "blocked")
 	var buf bytes.Buffer
 
 	err := dispatchRebaseWorker(context.Background(), logger, client, &buf, "/repo", "feat-x", &rebaseOpts{
-		worktree: t.TempDir(), base: "main", launcher: "claude", interval: 3 * time.Minute,
+		worktree: worktree, base: "main", launcher: "claude", interval: 3 * time.Minute,
 	})
 	if err == nil || !strings.Contains(err.Error(), "agent_status") {
 		t.Fatalf("want a herdr-stuck escalation error, got %v", err)
