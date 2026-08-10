@@ -452,6 +452,102 @@ func TestProvisionScratchHomeWrapsSymlinkError(t *testing.T) {
 	}
 }
 
+func TestProvisionScratchHomeCopiesClaudeConfigMinusProjects(t *testing.T) {
+	wt := t.TempDir()
+	realHome := t.TempDir()
+	realConfig := `{"oauthAccount":{"emailAddress":"a@example.com"},"userID":"u1","hasCompletedOnboarding":true,"theme":"dark","projects":{"/some/other/repo":{"history":["secret task"]}}}`
+	if err := os.WriteFile(filepath.Join(realHome, ".claude.json"), []byte(realConfig), 0o600); err != nil {
+		t.Fatalf("seeding real .claude.json: %v", err)
+	}
+
+	if err := ProvisionScratchHome(wt, realHome); err != nil {
+		t.Fatalf("ProvisionScratchHome: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(ScratchHomePath(wt), ".claude.json"))
+	if err != nil {
+		t.Fatalf("reading scratch .claude.json: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(got, &fields); err != nil {
+		t.Fatalf("scratch .claude.json is not valid JSON: %v", err)
+	}
+	for _, key := range []string{"oauthAccount", "userID", "hasCompletedOnboarding", "theme"} {
+		if _, ok := fields[key]; !ok {
+			t.Errorf("scratch .claude.json missing carried-over key %q", key)
+		}
+	}
+	if _, ok := fields["projects"]; ok {
+		t.Error("scratch .claude.json should not carry over the real home's \"projects\" key")
+	}
+}
+
+func TestProvisionScratchHomeMissingRealClaudeConfigIsNoop(t *testing.T) {
+	wt := t.TempDir()
+	realHome := t.TempDir() // no .claude.json seeded
+
+	if err := ProvisionScratchHome(wt, realHome); err != nil {
+		t.Fatalf("ProvisionScratchHome: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(ScratchHomePath(wt), ".claude.json")); !os.IsNotExist(err) {
+		t.Errorf("scratch .claude.json should not exist when real home has none, stat err = %v", err)
+	}
+}
+
+func TestProvisionScratchClaudeConfigWrapsReadFileError(t *testing.T) {
+	realHome := t.TempDir()
+	// A directory at .claude.json's own path makes ReadFile fail with
+	// something other than "not exist".
+	if err := os.MkdirAll(filepath.Join(realHome, ".claude.json"), 0o755); err != nil {
+		t.Fatalf("seeding blocking dir: %v", err)
+	}
+
+	err := provisionScratchClaudeConfig(t.TempDir(), realHome)
+	if err == nil {
+		t.Fatal("want error when real .claude.json can't be read, got nil")
+	}
+	if !strings.Contains(err.Error(), "reading real .claude.json") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestProvisionScratchClaudeConfigWrapsInvalidJSON(t *testing.T) {
+	realHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realHome, ".claude.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatalf("seeding malformed .claude.json: %v", err)
+	}
+
+	err := provisionScratchClaudeConfig(t.TempDir(), realHome)
+	if err == nil {
+		t.Fatal("want error when real .claude.json is malformed, got nil")
+	}
+	if !strings.Contains(err.Error(), "parsing real .claude.json") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestProvisionScratchClaudeConfigWrapsWriteFileError(t *testing.T) {
+	realHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realHome, ".claude.json"), []byte(`{"theme":"dark"}`), 0o600); err != nil {
+		t.Fatalf("seeding real .claude.json: %v", err)
+	}
+	// A regular file where scratch should be a dir makes the join'd
+	// destination path unwritable.
+	scratch := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(scratch, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding blocking file: %v", err)
+	}
+
+	err := provisionScratchClaudeConfig(scratch, realHome)
+	if err == nil {
+		t.Fatal("want error when scratch .claude.json can't be written, got nil")
+	}
+	if !strings.Contains(err.Error(), "writing scratch .claude.json") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
 func TestRunWorktreeBootstrapCommandTimeoutIsKilled(t *testing.T) {
 	// Passing an already-short-deadlined parent ctx makes WithTimeout's
 	// effective deadline the earlier one, exercising the 5-minute timeout
