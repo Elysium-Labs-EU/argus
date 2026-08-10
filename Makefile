@@ -1,4 +1,4 @@
-.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface verify-deps govulncheck secrets fix setup ci clean release pre-release changelog changelog-preview
+.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus adr-find eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface verify-deps govulncheck secrets fix setup ci clean release pre-release changelog changelog-preview
 
 # git exports these into every hook's environment so the hook's own git
 # invocations resolve to the repo/worktree that triggered it. If a recipe
@@ -51,6 +51,23 @@ sg: ## Scan codebase with ast-grep rules (skipped until rules/ ported)
 
 gitnexus: ## Index this repo with GitNexus for AI-assisted code search (no install needed, runs via npx)
 	npx gitnexus analyze
+
+adr-find: ## Find the ADR for a concept, e.g. make adr-find Q="deny floor"
+	@test -n "$(Q)" || (echo 'Usage: make adr-find Q="concept"'; exit 1)
+	@echo "== docs/adr matches for '$(Q)' =="
+	@grep -ril -- "$(Q)" docs/adr 2>/dev/null || echo "  (no filename or content match)"
+	@echo "== ast-grep: code comments referencing an ADR by number =="
+	@if command -v ast-grep >/dev/null 2>&1; then \
+		ast-grep scan --rule docs/adr/adr-reference.sgrule.yml . 2>/dev/null | grep -i -- "$(Q)" || echo "  (no matching code reference)"; \
+	else \
+		echo "  ast-grep not installed, skipping (brew install ast-grep to enable)"; \
+	fi
+	@echo "== GitNexus: indexed code search =="
+	@if [ -d .gitnexus ]; then \
+		echo "  .gitnexus index present, ask GitNexus about '$(Q)' for deeper code context"; \
+	else \
+		echo "  no .gitnexus index in this worktree, skipping (run: npx gitnexus analyze)"; \
+	fi
 
 eventlog-gate: ## Fail if any _test.go file calls eventlog.Open directly instead of eventlog.OpenForTest
 	bash scripts/check-eventlog-open.sh
