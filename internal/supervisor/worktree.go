@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -117,9 +118,16 @@ func ScratchHomePath(worktree string) string {
 // does not exist under the scratch tree; that absence, not an explicit deny
 // rule, is what closes the read vector for the default unwrapped worker.
 //
+// It also copies realHome's top-level ~/.claude.json state (see
+// provisionScratchClaudeConfig) — the .claude symlink alone carries the
+// projects/ transcript dir but not this file, so without it a scratch HOME
+// looks like a brand-new install and Claude Code opens its first-run
+// onboarding wizard instead of reading the worker's brief.
+//
 // realHome == "" (a Config that never resolved a home directory) leaves the
-// scratch dir without a .claude symlink rather than erroring — the same
-// soft fallback HasPlanEvidence already applies to an empty home.
+// scratch dir without a .claude symlink or .claude.json rather than
+// erroring — the same soft fallback HasPlanEvidence already applies to an
+// empty home.
 func ProvisionScratchHome(worktree, realHome string) error {
 	scratch := ScratchHomePath(worktree)
 	if err := os.MkdirAll(scratch, 0o700); err != nil {
@@ -136,13 +144,60 @@ func ProvisionScratchHome(worktree, realHome string) error {
 		return fmt.Errorf("creating real home .claude dir: %w", err)
 	}
 	link := filepath.Join(scratch, ".claude")
-	if _, err := os.Lstat(link); err == nil {
-		return nil // already provisioned by an earlier attempt at this worktree
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("checking scratch home .claude symlink: %w", err)
+	switch _, statErr := os.Lstat(link); {
+	case statErr == nil:
+		// already provisioned by an earlier attempt at this worktree
+	case os.IsNotExist(statErr):
+		if err := os.Symlink(target, link); err != nil {
+			return fmt.Errorf("symlinking scratch home .claude: %w", err)
+		}
+	default:
+		return fmt.Errorf("checking scratch home .claude symlink: %w", statErr)
 	}
-	if err := os.Symlink(target, link); err != nil {
-		return fmt.Errorf("symlinking scratch home .claude: %w", err)
+	return provisionScratchClaudeConfig(scratch, realHome)
+}
+
+// claudeConfigOmitTopLevelKeys withholds top-level ~/.claude.json keys from
+// a worker's scratch-home copy. "projects" carries every other project's
+// full session history, MCP config, and allowed-tools list keyed by
+// absolute path — none of it applies to a worktree path Claude Code has
+// never seen, and copying it would leak unrelated project data into a
+// worker's environment.
+var claudeConfigOmitTopLevelKeys = map[string]bool{
+	"projects": true,
+}
+
+// provisionScratchClaudeConfig copies realHome's top-level ~/.claude.json
+// fields (oauthAccount, userID, hasCompletedOnboarding, theme, and any
+// other identity/onboarding-gate field Claude Code adds later) into
+// scratch/.claude.json, omitting claudeConfigOmitTopLevelKeys. Copying the
+// raw top-level map rather than a hardcoded field list means a future
+// onboarding gate is carried forward automatically, with no code change
+// here. A missing real ~/.claude.json is a soft no-op, not an error — a
+// realHome that has never run `claude` leaves the worker no worse off than
+// before this function existed.
+func provisionScratchClaudeConfig(scratch, realHome string) error {
+	raw, err := os.ReadFile(filepath.Join(realHome, ".claude.json")) //nolint:gosec // realHome is operator-controlled, not user input
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading real .claude.json: %w", err)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fmt.Errorf("parsing real .claude.json: %w", err)
+	}
+	for key := range claudeConfigOmitTopLevelKeys {
+		delete(fields, key)
+	}
+	// map[string]json.RawMessage.MarshalJSON never fails: every value was
+	// already validated as JSON by the Unmarshal above.
+	out, _ := json.Marshal(fields)
+
+	if err := os.WriteFile(filepath.Join(scratch, ".claude.json"), out, 0o600); err != nil {
+		return fmt.Errorf("writing scratch .claude.json: %w", err)
 	}
 	return nil
 }
