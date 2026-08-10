@@ -97,7 +97,7 @@ func TestRunWorkerSteerRejectsAtCap(t *testing.T) {
 	wt := initGitDir(t)
 	full := make([]protocol.Steer, protocol.MaxSteersPerWorking)
 	for i := range full {
-		full[i] = protocol.Steer{Text: fmt.Sprintf("note %d", i)}
+		full[i] = protocol.Steer{Text: fmt.Sprintf("note %d", i), Delivered: true}
 	}
 	seedWorkingStatus(t, wt, full)
 	client := fakeSteerClient(true, nil)
@@ -138,6 +138,9 @@ func TestRunWorkerSteerRecordsAndDelivers(t *testing.T) {
 	if len(got.Steers) != 1 || got.Steers[0].Text != "the retry cap is 30s not 30ms" {
 		t.Fatalf("Steers = %+v, want a single recorded note", got.Steers)
 	}
+	if !got.Steers[0].Delivered {
+		t.Error("Steers[0].Delivered = false, want true once delivery actually succeeds")
+	}
 	if !got.Steers[0].DeliveredAt.Equal(now) {
 		t.Errorf("Steers[0].DeliveredAt = %v, want argus's clock %v", got.Steers[0].DeliveredAt, now)
 	}
@@ -150,7 +153,9 @@ func TestRunWorkerSteerRecordsAndDelivers(t *testing.T) {
 }
 
 // TestRunWorkerSteerNoLiveAgentStillRecords pins the "delivery is best-effort,
-// the durable trace is not" contract, mirroring the same test for answer.
+// the durable trace is not" contract, mirroring the same test for answer —
+// but unlike the trace, the budget must NOT count this attempt (issue: a
+// failed delivery must not consume the per-phase steer budget).
 func TestRunWorkerSteerNoLiveAgentStillRecords(t *testing.T) {
 	wt := initGitDir(t)
 	seedWorkingStatus(t, wt, nil)
@@ -168,6 +173,68 @@ func TestRunWorkerSteerNoLiveAgentStillRecords(t *testing.T) {
 	}
 	if len(got.Steers) != 1 || got.Steers[0].Text != "note" {
 		t.Fatalf("Steers = %+v, want it recorded despite the delivery failure", got.Steers)
+	}
+	if got.Steers[0].Delivered {
+		t.Error("Steers[0].Delivered = true, want false — delivery never succeeded, so this must not count against the budget")
+	}
+}
+
+// TestRunWorkerSteerFailedDeliveryDoesNotConsumeBudget pins the fix itself:
+// a worker whose agent is busy mid-turn returns delivery failures repeatedly
+// (herdr "agent wait timed out" in production, "no live agent" here — both
+// are delivery failures runWorkerSteer treats identically), and none of them
+// may exhaust MaxSteersPerWorking before a single steer actually lands.
+func TestRunWorkerSteerFailedDeliveryDoesNotConsumeBudget(t *testing.T) {
+	wt := initGitDir(t)
+	seedWorkingStatus(t, wt, nil)
+	client := fakeSteerClient(false, nil)
+	testCmdCtx, _ := testCmd()
+
+	for i := range protocol.MaxSteersPerWorking + 1 {
+		err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, fmt.Sprintf("note %d", i), ownerFlags{}, fixedNow(time.Now()))
+		if err == nil {
+			t.Fatalf("attempt %d: want a delivery error (no live agent), got nil", i)
+		}
+		if strings.Contains(err.Error(), "steer messages this working phase") {
+			t.Fatalf("attempt %d: want the budget untouched by failed deliveries, got a cap rejection: %v", i, err)
+		}
+	}
+
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if len(got.Steers) != protocol.MaxSteersPerWorking+1 {
+		t.Fatalf("Steers = %d entries, want every failed attempt still recorded (%d)", len(got.Steers), protocol.MaxSteersPerWorking+1)
+	}
+	for i, s := range got.Steers {
+		if s.Delivered {
+			t.Errorf("Steers[%d].Delivered = true, want false since delivery never succeeded", i)
+		}
+	}
+}
+
+// TestRunWorkerSteerCapCountsOnlyDelivered pins that the cap looks at
+// Delivered entries only — a mix of undelivered attempts alongside a full set
+// of delivered ones must still reject, and by the delivered count, not the
+// total trace length.
+func TestRunWorkerSteerCapCountsOnlyDelivered(t *testing.T) {
+	wt := initGitDir(t)
+	seedWorkingStatus(t, wt, []protocol.Steer{
+		{Text: "failed 1"},
+		{Text: "delivered 1", Delivered: true},
+		{Text: "delivered 2", Delivered: true},
+		{Text: "delivered 3", Delivered: true},
+	})
+	client := fakeSteerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "one more", ownerFlags{}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error steering a worker with 3 delivered steers already, got nil")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d steer messages", protocol.MaxSteersPerWorking)) {
+		t.Errorf("error = %q, want it to mention the cap", err.Error())
 	}
 }
 
@@ -210,6 +277,14 @@ func TestRunWorkerSteerDeliveryStalledFallsBackToPaneRun(t *testing.T) {
 	if !sawEnterAfterPaneRun {
 		t.Error("want a `pane send-keys ... enter` call submitting the pane-run text, saw none")
 	}
+
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if len(got.Steers) != 1 || !got.Steers[0].Delivered {
+		t.Fatalf("Steers = %+v, want it marked delivered via the pane-run fallback", got.Steers)
+	}
 }
 
 func TestRunWorkerSteerDeliveryNonStalledPromptErrorPropagates(t *testing.T) {
@@ -221,6 +296,14 @@ func TestRunWorkerSteerDeliveryNonStalledPromptErrorPropagates(t *testing.T) {
 	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now()))
 	if err == nil || !strings.Contains(err.Error(), "socket unavailable") {
 		t.Fatalf("want the AgentPrompt error propagated, got %v", err)
+	}
+
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if len(got.Steers) != 1 || got.Steers[0].Delivered {
+		t.Fatalf("Steers = %+v, want it recorded but not marked delivered", got.Steers)
 	}
 }
 
@@ -264,6 +347,9 @@ func TestRunWorkerSteerRepoRootErrorAfterRecording(t *testing.T) {
 	if len(got.Steers) != 1 || got.Steers[0].Text != "note" {
 		t.Fatalf("Steers = %+v, want it recorded despite the repo-root failure", got.Steers)
 	}
+	if got.Steers[0].Delivered {
+		t.Error("Steers[0].Delivered = true, want false — delivery never got a chance to run")
+	}
 }
 
 // TestRunWorkerSteerEmptyRootPaneIDAfterRecording pins the other
@@ -294,6 +380,9 @@ func TestRunWorkerSteerEmptyRootPaneIDAfterRecording(t *testing.T) {
 	}
 	if len(got.Steers) != 1 || got.Steers[0].Text != "note" {
 		t.Fatalf("Steers = %+v, want it recorded despite the missing pane", got.Steers)
+	}
+	if got.Steers[0].Delivered {
+		t.Error("Steers[0].Delivered = true, want false — herdr opened no pane to deliver to")
 	}
 }
 

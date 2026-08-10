@@ -105,13 +105,22 @@ type Answer struct {
 type Steer struct {
 	DeliveredAt time.Time `json:"delivered_at"`
 	Text        string    `json:"text"`
+	// Delivered is false until the herdr pane delivery this entry recorded
+	// actually succeeds. A worker whose agent is busy mid-turn returns "agent
+	// wait timed out" from that delivery — the durable trace still keeps the
+	// attempt, but MaxSteersPerWorking must not count it: a message that never
+	// reached the worker did not consume any of its attention.
+	Delivered bool `json:"delivered"`
 }
 
-// MaxSteersPerWorking caps how many steer messages a single working leg may
-// receive before `argus worker steer` refuses further ones. Without a cap,
-// steer would become an unbounded side-channel a supervisor could lean on
-// instead of the phase-transition table itself — endlessly redirecting a
-// worker mid-turn rather than ever letting it reach a terminal phase.
+// MaxSteersPerWorking caps how many *delivered* steer messages a single
+// working leg may receive before `argus worker steer` refuses further ones.
+// Without a cap, steer would become an unbounded side-channel a supervisor
+// could lean on instead of the phase-transition table itself — endlessly
+// redirecting a worker mid-turn rather than ever letting it reach a terminal
+// phase. Failed deliveries are recorded in Steers for the trace but excluded
+// from this count, so a run of transient herdr/agent-busy failures can't lock
+// a supervisor out of steering before a single message actually lands.
 const MaxSteersPerWorking = 3
 
 // Status is the whole typed payload a worker writes to its status file. Fields

@@ -38,9 +38,11 @@ first-class path (report a fresh phase, or ` + "`argus worker answer`" + `).
 
 Steer does not itself change the worker's reported phase; the worker still
 reports its next phase once it acts on the note, the same as any other
-report. Each working leg gets at most MaxSteersPerWorking notes — a worker's
-own next phase report resets that budget, so repeated steering can't become a
-silent substitute for the phase-transition table itself.`,
+report. Each working leg gets at most MaxSteersPerWorking *delivered* notes —
+a note that fails to deliver (e.g. the agent is busy mid-turn) does not count
+against that budget, only ones that actually reach the worker's pane. A
+worker's own next phase report resets the budget, so repeated steering can't
+become a silent substitute for the phase-transition table itself.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger, closeLog := openRunLog(cmd, "worker-steer")
@@ -94,9 +96,15 @@ func runWorkerSteer(cmd *cobra.Command, client herdr.Client, logger *eventlog.Lo
 			Hint: "worker steer only applies to a worker currently reporting phase \"working\" — use `argus worker answer` for a blocked worker, or wait for a terminal phase",
 		}
 	}
-	if len(cur.Steers) >= protocol.MaxSteersPerWorking {
+	delivered := 0
+	for _, s := range cur.Steers {
+		if s.Delivered {
+			delivered++
+		}
+	}
+	if delivered >= protocol.MaxSteersPerWorking {
 		return &ui.UserError{
-			Err:  fmt.Errorf("%s already received %d steer messages this working phase", worktree, len(cur.Steers)),
+			Err:  fmt.Errorf("%s already received %d steer messages this working phase", worktree, delivered),
 			Hint: "wait for the worker to reach its next phase (which resets the budget), or let it run to a terminal phase and use `argus rework` instead of steering further",
 		}
 	}
@@ -123,6 +131,14 @@ func runWorkerSteer(cmd *cobra.Command, client herdr.Client, logger *eventlog.Lo
 	message := supervisor.SteerMessage(text)
 	if err := deliverPaneMessage(ctx, logger, client, wt.RootPaneID, worktree, "steer", message); err != nil {
 		return fmt.Errorf("steer recorded, but delivery failed: %w", err)
+	}
+
+	// Only a confirmed delivery counts against the budget — mark it here,
+	// after every step above that could still fail, and persist that outcome
+	// so a later steer's cap check (above) sees it.
+	cur.Steers[len(cur.Steers)-1].Delivered = true
+	if werr := protocol.Write(protocol.StatusPath(worktree), &cur); werr != nil {
+		return fmt.Errorf("steer delivered, but marking it delivered for %s: %w", worktree, werr)
 	}
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s steer recorded and delivered to %s\n", ui.LabelSuccess.Render("✓"), worktree)
