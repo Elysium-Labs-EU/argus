@@ -37,6 +37,9 @@ func (f *fakePruneForge) OpenPR(context.Context, *forge.PRRequest) (forge.PR, er
 func (f *fakePruneForge) FetchIssue(context.Context, string, string, int) (forge.Issue, error) {
 	return forge.Issue{}, nil
 }
+func (f *fakePruneForge) FetchIssueComments(context.Context, string, string, int) ([]forge.Comment, error) {
+	return nil, nil
+}
 func (f *fakePruneForge) FindPR(_ context.Context, owner, repo, branch string) (forge.PR, bool, error) {
 	f.calls++
 	f.lastOwner, f.lastRepo, f.lastBranch = owner, repo, branch

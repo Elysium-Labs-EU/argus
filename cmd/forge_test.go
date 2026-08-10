@@ -22,7 +22,9 @@ type fakeForge struct {
 	findPRErr    error
 	openErr      error
 	prChecksErr  error
+	commentsErr  error
 	issues       map[int]forge.Issue
+	comments     map[int][]forge.Comment
 	opened       *forge.PRRequest
 	prChecksByPR map[int][][]forge.Check
 	findPR       forge.PR
@@ -33,6 +35,12 @@ type fakeForge struct {
 func (f *fakeForge) Host() string { return "fake" }
 func (f *fakeForge) FetchIssue(_ context.Context, _, _ string, n int) (forge.Issue, error) {
 	return f.issues[n], nil
+}
+func (f *fakeForge) FetchIssueComments(_ context.Context, _, _ string, n int) ([]forge.Comment, error) {
+	if f.commentsErr != nil {
+		return nil, f.commentsErr
+	}
+	return f.comments[n], nil
 }
 func (f *fakeForge) OpenPR(_ context.Context, req *forge.PRRequest) (forge.PR, error) {
 	if f.openErr != nil {
@@ -69,7 +77,7 @@ func TestIssuesToTasks(t *testing.T) {
 		142: {Number: 142, Title: "daemon down warning", Body: "warn when down"},
 		145: {Number: 145, Title: "log backoff", Body: "back off on EACCES"},
 	}}
-	tasks, branches, labels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142, 145}, briefNoteOverride{})
+	tasks, branches, labels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142, 145}, briefNoteOverride{}, issueCommentsOverride{explicit: true, value: false})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -117,7 +125,7 @@ func TestIssuesToTasksAppendsRepoBriefNote(t *testing.T) {
 		t.Fatalf("seeding repo config: %v", err)
 	}
 	f := &fakeForge{issues: map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}}}
-	tasks, _, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", repo, []int{142}, briefNoteOverride{})
+	tasks, _, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", repo, []int{142}, briefNoteOverride{}, issueCommentsOverride{explicit: true, value: false})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -135,7 +143,7 @@ func TestIssuesToTasksAppendsRepoBriefNote(t *testing.T) {
 // defaults.
 func TestIssuesToTasksNoRepoConfigOmitsToolchainText(t *testing.T) {
 	f := &fakeForge{issues: map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}}}
-	tasks, _, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142}, briefNoteOverride{})
+	tasks, _, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142}, briefNoteOverride{}, issueCommentsOverride{explicit: true, value: false})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -147,6 +155,131 @@ func TestIssuesToTasksNoRepoConfigOmitsToolchainText(t *testing.T) {
 	}
 	if !strings.Contains(tasks[0], "Do NOT run git commit or git push yourself; argus ships.") {
 		t.Errorf("task missing the fixed ship-pipeline line: %q", tasks[0])
+	}
+}
+
+// TestIssuesToTasksIncludesCommentsByDefault pins the fix for the reported
+// bug: with comments enabled (the flag's own registered default, simulated
+// here by an unexplicit true value — see newSuperviseCmd's --issue-comments
+// registration), a comment posted after the issue was filed reaches the
+// worker brief, not just the (possibly stale) original body.
+func TestIssuesToTasksIncludesCommentsByDefault(t *testing.T) {
+	f := &fakeForge{
+		issues:   map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}},
+		comments: map[int][]forge.Comment{142: {{Author: "alice", Body: "confirmed root cause: EACCES on retry"}}},
+	}
+	tasks, _, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142}, briefNoteOverride{}, issueCommentsOverride{value: true})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(tasks))
+	}
+	if !strings.Contains(tasks[0], "## Comments") || !strings.Contains(tasks[0], "**alice**: confirmed root cause: EACCES on retry") {
+		t.Errorf("task missing the comment: %q", tasks[0])
+	}
+}
+
+// TestIssuesToTasksSkipsCommentsWhenDisabled covers the brief's second
+// option: an explicit --issue-comments=false opts a noisy thread out, even
+// though the issue has comments the forge would otherwise return.
+func TestIssuesToTasksSkipsCommentsWhenDisabled(t *testing.T) {
+	f := &fakeForge{
+		issues:   map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}},
+		comments: map[int][]forge.Comment{142: {{Author: "alice", Body: "noisy aside"}}},
+	}
+	tasks, _, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142}, briefNoteOverride{}, issueCommentsOverride{explicit: true, value: false})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(tasks))
+	}
+	if strings.Contains(tasks[0], "## Comments") {
+		t.Errorf("task should not contain a comments section when disabled: %q", tasks[0])
+	}
+}
+
+// TestIssuesToTasksNoCommentsSectionWhenIssueHasNone proves an issue with an
+// empty comment thread renders identically to the pre-comments brief shape —
+// no dangling "## Comments" header with nothing under it.
+func TestIssuesToTasksNoCommentsSectionWhenIssueHasNone(t *testing.T) {
+	f := &fakeForge{issues: map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}}}
+	tasks, _, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142}, briefNoteOverride{}, issueCommentsOverride{value: true})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(tasks))
+	}
+	if strings.Contains(tasks[0], "## Comments") {
+		t.Errorf("task should have no comments section for an issue with none: %q", tasks[0])
+	}
+	if tasks[0] != "Fix o/r issue #142: t\n\nb\n\n"+fixedBriefTail("") {
+		t.Errorf("task with comments disabled/empty should match the pre-comments shape exactly, got: %q", tasks[0])
+	}
+}
+
+// TestIssuesToTasksCommentsFetchErrorPropagates covers the fetch-failure
+// path: a forge error listing comments must surface as a fetch error (the
+// same treatment FetchIssue's own errors get), not be silently swallowed
+// into an incomplete brief.
+func TestIssuesToTasksCommentsFetchErrorPropagates(t *testing.T) {
+	f := &fakeForge{
+		issues:      map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}},
+		commentsErr: errors.New("rate limited"),
+	}
+	_, _, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", t.TempDir(), []int{142}, briefNoteOverride{}, issueCommentsOverride{value: true})
+	if err == nil || !strings.Contains(err.Error(), "fetching comments for issue #142") || !strings.Contains(err.Error(), "rate limited") {
+		t.Errorf("issuesToTasks error = %v, want it to name the issue and wrap the underlying error", err)
+	}
+}
+
+// TestIssuesToTasksRepoConfigDisablesComments covers repoIssueComments'
+// config-over-flag-default precedence: with no explicit --issue-comments
+// flag, a repo's own .argus/config.yml issue_comments: false wins over the
+// flag's true default.
+func TestIssuesToTasksRepoConfigDisablesComments(t *testing.T) {
+	dir := t.TempDir()
+	off := false
+	if err := repoconfig.Save(repoconfig.Path(dir), &repoconfig.Config{IssueComments: &off}); err != nil {
+		t.Fatalf("seeding repo config: %v", err)
+	}
+	f := &fakeForge{
+		issues:   map[int]forge.Issue{142: {Number: 142, Title: "t", Body: "b"}},
+		comments: map[int][]forge.Comment{142: {{Author: "alice", Body: "noisy aside"}}},
+	}
+	tasks, _, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "r", dir, []int{142}, briefNoteOverride{}, issueCommentsOverride{value: true})
+	if err != nil {
+		t.Fatalf("issuesToTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(tasks))
+	}
+	if strings.Contains(tasks[0], "## Comments") {
+		t.Errorf("repo config issue_comments: false should suppress comments even with the flag's own true default, got: %q", tasks[0])
+	}
+}
+
+// TestFormatIssueComments covers the brief-rendering helper directly: no
+// comments renders "" (so a caller can append unconditionally with no
+// dangling section), multiple comments join with a blank line between them
+// in the given order, and a comment with no author name falls back to
+// "unknown" rather than rendering "****: body".
+func TestFormatIssueComments(t *testing.T) {
+	if got := formatIssueComments(nil); got != "" {
+		t.Errorf("formatIssueComments(nil) = %q, want \"\"", got)
+	}
+	if got := formatIssueComments([]forge.Comment{}); got != "" {
+		t.Errorf("formatIssueComments(empty) = %q, want \"\"", got)
+	}
+	got := formatIssueComments([]forge.Comment{
+		{Author: "alice", Body: "first"},
+		{Author: "", Body: "second"},
+	})
+	want := "## Comments\n\n**alice**: first\n\n**unknown**: second"
+	if got != want {
+		t.Errorf("formatIssueComments(...) = %q, want %q", got, want)
 	}
 }
 

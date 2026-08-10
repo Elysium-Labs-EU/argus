@@ -58,6 +58,14 @@ type Issue struct {
 	Number int    `json:"number"`
 }
 
+// Comment is one comment on an issue, in reading order (oldest first) — the
+// same order argus renders them in a worker brief, matching how a human
+// reading the issue thread top-to-bottom would see them.
+type Comment struct {
+	Author string
+	Body   string
+}
+
 // Check is one CI check on a PR's head commit. State/Conclusion follow
 // GitHub's own check-run vocabulary verbatim (its "completed"/"in_progress"
 // states, its "success"/"failure"/"neutral"/... conclusions, spelling and
@@ -99,6 +107,11 @@ func (c Check) Failed() bool {
 type Forge interface {
 	OpenPR(ctx context.Context, req *PRRequest) (PR, error)
 	FetchIssue(ctx context.Context, owner, repo string, number int) (Issue, error)
+	// FetchIssueComments returns every comment on the issue, oldest first —
+	// the content --issues appends to a worker brief after the issue body
+	// (see issuesToTasks) so a clarifying comment posted after filing still
+	// reaches the worker, instead of only the (possibly stale) original body.
+	FetchIssueComments(ctx context.Context, owner, repo string, number int) ([]Comment, error)
 	// FindPR looks up the most recent PR (any state) whose head is branch, for
 	// callers that know a worktree's branch but not its PR number — notably
 	// `argus worktree prune` clearing a worktree ship opened before it, or one
@@ -341,6 +354,44 @@ func (r *rest) FetchIssue(ctx context.Context, owner, repo string, number int) (
 		return Issue{}, fmt.Errorf("decoding issue response: %w", err)
 	}
 	return issue, nil
+}
+
+// issueCommentsPerPage is the page size FetchIssueComments requests — GitHub
+// and Gitea/Forgejo's own maximum, so a full listing takes as few round trips
+// as possible (mirrors checksPerPage's own reasoning for the check-runs
+// endpoint).
+const issueCommentsPerPage = 100
+
+// FetchIssueComments lists an issue's comments via the same endpoint shape
+// GitHub and Gitea/Forgejo both expose (issues/{number}/comments, identical
+// user.login/body field names on both), paginated since a long-running issue
+// thread can outgrow one page.
+func (r *rest) FetchIssueComments(ctx context.Context, owner, repo string, number int) ([]Comment, error) {
+	var comments []Comment
+	for page := 1; ; page++ {
+		url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=%d&page=%d",
+			r.base, owner, repo, number, issueCommentsPerPage, page)
+		body, err := r.do(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		var resp []struct {
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Body string `json:"body"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("decoding issue comments response: %w", err)
+		}
+		for _, c := range resp {
+			comments = append(comments, Comment{Author: c.User.Login, Body: c.Body})
+		}
+		if len(resp) < issueCommentsPerPage {
+			break
+		}
+	}
+	return comments, nil
 }
 
 // do performs one request and returns the response body, turning a non-2xx into a

@@ -63,6 +63,7 @@ func newSuperviseCmd() *cobra.Command {
 		allow                 []string
 		credentialEnv         map[string]string
 		experimentalSandbox   bool
+		issueComments         bool
 	)
 	policyDefaults := supervisor.DefaultReviewPolicy()
 
@@ -127,7 +128,8 @@ cannot be disabled by repo config.`,
 					panes: panes, branches: branches, labels: labels, tasks: tasks, tasksFile: tasksFile, repo: repo,
 				}, issues, jiraIssues, overrides, jiraSpawnOpts{assignToCaller: jiraAssignOnSpawn, transition: jiraTransitionOnSpawn},
 					forgeKind, cmd.Flags().Changed("forge"),
-					briefNoteOverride{explicit: cmd.Flags().Changed("brief-note"), value: briefNote})
+					briefNoteOverride{explicit: cmd.Flags().Changed("brief-note"), value: briefNote},
+					issueCommentsOverride{explicit: cmd.Flags().Changed("issue-comments"), value: issueComments})
 			}
 			if err != nil {
 				return err
@@ -215,6 +217,7 @@ cannot be disabled by repo config.`,
 	cmd.Flags().StringVar(&reviewEffort, "review-effort", "", "reasoning effort for --review (low, medium, high, xhigh, max; default: claude's default). Without this flag, this repo's .argus/config.yml review_effort wins, then this default")
 	cmd.Flags().StringVar(&reviewNote, "review-note", "", "free-text note appended to the reviewer's prompt. Without this flag, this repo's .argus/config.yml review_note wins, then this default (no repo-specific criteria)")
 	cmd.Flags().StringVar(&briefNote, "brief-note", "", "free-text note appended verbatim to a generated worker brief. Currently only reaches workers spawned from --issues/--jira-issues, not plain --tasks workers. Without this flag, this repo's .argus/config.yml brief_note wins, then this default (no note)")
+	cmd.Flags().BoolVar(&issueComments, "issue-comments", true, "with --issues: also fetch each issue's comments and append them to the worker brief, after the body, so a clarifying comment posted after filing still reaches the worker; pass --issue-comments=false to skip a noisy thread. Without this flag, this repo's .argus/config.yml issue_comments wins, then this default (true)")
 	cmd.Flags().IntVar(&reviewConcurrency, "review-concurrency", 0, "max concurrent claude -p --review calls when the gate escalates several workers at once (0 = supervisor.defaultReviewConcurrency)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan and exit without creating worktrees or spawning workers")
 	cmd.Flags().BoolVar(&noCredProxy, "no-cred-proxy", false, "do not front worker API traffic with the credential proxy; workers inherit the host's real ANTHROPIC_API_KEY")
@@ -589,7 +592,7 @@ type jiraSpawnOpts struct {
 // value and whether it was actually passed, needed only for --issues (the one
 // forge.New call this path makes, to fetch issue bodies before any worker
 // exists).
-func spawnWorkers(ctx context.Context, out io.Writer, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool, bn briefNoteOverride) ([]supervisor.Worker, error) {
+func spawnWorkers(ctx context.Context, out io.Writer, client herdr.Client, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool, bn briefNoteOverride, ic issueCommentsOverride) ([]supervisor.Worker, error) {
 	if len(in.panes) == 0 && len(in.branches) == 0 && len(in.tasks) == 0 && in.tasksFile == "" && len(issues) == 0 && len(jiraIssues) == 0 {
 		return nil, &ui.UserError{
 			Err:  fmt.Errorf("no workers given"),
@@ -607,7 +610,7 @@ func spawnWorkers(ctx context.Context, out io.Writer, client herdr.Client, in *w
 		}
 		in.tasks = append(in.tasks, fileTasks...)
 	}
-	if err := foldIssueSources(ctx, out, in, issues, jiraIssues, credentialOverrides, jiraSpawn, forgeKindFlag, forgeKindExplicit, bn); err != nil {
+	if err := foldIssueSources(ctx, out, in, issues, jiraIssues, credentialOverrides, jiraSpawn, forgeKindFlag, forgeKindExplicit, bn, ic); err != nil {
 		return nil, err
 	}
 	return buildWorkers(ctx, client, in)
@@ -759,14 +762,14 @@ func warnAnomalousTaskLineLengths(w io.Writer, path string, tasks []string) {
 // spawnWorkers to keep each source's fetch-and-fold step independently
 // testable and readable. forgeKindFlag/forgeKindExplicit only matter to the
 // --issues path (see resolveIssueForgeKind).
-func foldIssueSources(ctx context.Context, out io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool, bn briefNoteOverride) error {
+func foldIssueSources(ctx context.Context, out io.Writer, in *workerInput, issues []int, jiraIssues []string, credentialOverrides map[string]string, jiraSpawn jiraSpawnOpts, forgeKindFlag string, forgeKindExplicit bool, bn briefNoteOverride, ic issueCommentsOverride) error {
 	// --issues fetches from the repo's forge (GitHub, GitLab, or Codeberg/Gitea).
 	if len(issues) > 0 {
 		kind, err := resolveIssueForgeKind(ctx, out, in.repo, forgeKindExplicit, forgeKindFlag)
 		if err != nil {
 			return err
 		}
-		fetched, brs, lbls, err := tasksFromIssues(ctx, out, in.repo, issues, credentialOverrides, kind, bn)
+		fetched, brs, lbls, err := tasksFromIssues(ctx, out, in.repo, issues, credentialOverrides, kind, bn, ic)
 		if err != nil {
 			return err
 		}
@@ -1007,12 +1010,12 @@ func at(s []string, i int) string {
 // each issue and renders it into a worker brief. It works for GitHub, GitLab, and
 // Codeberg/Gitea-family hosts without extra flags, plus a self-hosted GitLab or
 // Gitea/Forgejo host when kind says which shape it is.
-func tasksFromIssues(ctx context.Context, out io.Writer, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind, bn briefNoteOverride) (tasks, branches, labels []string, err error) {
+func tasksFromIssues(ctx context.Context, out io.Writer, repoPath string, issues []int, credentialOverrides map[string]string, kind forge.Kind, bn briefNoteOverride, ic issueCommentsOverride) (tasks, branches, labels []string, err error) {
 	f, owner, name, err := resolveForge(ctx, repoPath, credentialOverrides, kind)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return issuesToTasks(ctx, out, f, owner, name, repoPath, issues, bn)
+	return issuesToTasks(ctx, out, f, owner, name, repoPath, issues, bn, ic)
 }
 
 // resolveIssueForgeKind applies --forge > this repo's .argus/config.yml forge
@@ -1057,6 +1060,46 @@ func repoBriefNote(out io.Writer, repoPath string, bn briefNoteOverride) string 
 	}
 	warnDeprecatedConfigKeys(out, &rc)
 	return resolveBriefNote(bn.explicit, bn.value, &rc)
+}
+
+// issueCommentsOverride carries an explicit --issue-comments flag value
+// through the --issues fetch chain (spawnWorkers -> foldIssueSources ->
+// tasksFromIssues -> issuesToTasks), the same explicit-flag-wins shape
+// briefNoteOverride carries for --brief-note.
+type issueCommentsOverride struct {
+	value    bool
+	explicit bool
+}
+
+// resolveIssueComments applies --issue-comments > this repo's
+// .argus/config.yml issue_comments > the flag's own default (true), the same
+// explicit-flag-wins precedence resolveWorkerPlacement uses. rc.IssueComments
+// is a pointer (unlike ExperimentalWorkerSandbox's plain bool) because this
+// flag's default is true, not false: an unset config key must fall through to
+// that true default rather than be indistinguishable from a repo that
+// explicitly set issue_comments: false to opt a noisy thread out. rc is a
+// pointer solely to avoid copying the struct at the call site.
+func resolveIssueComments(explicit, flagValue bool, rc *repoconfig.Config) bool {
+	if explicit {
+		return flagValue
+	}
+	if rc.IssueComments != nil {
+		return *rc.IssueComments
+	}
+	return flagValue
+}
+
+// repoIssueComments resolves ic (an explicit --issue-comments flag) over this
+// repo's optional .argus/config.yml issue_comments over the flag's own
+// default, best-effort like repoBriefNote's own load: a missing or unreadable
+// config file just means the repo-config source is unavailable, not a hard
+// failure of task generation.
+func repoIssueComments(repoPath string, ic issueCommentsOverride) bool {
+	rc, err := repoconfig.Load(repoconfig.Path(repoPath))
+	if err != nil {
+		return ic.value
+	}
+	return resolveIssueComments(ic.explicit, ic.value, &rc)
 }
 
 // fixedBriefTail appends argus's own non-negotiable ship-pipeline invariants
@@ -1154,17 +1197,26 @@ func issueStatusPageConfigDefault(ctx context.Context, repoPath string) string {
 // without a network. repoPath resolves this repo's optional brief_note (see
 // repoBriefNote) — argus itself supplies no toolchain-flavored text of its
 // own when no config is present, only the fixed "don't commit" invariant.
-func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, name, repoPath string, issues []int, bn briefNoteOverride) (tasks, branches, labels []string, err error) {
+func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, name, repoPath string, issues []int, bn briefNoteOverride, ic issueCommentsOverride) (tasks, branches, labels []string, err error) {
 	tail := fixedBriefTail(repoBriefNote(out, repoPath, bn))
 	labelTemplate := workspaceLabelTemplateConfigDefault(repoPath)
+	includeComments := repoIssueComments(repoPath, ic)
 	for _, n := range issues {
 		iss, ferr := f.FetchIssue(ctx, owner, name, n)
 		if ferr != nil {
 			return nil, nil, nil, fmt.Errorf("fetching issue #%d: %w", n, ferr)
 		}
-		tasks = append(tasks, fmt.Sprintf(
-			"Fix %s/%s issue #%d: %s\n\n%s\n\n%s",
-			owner, name, n, iss.Title, iss.Body, tail))
+		task := fmt.Sprintf("Fix %s/%s issue #%d: %s\n\n%s", owner, name, n, iss.Title, iss.Body)
+		if includeComments {
+			comments, cerr := f.FetchIssueComments(ctx, owner, name, n)
+			if cerr != nil {
+				return nil, nil, nil, fmt.Errorf("fetching comments for issue #%d: %w", n, cerr)
+			}
+			if block := formatIssueComments(comments); block != "" {
+				task += "\n\n" + block
+			}
+		}
+		tasks = append(tasks, task+"\n\n"+tail)
 		branches = append(branches, fmt.Sprintf("%s-fix-issue-%d", name, n))
 		issueRef := fmt.Sprintf("#%d", n)
 		label := issueRef
@@ -1174,6 +1226,30 @@ func issuesToTasks(ctx context.Context, out io.Writer, f forge.Forge, owner, nam
 		labels = append(labels, label)
 	}
 	return tasks, branches, labels, nil
+}
+
+// formatIssueComments renders comments as a "## Comments" section for a
+// worker brief, oldest first — the same order a human reading the issue
+// thread top-to-bottom would see them. Empty input renders "" so a caller can
+// unconditionally append the result without a leftover blank section when an
+// issue has no comments yet.
+func formatIssueComments(comments []forge.Comment) string {
+	if len(comments) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Comments\n\n")
+	for i, c := range comments {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		author := c.Author
+		if author == "" {
+			author = "unknown"
+		}
+		fmt.Fprintf(&b, "**%s**: %s", author, c.Body)
+	}
+	return b.String()
 }
 
 // workspaceLabelTemplateConfigDefault reads repoPath's .argus/config.yml

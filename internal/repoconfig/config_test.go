@@ -212,6 +212,74 @@ func TestExperimentalWorkerSandboxInvalidBoolErrors(t *testing.T) {
 	}
 }
 
+func TestIssueCommentsDefaultsNil(t *testing.T) {
+	got, err := loadContent(t, "base_branch: \"develop\"\n")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.IssueComments != nil {
+		t.Errorf("IssueComments default = %v, want nil (unset) when the key is absent", got.IssueComments)
+	}
+}
+
+func TestLoadIssueCommentsFalse(t *testing.T) {
+	got, err := loadContent(t, "issue_comments: false\n")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.IssueComments == nil || *got.IssueComments != false {
+		t.Errorf("IssueComments = %v, want a pointer to false (explicit opt-out, not unset)", got.IssueComments)
+	}
+}
+
+// TestSaveLoadRoundTripIssueCommentsFalse pins the same "0 is legal, distinct
+// from unset" tri-state MaxDiffLines/ReworkBudget already rely on: an
+// explicit issue_comments: false must round-trip as a non-nil pointer to
+// false, not collapse into the nil "unset" (default true) state.
+func TestSaveLoadRoundTripIssueCommentsFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	off := false
+	want := Config{IssueComments: &off}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestSaveLoadRoundTripIssueCommentsTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".argus", "config.yml")
+	on := true
+	want := Config{IssueComments: &on}
+	if err := Save(path, &want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestIssueCommentsInvalidBoolErrors(t *testing.T) {
+	_, err := loadContent(t, "issue_comments: not-a-bool\n")
+	if err == nil {
+		t.Fatal("Load(issue_comments: not-a-bool): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "issue_comments") {
+		t.Errorf("Load error = %q, want it to mention issue_comments", err.Error())
+	}
+}
+
 func TestSaveLoadRoundTripOwnerStaleAfter(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".argus", "config.yml")

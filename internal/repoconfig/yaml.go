@@ -109,6 +109,9 @@ func encodeYAML(cfg *Config) string {
 	if cfg.WorkspaceLabelTemplate != "" {
 		fmt.Fprintf(&b, "workspace_label_template: %s\n", quoteYAML(cfg.WorkspaceLabelTemplate))
 	}
+	if cfg.IssueComments != nil {
+		fmt.Fprintf(&b, "issue_comments: %t\n", *cfg.IssueComments)
+	}
 	writeShipBlock(&b, cfg)
 	writeReworkBlock(&b, cfg)
 	writeReviewBlock(&b, cfg)
@@ -847,8 +850,8 @@ func assignAwaitingReviewKey(cfg *Config, key, value string, lines []string, nex
 // title_prefix_template, owner_stale_after, review_effort) to its
 // destination cfg field. Collapsed out of assignScalarField's own switch
 // into a lookup table so that function's cyclomatic complexity tracks the
-// keys that actually need parsing/conversion (experimental_worker_sandbox as
-// bool, max_diff_lines/rework_budget as int), not the total count of
+// keys that actually need parsing/conversion (experimental_worker_sandbox/
+// issue_comments as bool, max_diff_lines/rework_budget as int), not the total count of
 // plain-string keys — a straight "key: value" assignment carries no
 // branching of its own. Built fresh per call since each points at one cfg's
 // own fields.
@@ -874,8 +877,8 @@ func scalarStringFields(cfg *Config) map[string]*string {
 
 // assignScalarField sets cfg's field for one of parseYAML's scalar keys —
 // either a plain string assignment (see scalarStringFields) or one of the
-// few keys that also parse/convert the value (experimental_worker_sandbox as
-// bool, max_diff_lines/rework_budget as int) — key is already the canonical
+// few keys that also parse/convert the value (experimental_worker_sandbox/
+// issue_comments as bool, max_diff_lines/rework_budget as int) — key is already the canonical
 // field name by the time it reaches here, legacyFlatKeys having been applied
 // by the caller for a deprecated flat key, and this same function being
 // reused directly by assignAwaitingReviewKey for these keys' current nested
@@ -906,6 +909,12 @@ func assignScalarField(cfg *Config, key, value string, line int) (bool, error) {
 			return true, fmt.Errorf("config: line %d: rework_budget: %w", line, err)
 		}
 		cfg.ReworkBudget = &n
+	case "issue_comments":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return true, fmt.Errorf("config: line %d: issue_comments: %w", line, err)
+		}
+		cfg.IssueComments = &b
 	default:
 		return false, nil
 	}

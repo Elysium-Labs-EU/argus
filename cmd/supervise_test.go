@@ -49,7 +49,7 @@ func TestSpawnWorkersIssuesOnlyPassesGuard(t *testing.T) {
 	// into tasks/branches. repo is a non-git tempdir so it fails downstream
 	// (resolving the forge) instead — proof the guard itself let it through.
 	client := fakeClient()
-	_, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{repo: t.TempDir()}, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	_, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{repo: t.TempDir()}, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{})
 	if err == nil {
 		t.Fatal("want a downstream error resolving the forge for a non-git repo")
 	}
@@ -60,7 +60,7 @@ func TestSpawnWorkersIssuesOnlyPassesGuard(t *testing.T) {
 
 func TestFoldIssueSourcesNoop(t *testing.T) {
 	in := &workerInput{tasks: []string{"existing"}, branches: []string{"existing-branch"}}
-	if err := foldIssueSources(context.Background(), io.Discard, in, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}); err != nil {
+	if err := foldIssueSources(context.Background(), io.Discard, in, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{}); err != nil {
 		t.Fatalf("foldIssueSources: %v", err)
 	}
 	if len(in.tasks) != 1 || len(in.branches) != 1 {
@@ -114,7 +114,7 @@ func TestBuildWorkersIssueBranchSurvivesPartialBranches(t *testing.T) {
 	f := &fakeForge{issues: map[int]forge.Issue{
 		7: {Number: 7, Title: "t", Body: strings.Repeat("very long issue body ", 200)},
 	}}
-	fetchedTasks, fetchedBranches, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", in.repo, []int{7}, briefNoteOverride{})
+	fetchedTasks, fetchedBranches, _, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", in.repo, []int{7}, briefNoteOverride{}, issueCommentsOverride{})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestBuildWorkersIssueLabelSurvivesPartialLabels(t *testing.T) {
 	f := &fakeForge{issues: map[int]forge.Issue{
 		7: {Number: 7, Title: "t", Body: "b"},
 	}}
-	fetchedTasks, fetchedBranches, fetchedLabels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", in.repo, []int{7}, briefNoteOverride{})
+	fetchedTasks, fetchedBranches, fetchedLabels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", in.repo, []int{7}, briefNoteOverride{}, issueCommentsOverride{})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestIssuesToTasksDefaultLabelUnchangedWithNoTemplate(t *testing.T) {
 	f := &fakeForge{issues: map[int]forge.Issue{
 		7: {Number: 7, Title: "t", Body: "b"},
 	}}
-	_, _, labels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", t.TempDir(), []int{7}, briefNoteOverride{})
+	_, _, labels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", t.TempDir(), []int{7}, briefNoteOverride{}, issueCommentsOverride{})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestIssuesToTasksAppliesWorkspaceLabelTemplate(t *testing.T) {
 	f := &fakeForge{issues: map[int]forge.Issue{
 		7: {Number: 7, Title: "Fix login crash", Body: "b"},
 	}}
-	_, _, labels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", dir, []int{7}, briefNoteOverride{})
+	_, _, labels, err := issuesToTasks(context.Background(), io.Discard, f, "o", "widget", dir, []int{7}, briefNoteOverride{}, issueCommentsOverride{})
 	if err != nil {
 		t.Fatalf("issuesToTasks: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestFoldIssueSourcesIssuesError(t *testing.T) {
 	// repo isn't a git checkout, so resolving the origin remote fails before any
 	// network call — exercises the --issues error path without a real forge.
 	in := &workerInput{repo: t.TempDir()}
-	if err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}); err == nil {
+	if err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{}); err == nil {
 		t.Fatal("want error resolving forge for a non-git repo")
 	}
 }
@@ -364,7 +364,7 @@ func TestFoldIssueSourcesJiraError(t *testing.T) {
 	// doesn't accidentally pass on a machine with a real ~/.argus/jira.json.
 	t.Setenv("JIRA_CONFIG_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
 	in := &workerInput{repo: t.TempDir()}
-	if err := foldIssueSources(context.Background(), io.Discard, in, nil, []string{"PROJ-1"}, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}); err == nil {
+	if err := foldIssueSources(context.Background(), io.Discard, in, nil, []string{"PROJ-1"}, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{}); err == nil {
 		t.Fatal("want error building jira client without JIRA_* env vars or a config file")
 	}
 }
@@ -376,7 +376,7 @@ func TestFoldIssueSourcesSelfHostedRequiresForge(t *testing.T) {
 	t.Setenv("FORGE_TOKEN", "tok")
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
 	in := &workerInput{repo: wt}
-	if err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}); err == nil {
+	if err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{}); err == nil {
 		t.Fatal("want error: a self-hosted host with no --forge/config default should refuse")
 	}
 }
@@ -387,7 +387,7 @@ func TestFoldIssueSourcesSelfHostedForgeFlagUnblocks(t *testing.T) {
 	t.Setenv("FORGE_TOKEN", "tok")
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
 	in := &workerInput{repo: wt}
-	err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "gitea", true, briefNoteOverride{})
+	err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "gitea", true, briefNoteOverride{}, issueCommentsOverride{})
 	// The fetch itself still fails (no real forge to talk to), but it must fail
 	// past forge construction, not on the ambiguous-host refusal.
 	if err == nil {
@@ -407,7 +407,7 @@ func TestFoldIssueSourcesSelfHostedForgeConfigUnblocks(t *testing.T) {
 		t.Fatalf("seeding repo config: %v", err)
 	}
 	in := &workerInput{repo: wt}
-	err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{})
 	if err == nil {
 		t.Fatal("want a downstream fetch error (no real forge to talk to)")
 	}
@@ -426,7 +426,7 @@ func TestFoldIssueSourcesSelfHostedNoTokenShowsForgeAmbiguityFirst(t *testing.T)
 	t.Setenv("FORGE_TOKEN", "")
 	wt := gitRepo(t, []string{"remote", "add", "origin", "git@git.example.com:acme/widget.git"})
 	in := &workerInput{repo: wt}
-	err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	err := foldIssueSources(context.Background(), io.Discard, in, []int{1}, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{})
 	if err == nil {
 		t.Fatal("want error: a self-hosted host with no --forge/config default should refuse")
 	}
@@ -652,7 +652,7 @@ func TestSpawnWorkersTasksFileMultiLineBriefWithSingleBranchErrors(t *testing.T)
 
 	_, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: "/pinned", tasksFile: path, branches: []string{"single-branch"},
-	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{})
 	if err == nil {
 		t.Fatal("want error: 3 tasks-file lines paired with 1 --branches entry")
 	}
@@ -683,7 +683,7 @@ func TestSpawnWorkersTasksFileParagraphNoBranchesErrors(t *testing.T) {
 
 	_, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: "/pinned", tasksFile: path,
-	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{})
 	if err == nil {
 		t.Fatal("want error: a paragraph-shaped --tasks-file brief must be refused even with no --branches given")
 	}
@@ -1143,7 +1143,7 @@ func TestSpawnWorkersTasksFileAppendsToTasks(t *testing.T) {
 
 	workers, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: "/pinned", tasksFile: path,
-	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{})
 	if err != nil {
 		t.Fatalf("spawnWorkers: %v", err)
 	}
@@ -1164,7 +1164,7 @@ func TestSpawnWorkersWarnsOnUnquotedCommaSplit(t *testing.T) {
 	var buf bytes.Buffer
 	workers, err := spawnWorkers(context.Background(), &buf, client, &workerInput{
 		repo: "/pinned", tasks: []string{"risky change", " with a comma no quotes"}, branches: []string{"x", "y"},
-	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{})
 	if err != nil {
 		t.Fatalf("spawnWorkers: %v", err)
 	}
@@ -1184,7 +1184,7 @@ func TestSpawnWorkersNoWarningForCleanTasks(t *testing.T) {
 	var buf bytes.Buffer
 	_, err := spawnWorkers(context.Background(), &buf, client, &workerInput{
 		repo: "/pinned", tasks: []string{"fix the login bug", "add retry to the uploader"}, branches: []string{"x", "y"},
-	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{})
 	if err != nil {
 		t.Fatalf("spawnWorkers: %v", err)
 	}
@@ -1257,7 +1257,7 @@ func TestSpawnWorkersRelativeRepoResolvesAbsolute(t *testing.T) {
 	client := fakeClient()
 	workers, err := spawnWorkers(context.Background(), io.Discard, client, &workerInput{
 		repo: ".", tasks: []string{"eos#1"},
-	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{})
+	}, nil, nil, nil, jiraSpawnOpts{}, "", false, briefNoteOverride{}, issueCommentsOverride{})
 	if err != nil {
 		t.Fatalf("spawnWorkers: %v", err)
 	}
@@ -1344,6 +1344,47 @@ func TestResolveExperimentalSandboxPrefersRepoConfig(t *testing.T) {
 func TestResolveExperimentalSandboxFallsBackToFlagDefault(t *testing.T) {
 	if got := resolveExperimentalSandbox(false, false, &repoconfig.Config{}); got != false {
 		t.Errorf("resolveExperimentalSandbox = %v, want the flag's own default (false) when config sets nothing", got)
+	}
+}
+
+func TestResolveIssueCommentsExplicitFlagWinsOutright(t *testing.T) {
+	off := false
+	rc := repoconfig.Config{IssueComments: &off}
+	if got := resolveIssueComments(true, true, &rc); got != true {
+		t.Errorf("resolveIssueComments = %v, want the explicit flag value even with a repo config default", got)
+	}
+}
+
+func TestResolveIssueCommentsPrefersRepoConfig(t *testing.T) {
+	off := false
+	rc := repoconfig.Config{IssueComments: &off}
+	if got := resolveIssueComments(false, true, &rc); got != false {
+		t.Errorf("resolveIssueComments = %v, want the repo config value when the flag was not passed", got)
+	}
+}
+
+func TestResolveIssueCommentsFallsBackToFlagDefault(t *testing.T) {
+	if got := resolveIssueComments(false, true, &repoconfig.Config{}); got != true {
+		t.Errorf("resolveIssueComments = %v, want the flag's own default (true) when config sets nothing", got)
+	}
+}
+
+// TestRepoIssueCommentsBestEffortOnLoadError mirrors repoBriefNote's own
+// best-effort fallback: a repo path with no config file (or one that fails
+// to parse) falls back to ic.value rather than failing task generation.
+func TestRepoIssueCommentsBestEffortOnLoadError(t *testing.T) {
+	if got := repoIssueComments(t.TempDir(), issueCommentsOverride{value: true}); got != true {
+		t.Errorf("repoIssueComments(no config file) = %v, want the override value (true)", got)
+	}
+	broken := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(repoconfig.Path(broken)), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(repoconfig.Path(broken), []byte("not_a_real_key: value\n"), 0o600); err != nil {
+		t.Fatalf("writing broken config: %v", err)
+	}
+	if got := repoIssueComments(broken, issueCommentsOverride{value: false}); got != false {
+		t.Errorf("repoIssueComments(malformed config) = %v, want the override value (false)", got)
 	}
 }
 
@@ -1503,6 +1544,21 @@ func TestSuperviseExperimentalSandboxFlagDefaultsOffAndMarkedExperimental(t *tes
 	}
 	if !strings.Contains(strings.ToUpper(f.Usage), "EXPERIMENTAL") {
 		t.Errorf("--experimental-sandbox usage = %q, want it to say EXPERIMENTAL", f.Usage)
+	}
+}
+
+// TestSuperviseIssueCommentsFlagDefaultsTrue pins the fix itself at the flag
+// level: --issue-comments defaults to true (comments included by default,
+// closing the reported gap), unlike --experimental-sandbox's opt-in false
+// default — this is a bug fix a caller shouldn't need to opt into.
+func TestSuperviseIssueCommentsFlagDefaultsTrue(t *testing.T) {
+	cmd := newSuperviseCmd()
+	f := cmd.Flags().Lookup("issue-comments")
+	if f == nil {
+		t.Fatal("expected --issue-comments flag to be registered")
+	}
+	if f.DefValue != "true" {
+		t.Errorf("--issue-comments default = %q, want %q", f.DefValue, "true")
 	}
 }
 

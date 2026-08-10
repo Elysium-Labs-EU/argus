@@ -502,6 +502,87 @@ func TestGitLabPRChecksPaginatesBeyondFirstPage(t *testing.T) {
 	}
 }
 
+// TestGitLabFetchIssueCommentsFiltersSystemNotes pins the reason
+// FetchIssueComments can't just return every note verbatim: GitLab mixes a
+// human's actual comments into the same list as its own system-generated
+// activity (e.g. "changed the description"), and a system note carries no
+// context a worker needs.
+func TestGitLabFetchIssueCommentsFiltersSystemNotes(t *testing.T) {
+	hc := fakeHTTP(t, "/projects/o%2Fr/issues/42/notes", "", `[
+		{"author":{"username":"alice"},"body":"please add a test","system":false},
+		{"author":{"username":"argus-bot"},"body":"changed the description","system":true},
+		{"author":{"username":"bob"},"body":"done","system":false}
+	]`, 200)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	comments, err := f.FetchIssueComments(context.Background(), "o", "r", 42)
+	if err != nil {
+		t.Fatalf("FetchIssueComments: %v", err)
+	}
+	want := []Comment{{Author: "alice", Body: "please add a test"}, {Author: "bob", Body: "done"}}
+	if len(comments) != len(want) || comments[0] != want[0] || comments[1] != want[1] {
+		t.Errorf("comments = %+v, want %+v (system note filtered out)", comments, want)
+	}
+}
+
+func TestGitLabFetchIssueCommentsPaginatesBeyondFirstPage(t *testing.T) {
+	page1Notes := make([]map[string]any, gitlabIssueNotesPerPage)
+	for i := range page1Notes {
+		page1Notes[i] = map[string]any{"author": map[string]string{"username": "u"}, "body": fmt.Sprintf("c%d", i), "system": false}
+	}
+	page1Body, err := json.Marshal(page1Notes)
+	if err != nil {
+		t.Fatalf("marshaling page 1 fixture: %v", err)
+	}
+	page2Body, err := json.Marshal([]map[string]any{
+		{"author": map[string]string{"username": "last"}, "body": "final", "system": false},
+	})
+	if err != nil {
+		t.Fatalf("marshaling page 2 fixture: %v", err)
+	}
+	hc := sequencedHTTP(t, []string{string(page1Body), string(page2Body)})
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	comments, err := f.FetchIssueComments(context.Background(), "o", "r", 42)
+	if err != nil {
+		t.Fatalf("FetchIssueComments: %v", err)
+	}
+	if len(comments) != gitlabIssueNotesPerPage+1 {
+		t.Fatalf("got %d comments, want %d", len(comments), gitlabIssueNotesPerPage+1)
+	}
+	if comments[len(comments)-1].Author != "last" {
+		t.Errorf("last comment author = %q, want last", comments[len(comments)-1].Author)
+	}
+}
+
+func TestGitLabFetchIssueCommentsDecodeError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `not json`, 200)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.FetchIssueComments(context.Background(), "o", "r", 42)
+	if err == nil || !strings.Contains(err.Error(), "decoding issue notes response") {
+		t.Errorf("FetchIssueComments err = %v, want it to mention decoding issue notes response", err)
+	}
+}
+
+func TestGitLabFetchIssueCommentsSurfacesDoError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"issue not found"}`, 404)
+	f, err := New("gitlab.com", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.FetchIssueComments(context.Background(), "o", "r", 42)
+	if err == nil || !strings.Contains(err.Error(), "issue not found") {
+		t.Errorf("FetchIssueComments err = %v, want it to surface the 404 API message", err)
+	}
+}
+
 func TestGitLabPRChecksMRLookupDecodeError(t *testing.T) {
 	hc := fakeHTTP(t, "", "", `not json`, 200)
 	f, err := New("gitlab.com", "t", hc, KindAuto, "")

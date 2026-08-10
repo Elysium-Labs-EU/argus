@@ -72,6 +72,72 @@ func TestFetchIssue(t *testing.T) {
 	}
 }
 
+func TestFetchIssueComments(t *testing.T) {
+	hc := fakeHTTP(t, "/repos/o/r/issues/42/comments", "",
+		`[{"user":{"login":"alice"},"body":"looks good"},{"user":{"login":"bob"},"body":"one nit"}]`, 200)
+	f, err := New("codeberg.org", "", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	comments, err := f.FetchIssueComments(context.Background(), "o", "r", 42)
+	if err != nil {
+		t.Fatalf("FetchIssueComments: %v", err)
+	}
+	want := []Comment{{Author: "alice", Body: "looks good"}, {Author: "bob", Body: "one nit"}}
+	if len(comments) != len(want) || comments[0] != want[0] || comments[1] != want[1] {
+		t.Errorf("comments = %+v, want %+v", comments, want)
+	}
+}
+
+func TestFetchIssueCommentsPaginates(t *testing.T) {
+	page1 := make([]string, issueCommentsPerPage)
+	for i := range page1 {
+		page1[i] = fmt.Sprintf(`{"user":{"login":"u"},"body":"c%d"}`, i)
+	}
+	hc := sequencedHTTP(t, []string{
+		"[" + strings.Join(page1, ",") + "]",
+		`[{"user":{"login":"last"},"body":"final"}]`,
+	})
+	f, err := New("github.com", "ght", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	comments, err := f.FetchIssueComments(context.Background(), "o", "r", 1)
+	if err != nil {
+		t.Fatalf("FetchIssueComments: %v", err)
+	}
+	if len(comments) != issueCommentsPerPage+1 {
+		t.Fatalf("got %d comments, want %d", len(comments), issueCommentsPerPage+1)
+	}
+	if comments[len(comments)-1].Author != "last" {
+		t.Errorf("last comment author = %q, want last", comments[len(comments)-1].Author)
+	}
+}
+
+func TestFetchIssueCommentsDecodeErrorOnMalformedJSON(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `not json`, 200)
+	f, err := New("codeberg.org", "secret", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.FetchIssueComments(context.Background(), "o", "r", 42)
+	if err == nil || !strings.Contains(err.Error(), "decoding issue comments response") {
+		t.Errorf("FetchIssueComments error = %v, want it to mention decoding issue comments response", err)
+	}
+}
+
+func TestFetchIssueCommentsSurfacesError(t *testing.T) {
+	hc := fakeHTTP(t, "", "", `{"message":"not found"}`, 404)
+	f, err := New("codeberg.org", "t", hc, KindAuto, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = f.FetchIssueComments(context.Background(), "o", "r", 42)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("want surfaced API message, got %v", err)
+	}
+}
+
 func TestPRMerged(t *testing.T) {
 	merged := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	if (PR{MergedAt: &merged}).Merged() != true {
