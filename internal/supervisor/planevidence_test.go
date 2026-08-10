@@ -251,6 +251,45 @@ func TestHasPlanEvidenceFalseForPrettyPrintedToolUseBlock(t *testing.T) {
 	}
 }
 
+// TestProvisionScratchHomeSymlinkPreservesPlanEvidencePath is the regression
+// test for the scratch-HOME redirect's one hard constraint: a worker spawned
+// with HOME set to its scratch dir (see scratchHomeEnv) still writes its
+// Claude Code session transcript to realHome's .claude/projects — the exact
+// path HasPlanEvidence(cfg.Home, worktree) already checks — because only
+// .claude is symlinked, not replaced. cfg.Home never changes to the scratch
+// path, so this proves the existing check needs no change at all.
+func TestProvisionScratchHomeSymlinkPreservesPlanEvidencePath(t *testing.T) {
+	worktree := planEvidenceTestWorktree
+	realHome := t.TempDir()
+	wt := t.TempDir() // stands in for the worker's worktree root
+
+	if err := ProvisionScratchHome(wt, realHome); err != nil {
+		t.Fatalf("ProvisionScratchHome: %v", err)
+	}
+
+	// Simulate the worker's own Claude Code session, launched with
+	// HOME=<scratch>, writing its transcript exactly where Claude Code
+	// always does: $HOME/.claude/projects/<encoded worktree>/.
+	scratchTranscriptDir := filepath.Join(ScratchHomePath(wt), ".claude", "projects", projectPathReplacer.Replace(worktree))
+	if err := os.MkdirAll(scratchTranscriptDir, 0o755); err != nil {
+		t.Fatalf("creating transcript dir through the scratch home's .claude symlink: %v", err)
+	}
+	transcript := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{}}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(scratchTranscriptDir, "session-1.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatalf("writing fake transcript: %v", err)
+	}
+
+	// argus itself always calls HasPlanEvidence with cfg.Home (the real
+	// home) — never the scratch path — so that's what must resolve.
+	found, checked, err := HasPlanEvidence(realHome, worktree)
+	if err != nil {
+		t.Fatalf("HasPlanEvidence: %v", err)
+	}
+	if !found || checked != 1 {
+		t.Errorf("HasPlanEvidence(realHome, worktree) = (%v, %d), want (true, 1): the scratch HOME's .claude symlink should make the worker's transcript land under realHome/.claude/projects, exactly where HasPlanEvidence looks", found, checked)
+	}
+}
+
 func TestGateEscalatesWhenPlanEvidenceMissing(t *testing.T) {
 	st := &workerState{
 		hasFile:         true,
