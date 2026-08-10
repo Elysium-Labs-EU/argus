@@ -37,8 +37,8 @@ where it belongs, not a silent no-op.
   don't vary by worker phase and aren't tied to any one argus operation:
   `base_branch`, `worker_placement`, `forge`, `status_page`, `worktree_dir`,
   `owner_stale_after`, `worktree_bootstrap_command`, `launcher`, `allow`,
-  `brief_note`, `workspace_label_template`, `experimental_worker_sandbox`,
-  `sandbox_allow_write`.
+  `brief_note`, `workspace_label_template`, `issue_comments`,
+  `experimental_worker_sandbox`, `sandbox_allow_write`.
 - **`phases:`** — worker permission contexts, *only*: one nested block per
   phase name (`planning`, `working`, `self_test`, `awaiting_review`,
   `blocked`), each holding just that phase's own live `allow`/`deny`/`skip`
@@ -155,6 +155,16 @@ setting.
   `--issues`/`--jira-issues` label-construction path only; a plain `--tasks`
   worker with no explicit `--labels` entry still falls back to `BuildPlan`'s
   own task-derived label, untouched by this key.
+- **`issue_comments`** (default `true`) — whether `--issues` also fetches
+  each issue's comments and appends them to the worker brief, after the body,
+  under a `## Comments` heading, oldest first — so a maintainer's clarifying
+  comment posted after filing (root cause, acceptance criteria, a corrected
+  approach) still reaches the worker instead of only the original, possibly
+  stale, body. GitLab's own system-generated notes (e.g. "changed the
+  description") are filtered out; only human comments are appended. Set
+  `issue_comments: false` to opt a noisy comment thread out. Precedence: an
+  explicit `--issue-comments` flag on `supervise`, then this key, then the
+  default (`true`).
 - **`review.gate_verify_command`** — a shell command the gate re-runs inside
   a worker's worktree once it reaches a terminal phase (e.g. `"make lint"`,
   `"golangci-lint run"`), closing the gap where a diff earns a clean gate

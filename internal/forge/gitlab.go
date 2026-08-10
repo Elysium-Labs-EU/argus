@@ -187,6 +187,49 @@ func (g *gitlab) FetchIssue(ctx context.Context, owner, repo string, number int)
 	return Issue{Title: issue.Title, Body: issue.Description, Number: issue.IID}, nil
 }
 
+// gitlabIssueNotesPerPage is the page size FetchIssueComments requests from
+// GitLab's issue notes endpoint, mirroring gitlabJobsPerPage's own reasoning
+// for the pipeline-jobs endpoint.
+const gitlabIssueNotesPerPage = 100
+
+// FetchIssueComments lists an issue's human comments via GitLab's notes
+// endpoint, oldest first, paginated since a long-running issue thread can
+// outgrow one page. GitLab mixes human comments into the same notes list as
+// its own system-generated activity (label changes, description edits); a
+// system note carries no context a worker needs, so those are filtered out
+// rather than passed through as if a person wrote them.
+func (g *gitlab) FetchIssueComments(ctx context.Context, owner, repo string, number int) ([]Comment, error) {
+	var comments []Comment
+	for page := 1; ; page++ {
+		reqURL := fmt.Sprintf("%s/projects/%s/issues/%d/notes?per_page=%d&page=%d&order_by=created_at&sort=asc",
+			g.base, projectID(owner, repo), number, gitlabIssueNotesPerPage, page)
+		body, err := g.do(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		var resp []struct {
+			Author struct {
+				Username string `json:"username"`
+			} `json:"author"`
+			Body   string `json:"body"`
+			System bool   `json:"system"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("decoding issue notes response: %w", err)
+		}
+		for _, n := range resp {
+			if n.System {
+				continue
+			}
+			comments = append(comments, Comment{Author: n.Author.Username, Body: n.Body})
+		}
+		if len(resp) < gitlabIssueNotesPerPage {
+			break
+		}
+	}
+	return comments, nil
+}
+
 // projectID URL-encodes owner/repo into GitLab's namespaced-path project id form,
 // e.g. "acme/widget" -> "acme%2Fwidget".
 func projectID(owner, repo string) string {

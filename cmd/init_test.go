@@ -25,9 +25,10 @@ import (
 var initPromptExemptFields = map[string]string{
 	"ExperimentalWorkerSandbox": "experimental, opt-in via --experimental-sandbox or a hand-edited config key, not part of the interactive setup wizard",
 	"SandboxAllowWrite":         "only meaningful once ExperimentalWorkerSandbox is on; hand-edit-only like the phases.*.deny/skip subkeys",
+	"IssueComments":             "defaults to true (comments included) without any prompt needed; opt out via --issue-comments=false or a hand-edited config key, not part of the interactive setup wizard",
 }
 
-const wantConfigFieldCount = 25 // repoconfig.Config's current field count
+const wantConfigFieldCount = 26 // repoconfig.Config's current field count
 
 func writeMarker(t *testing.T, dir, name string) {
 	t.Helper()

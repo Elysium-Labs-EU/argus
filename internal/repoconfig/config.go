@@ -93,45 +93,26 @@ type Config struct {
 	// supervisor.DefaultMaxReworkBudget for the default when neither this nor
 	// --max-rework-budget is set.
 	ReworkBudget *int
-	// TitlePrefixTemplate, when set, is a required prefix ship mechanically
-	// enforces on the PR/commit title it ends up using — worker-reported
-	// (protocol.Status.Title), forge-fetched, branch-derived, or an explicit
-	// --title override — before opening the PR. A repo's own title
-	// convention (e.g. a ticket-key prefix) previously lived only in
-	// brief_note prose a worker could get wrong like any other instruction;
-	// this key gives the same convention a mechanical, unbypassable check.
-	// The literal substring "{issue}" is replaced with --jira-issue's key if
-	// set, else "#<--issue>" if --issue is set, else the empty string. A
-	// title that already starts with the rendered prefix is left alone;
-	// otherwise the prefix is prepended. Empty means no enforcement, the
-	// same "not configured" default every other key here has.
-	TitlePrefixTemplate string
-	// WorkspaceLabelTemplate overrides the herdr-visible label a
-	// --issues/--jira-issues spawned worker's workspace/tab gets (see
-	// issuesToTasks/jiraIssuesToTasks in cmd/supervise.go, and
-	// createAndPlaceWorktree's TabRename reuse of the identical Label value
-	// when a worker is nested into an existing workspace as a tab, in
-	// internal/supervisor/loop.go). Same "not configured" plain-string shape
-	// as TitlePrefixTemplate: empty renders nothing different from today's
-	// bare "#<n>" (--issues) / raw ticket key (--jira-issues) label, so every
-	// existing repo's label format is unchanged until an operator opts in.
-	// Three literal placeholders are substituted when set: "{issue}" (the
-	// same value TitlePrefixTemplate's own "{issue}" resolves to — a Jira
-	// key, or "#<n>" for a numeric --issue), "{project}" (the repo name),
-	// and "{summary}" (a short slugified prefix of the issue's own title).
-	// Scoped to the --issues/--jira-issues label-construction path only;
-	// BuildPlan's own plain-`--tasks` fallback (taskLabel) never reads this.
-	WorkspaceLabelTemplate string
-	// OwnerStaleAfter overrides how long a worktree's owner-lease heartbeat
-	// (see internal/ownership) may go quiet before a mismatched caller is let
-	// through instead of refused, same "not configured, skip" plain-string
-	// shape as VerifyCommand/ShipLint — empty falls back to
-	// ownership.DefaultStaleAfter. Stored as a Go duration string (e.g.
-	// "30m") rather than a parsed time.Duration so a malformed value is only
-	// ever an error at the one place it's consumed (resolveOwnerStaleAfter),
-	// not at Load time for every command that merely reads other keys. An
-	// explicit --owner-stale-after flag always overrides this.
-	OwnerStaleAfter string
+	// IssueComments controls whether --issues also fetches and appends each
+	// issue's comments to the worker brief, after the body (see
+	// issuesToTasks). A pointer for the same "explicit false must stay
+	// distinguishable from unset" reason as MaxDiffLines: the flag's own
+	// default is true (comments included), so a plain bool's zero value would
+	// be indistinguishable from a repo deliberately opting out of a noisy
+	// comment thread. nil defers to the --issue-comments flag (default true).
+	// An explicit --issue-comments flag always overrides this.
+	IssueComments *bool
+	// WorktreeDir overrides where a spawned worker's worktree is created,
+	// same plain-string-means-unset shape as WorkerPlacement. Empty keeps
+	// argus's default (<repo>/.claude/worktrees/<branch>); a relative value
+	// (e.g. "..") is joined under the repo root — the escape hatch for a repo
+	// whose own convention is a sibling directory next to the checkout rather
+	// than a nested one; an absolute value is used as-is. Changing this
+	// shifts the worktree's nesting depth relative to the original checkout
+	// — see WorktreeBootstrapCommand's own comment if that command hardcodes a
+	// relative hop count back to it.
+	WorktreeDir string
+	ReviewNote  string
 	// WorktreeBootstrapCommand runs once, synchronously, in a freshly created
 	// worktree, right after `git worktree add` succeeds and before the
 	// worker's agent is spawned (see supervisor.RunWorktreeBootstrapCommand), so
@@ -170,27 +151,50 @@ type Config struct {
 	// lets a repo owner point at a mirror instead of a known host's own page.
 	// An explicit --status-page-url flag (ship only) always overrides this.
 	StatusPage string
-	// WorktreeDir overrides where a spawned worker's worktree is created,
-	// same plain-string-means-unset shape as WorkerPlacement. Empty keeps
-	// argus's default (<repo>/.claude/worktrees/<branch>); a relative value
-	// (e.g. "..") is joined under the repo root — the escape hatch for a repo
-	// whose own convention is a sibling directory next to the checkout rather
-	// than a nested one; an absolute value is used as-is. Changing this
-	// shifts the worktree's nesting depth relative to the original checkout
-	// — see WorktreeBootstrapCommand's own comment if that command hardcodes a
-	// relative hop count back to it.
-	WorktreeDir       string
-	BaseBranch        string
-	GateVerifyCommand string
-	ShipVerifyCommand string
-	ReviewNote        string
-	BriefNote         string
-	WorkerPlacement   string
-	// ProofRequiredPaths, when set, entirely replaces
-	// supervisor.DefaultReviewPolicy's own built-in list rather than merging
-	// with it — the same "config wins outright, no additive merge" shape
-	// every other gate-policy key here has (see resolveGatePolicy).
-	ProofRequiredPaths []string
+	// WorkspaceLabelTemplate overrides the herdr-visible label a
+	// --issues/--jira-issues spawned worker's workspace/tab gets (see
+	// issuesToTasks/jiraIssuesToTasks in cmd/supervise.go, and
+	// createAndPlaceWorktree's TabRename reuse of the identical Label value
+	// when a worker is nested into an existing workspace as a tab, in
+	// internal/supervisor/loop.go). Same "not configured" plain-string shape
+	// as TitlePrefixTemplate: empty renders nothing different from today's
+	// bare "#<n>" (--issues) / raw ticket key (--jira-issues) label, so every
+	// existing repo's label format is unchanged until an operator opts in.
+	// Three literal placeholders are substituted when set: "{issue}" (the
+	// same value TitlePrefixTemplate's own "{issue}" resolves to — a Jira
+	// key, or "#<n>" for a numeric --issue), "{project}" (the repo name),
+	// and "{summary}" (a short slugified prefix of the issue's own title).
+	// Scoped to the --issues/--jira-issues label-construction path only;
+	// BuildPlan's own plain-`--tasks` fallback (taskLabel) never reads this.
+	WorkspaceLabelTemplate string
+	BaseBranch             string
+	GateVerifyCommand      string
+	ShipVerifyCommand      string
+	// OwnerStaleAfter overrides how long a worktree's owner-lease heartbeat
+	// (see internal/ownership) may go quiet before a mismatched caller is let
+	// through instead of refused, same "not configured, skip" plain-string
+	// shape as VerifyCommand/ShipLint — empty falls back to
+	// ownership.DefaultStaleAfter. Stored as a Go duration string (e.g.
+	// "30m") rather than a parsed time.Duration so a malformed value is only
+	// ever an error at the one place it's consumed (resolveOwnerStaleAfter),
+	// not at Load time for every command that merely reads other keys. An
+	// explicit --owner-stale-after flag always overrides this.
+	OwnerStaleAfter string
+	BriefNote       string
+	WorkerPlacement string
+	// TitlePrefixTemplate, when set, is a required prefix ship mechanically
+	// enforces on the PR/commit title it ends up using — worker-reported
+	// (protocol.Status.Title), forge-fetched, branch-derived, or an explicit
+	// --title override — before opening the PR. A repo's own title
+	// convention (e.g. a ticket-key prefix) previously lived only in
+	// brief_note prose a worker could get wrong like any other instruction;
+	// this key gives the same convention a mechanical, unbypassable check.
+	// The literal substring "{issue}" is replaced with --jira-issue's key if
+	// set, else "#<--issue>" if --issue is set, else the empty string. A
+	// title that already starts with the rendered prefix is left alone;
+	// otherwise the prefix is prepended. Empty means no enforcement, the
+	// same "not configured" default every other key here has.
+	TitlePrefixTemplate string
 	// AlwaysReviewPaths, when set, entirely replaces
 	// supervisor.DefaultReviewPolicy's own built-in list rather than merging
 	// with it, same as ProofRequiredPaths. The one exception is
@@ -210,6 +214,11 @@ type Config struct {
 	// consulted when ExperimentalWorkerSandbox is true. Empty renders no
 	// filesystem allowWrite block at all.
 	SandboxAllowWrite []string
+	// ProofRequiredPaths, when set, entirely replaces
+	// supervisor.DefaultReviewPolicy's own built-in list rather than merging
+	// with it — the same "config wins outright, no additive merge" shape
+	// every other gate-policy key here has (see resolveGatePolicy).
+	ProofRequiredPaths []string
 	// ExperimentalWorkerSandbox opts a worker into Claude Code's own OS
 	// sandbox (seatbelt on macOS, bubblewrap on Linux), rendered into
 	// settings.local.json by settingsFor when true — see
