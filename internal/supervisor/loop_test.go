@@ -1039,6 +1039,296 @@ func TestResolveSpawnLineResolvesLauncherForHostShell(t *testing.T) {
 	}
 }
 
+func TestUsesHostSpawn(t *testing.T) {
+	cases := []struct {
+		runtime string
+		want    bool
+	}{
+		{"", true},
+		{"none", true},
+		{"docker", false},
+		{"podman", false},
+	}
+	for _, tc := range cases {
+		if got := usesHostSpawn(tc.runtime); got != tc.want {
+			t.Errorf("usesHostSpawn(%q) = %v, want %v", tc.runtime, got, tc.want)
+		}
+	}
+}
+
+func TestScratchHomeEnv(t *testing.T) {
+	scratch := ScratchHomePath("/repo/.claude/worktrees/feat-x")
+	want := []string{
+		"HOME=" + scratch,
+		"XDG_CONFIG_HOME=" + filepath.Join(scratch, ".config"),
+		"GIT_CONFIG_GLOBAL=" + filepath.Join(scratch, ".gitconfig"),
+	}
+	got := scratchHomeEnv("/repo/.claude/worktrees/feat-x")
+	if !slices.Equal(got, want) {
+		t.Errorf("scratchHomeEnv = %v, want %v", got, want)
+	}
+}
+
+// TestResolveSpawnLineInjectsScratchHomeEnvForHostSpawn is the acceptance
+// test for the credential-read fix: the plain host-shell spawn path must
+// carry HOME (and XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL) pointed at the scratch
+// dir, so gh/git and every other tool that consults $HOME by convention
+// resolve there instead of argus's own real home.
+func TestResolveSpawnLineInjectsScratchHomeEnvForHostSpawn(t *testing.T) {
+	cfg := &Config{}
+	p := &WorkerPlan{Worker: Worker{Worktree: "/repo/wt"}}
+
+	line, err := resolveSpawnLine(context.Background(), cfg, p, nil)
+	if err != nil {
+		t.Fatalf("resolveSpawnLine: %v", err)
+	}
+	for _, want := range scratchHomeEnv("/repo/wt") {
+		key, val, _ := strings.Cut(want, "=")
+		if !strings.Contains(line, key+"='"+val+"'") {
+			t.Errorf("spawn line missing %s, got: %s", want, line)
+		}
+	}
+}
+
+// TestProvisionWorktreeProvisionsScratchHomeForHostSpawn exercises the real
+// production write path (provisionWorktree) rather than calling
+// ProvisionScratchHome directly, so a future change to provisionWorktree's
+// own wiring (skip condition, argument, ordering) is caught here even if
+// ProvisionScratchHome itself is untouched.
+func TestProvisionWorktreeProvisionsScratchHomeForHostSpawn(t *testing.T) {
+	repo := t.TempDir()
+	realHome := t.TempDir()
+	cfg := &Config{Now: time.Now, Base: "main", Home: realHome}
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if err = provisionWorktree(context.Background(), cfg, &plans[0]); err != nil {
+		t.Fatalf("provisionWorktree: %v", err)
+	}
+
+	link := filepath.Join(ScratchHomePath(plans[0].Worktree), ".claude")
+	target, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("reading .claude symlink: %v", err)
+	}
+	if want := filepath.Join(realHome, ".claude"); target != want {
+		t.Errorf(".claude symlink target = %q, want %q", target, want)
+	}
+}
+
+// TestProvisionWorktreeWrapsProvisionScratchHomeError forces
+// ProvisionScratchHome's own error path from inside provisionWorktree,
+// mirroring how TestExecuteAbortsSpawnWhenWorktreeBootstrapCommandFails pins
+// the bootstrap-command error one step earlier in the same function.
+func TestProvisionWorktreeWrapsProvisionScratchHomeError(t *testing.T) {
+	repo := t.TempDir()
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	wt := plans[0].Worktree
+	// A regular file at .claude/argus blocks ProvisionScratchHome's own
+	// MkdirAll of .../argus/home.
+	if err := os.MkdirAll(filepath.Join(wt, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".claude", "argus"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding blocking file: %v", err)
+	}
+
+	cfg := &Config{Now: time.Now, Base: "main"}
+	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err == nil {
+		t.Fatal("want error when ProvisionScratchHome fails, got nil")
+	} else if !strings.Contains(err.Error(), "provisioning scratch home for") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestProvisionWorktreeWrapsInvalidateStatusError(t *testing.T) {
+	repo := t.TempDir()
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	wt := plans[0].Worktree
+	// status.json as a non-empty directory: os.Remove refuses a non-empty
+	// dir, forcing InvalidateStatus's own error rather than its usual
+	// tolerated-not-exist no-op.
+	statusPath := protocol.StatusPath(wt)
+	if err := os.MkdirAll(statusPath, 0o755); err != nil {
+		t.Fatalf("seeding blocking dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(statusPath, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding non-empty dir: %v", err)
+	}
+
+	cfg := &Config{Now: time.Now, Base: "main"}
+	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err == nil {
+		t.Fatal("want error when InvalidateStatus fails, got nil")
+	} else if !strings.Contains(err.Error(), "invalidating stale status before dispatching") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+// TestProvisionWorktreeWrapsStatusWriteError forces protocol.Write's own
+// error path. cfg.WorkerRuntime is set so ProvisionScratchHome (which would
+// otherwise create .claude/argus first, leaving it writable) is skipped —
+// see usesHostSpawn — letting this test control that directory's
+// permissions itself.
+func TestProvisionWorktreeWrapsStatusWriteError(t *testing.T) {
+	repo := t.TempDir()
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	wt := plans[0].Worktree
+	argusDir := filepath.Join(wt, ".claude", "argus")
+	if err := os.MkdirAll(argusDir, 0o755); err != nil {
+		t.Fatalf("mkdir .claude/argus: %v", err)
+	}
+	// Read+execute but no write: InvalidateStatus's remove-if-exists no-op
+	// still resolves fine (status.json doesn't exist), but protocol.Write's
+	// temp-file creation in the same dir is refused.
+	if err := os.Chmod(argusDir, 0o500); err != nil {
+		t.Fatalf("chmod .claude/argus: %v", err)
+	}
+	defer func() { _ = os.Chmod(argusDir, 0o700) }() // let t.TempDir() clean up
+
+	cfg := &Config{Now: time.Now, Base: "main", WorkerRuntime: "docker"}
+	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err == nil {
+		t.Fatal("want error when protocol.Write fails, got nil")
+	} else if !strings.Contains(err.Error(), "recording base branch for") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestProvisionWorktreeWrapsWriteSettingsError(t *testing.T) {
+	repo := t.TempDir()
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	wt := plans[0].Worktree
+	// A directory at settings.local.json's own path blocks WriteSettings'
+	// WriteFile, mirroring TestWriteSettingsWrapsWriteFileError.
+	if err := os.MkdirAll(filepath.Join(wt, ".claude", "settings.local.json"), 0o755); err != nil {
+		t.Fatalf("seeding blocking dir: %v", err)
+	}
+
+	cfg := &Config{Now: time.Now, Base: "main"}
+	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err == nil {
+		t.Fatal("want error when WriteSettings fails, got nil")
+	} else if !strings.Contains(err.Error(), "writing settings for") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestProvisionWorktreeWrapsWriteBriefError(t *testing.T) {
+	repo := t.TempDir()
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	wt := plans[0].Worktree
+	// A directory at brief.md's own path blocks WriteBrief's WriteFile,
+	// mirroring TestWriteBriefWrapsWriteFileError.
+	if err := os.MkdirAll(protocol.BriefPath(wt), 0o755); err != nil {
+		t.Fatalf("seeding blocking dir: %v", err)
+	}
+
+	cfg := &Config{Now: time.Now, Base: "main"}
+	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err == nil {
+		t.Fatal("want error when WriteBrief fails, got nil")
+	} else if !strings.Contains(err.Error(), "writing brief for") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestProvisionWorktreeWrapsOwnershipSpawnError(t *testing.T) {
+	repo := t.TempDir()
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	wt := plans[0].Worktree
+	// ownership.Write's own temp file is owner.json.tmp; a directory there
+	// blocks its WriteFile without touching any earlier step's own files.
+	if err := os.MkdirAll(filepath.Join(wt, ".claude", "argus", "owner.json.tmp"), 0o755); err != nil {
+		t.Fatalf("seeding blocking dir: %v", err)
+	}
+
+	cfg := &Config{Now: time.Now, Base: "main"}
+	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err == nil {
+		t.Fatal("want error when ownership.Spawn fails, got nil")
+	} else if !strings.Contains(err.Error(), "writing owner lease for") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+// TestProvisionWorktreeSkipsScratchHomeForRuntimeAdapter guards the other
+// half of usesHostSpawn's split: a container/podman adapter already starts
+// with an empty environment and no host filesystem mounted, so
+// provisionWorktree must not even create the scratch dir for it.
+func TestProvisionWorktreeSkipsScratchHomeForRuntimeAdapter(t *testing.T) {
+	repo := t.TempDir()
+	cfg := &Config{Now: time.Now, Base: "main", Home: t.TempDir(), WorkerRuntime: "docker"}
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err != nil {
+		t.Fatalf("provisionWorktree: %v", err)
+	}
+
+	if _, err := os.Stat(ScratchHomePath(plans[0].Worktree)); !os.IsNotExist(err) {
+		t.Errorf("a runtime-adapter worker should get no scratch home dir at all, stat err = %v", err)
+	}
+}
+
+// TestExecuteSpawnLineCarriesScratchHomeRedirect is the end-to-end version of
+// TestResolveSpawnLineInjectsScratchHomeEnvForHostSpawn, exercised through
+// the real production dispatch path (execute -> resolveSpawnLine ->
+// PaneRun), matching how TestExecuteWrapsSpawnLineViaRuntimeAdapterWhenConfigured
+// pins the adapter side of the same call chain.
+func TestExecuteSpawnLineCarriesScratchHomeRedirect(t *testing.T) {
+	repo := t.TempDir()
+	rr := &recordingRunner{}
+	runner := func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		}
+		return rr.run(ctx, args...)
+	}
+	cfg := &Config{
+		Client: herdr.NewWithRunner(runner),
+		Now:    time.Now,
+		Base:   "main",
+		Home:   t.TempDir(),
+	}
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if _, err := execute(context.Background(), cfg, plans); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	var spawnLine string
+	for _, call := range rr.subcommands() {
+		if strings.HasPrefix(call, "pane run ") {
+			spawnLine = call
+		}
+	}
+	scratch := ScratchHomePath(plans[0].Worktree)
+	if !strings.Contains(spawnLine, "HOME='"+scratch+"'") {
+		t.Errorf("spawn line should carry the scratch HOME redirect: %s", spawnLine)
+	}
+}
+
 func TestExecuteFailsWhenConfiguredRuntimeAdapterIsMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // no argus-runtime-* resolves
 

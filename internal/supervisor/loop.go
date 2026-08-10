@@ -1231,6 +1231,16 @@ func provisionWorktree(ctx context.Context, cfg *Config, p *WorkerPlan) error {
 	if err := RunWorktreeBootstrapCommand(ctx, p.Worktree, cfg.WorktreeBootstrapCommand); err != nil {
 		return fmt.Errorf("running worktree_setup_cmd for %s: %w", p.Task, err)
 	}
+	// Must exist before PaneRun so the spawn line's HOME=<scratch> (see
+	// scratchHomeEnv) points at a real, already-symlinked directory rather
+	// than one the worker's own first command would have to create blind.
+	// Skipped for a runtime adapter the same way scratchHomeEnv itself is —
+	// see usesHostSpawn's doc comment.
+	if usesHostSpawn(cfg.WorkerRuntime) {
+		if err := ProvisionScratchHome(p.Worktree, cfg.Home); err != nil {
+			return fmt.Errorf("provisioning scratch home for %s: %w", p.Task, err)
+		}
+	}
 	// A worktree directory can carry a leftover status.json/verdict.json from an
 	// unrelated prior task — e.g. directory reuse in worktree
 	// creation. Without this, the watch loop's first poll can read that stale
@@ -1393,14 +1403,46 @@ func ensureFreshPane(ctx context.Context, client herdr.Client, paneID, task stri
 // host's absolute path (e.g. /opt/homebrew/bin/claude) is almost certainly
 // wrong inside that container's filesystem, so LaunchViaRuntime gets the
 // launcher unresolved and lets the container's PATH find it.
+// usesHostSpawn reports whether workerRuntime names the plain host-shell
+// spawn path (SpawnCommand) rather than a container/podman runtime adapter
+// (LaunchViaRuntime) — "" and "none" both mean today's unwrapped behavior.
+// resolveSpawnLine and provisionWorktree both branch on this so the
+// scratch-HOME redirect below is applied (or skipped) consistently by both.
+func usesHostSpawn(workerRuntime string) bool {
+	return workerRuntime == "" || workerRuntime == "none"
+}
+
+// scratchHomeEnv is the HOME/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL assignments
+// injected for the plain host-shell spawn path so gh/git — and anything else
+// that consults $HOME by convention — resolve against the worker's scratch
+// home (see ProvisionScratchHome) instead of argus's own real home. A worker
+// never needs gh auth or a global git identity: the supervisor does all
+// commit/push/PR work itself, so redirecting these costs the worker nothing.
+func scratchHomeEnv(worktree string) []string {
+	scratch := ScratchHomePath(worktree)
+	return []string{
+		"HOME=" + scratch,
+		"XDG_CONFIG_HOME=" + filepath.Join(scratch, ".config"),
+		"GIT_CONFIG_GLOBAL=" + filepath.Join(scratch, ".gitconfig"),
+	}
+}
+
 func resolveSpawnLine(ctx context.Context, cfg *Config, p *WorkerPlan, workerEnv []string) (string, error) {
 	launcher := cfg.Launcher
 	if launcher == "" {
 		launcher = defaultAgent.DefaultLauncher()
 	}
 
-	if cfg.WorkerRuntime == "" || cfg.WorkerRuntime == "none" {
-		return SpawnCommand(p.Worktree, ResolveLauncherPath(launcher), cfg.ScrubEnv, workerEnv), nil
+	if usesHostSpawn(cfg.WorkerRuntime) {
+		// The scratch-HOME redirect is a host-process concern only: a
+		// container/podman adapter already starts with an empty environment and
+		// no host filesystem mounted (see docs/worker-runtime-protocol.md), so
+		// injecting it there would be redundant at best and could shadow an
+		// adapter's own HOME handling at worst.
+		env := make([]string, 0, len(workerEnv)+3)
+		env = append(env, workerEnv...)
+		env = append(env, scratchHomeEnv(p.Worktree)...)
+		return SpawnCommand(p.Worktree, ResolveLauncherPath(launcher), cfg.ScrubEnv, env), nil
 	}
 	line, err := LaunchViaRuntime(ctx, cfg.WorkerRuntime, p.Worktree, launcher, workerEnv)
 	if err != nil {

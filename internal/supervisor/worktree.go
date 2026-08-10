@@ -99,6 +99,54 @@ func WriteBrief(worktree, brief string) error {
 	return nil
 }
 
+// ScratchHomePath returns a worker's per-worktree scratch HOME directory,
+// alongside argus's own scaffolding (status.json, brief.md) so it is cleaned
+// up whenever the worktree is pruned and never shows up in a worker's own
+// tracked-file diff.
+func ScratchHomePath(worktree string) string {
+	return filepath.Join(worktree, ".claude", "argus", "home")
+}
+
+// ProvisionScratchHome creates worktree's scratch HOME and symlinks its
+// .claude to realHome's .claude, so a worker spawned with HOME set to the
+// scratch dir (see scratchHomeEnv) keeps its own Claude Code auth/config and
+// still writes its session transcript under realHome's .claude/projects —
+// exactly where HasPlanEvidence already looks, so that check needs no
+// change. Every other credential path a real $HOME exposes by convention
+// (~/.ssh, ~/.netrc, ~/.git-credentials, ~/.config/gh, ~/.aws, ...) simply
+// does not exist under the scratch tree; that absence, not an explicit deny
+// rule, is what closes the read vector for the default unwrapped worker.
+//
+// realHome == "" (a Config that never resolved a home directory) leaves the
+// scratch dir without a .claude symlink rather than erroring — the same
+// soft fallback HasPlanEvidence already applies to an empty home.
+func ProvisionScratchHome(worktree, realHome string) error {
+	scratch := ScratchHomePath(worktree)
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		return fmt.Errorf("creating scratch home: %w", err)
+	}
+	if realHome == "" {
+		return nil
+	}
+	target := filepath.Join(realHome, ".claude")
+	// A dangling symlink (target missing) blocks a later `mkdir` through it —
+	// the worker's own Claude Code session would then fail to create its
+	// projects/ dir on a host that has never run `claude` before.
+	if err := os.MkdirAll(target, 0o755); err != nil { //nolint:gosec // real home's own config dir, standard perms
+		return fmt.Errorf("creating real home .claude dir: %w", err)
+	}
+	link := filepath.Join(scratch, ".claude")
+	if _, err := os.Lstat(link); err == nil {
+		return nil // already provisioned by an earlier attempt at this worktree
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking scratch home .claude symlink: %w", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		return fmt.Errorf("symlinking scratch home .claude: %w", err)
+	}
+	return nil
+}
+
 // EnsureDistinctWorktrees refuses to proceed when two workers would land in the
 // same worktree — the real collision hazard, since two agents editing one
 // checkout will clobber each other. This is the correct gate for argus's dispatch

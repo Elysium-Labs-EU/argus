@@ -296,6 +296,162 @@ func TestWriteBriefWrapsWriteFileError(t *testing.T) {
 	}
 }
 
+func TestScratchHomePathUnderWorktreeArgusScaffolding(t *testing.T) {
+	got := ScratchHomePath("/repo/.claude/worktrees/feat-x")
+	want := "/repo/.claude/worktrees/feat-x/.claude/argus/home"
+	if got != want {
+		t.Errorf("ScratchHomePath = %q, want %q", got, want)
+	}
+}
+
+func TestProvisionScratchHomeSymlinksClaudeToRealHome(t *testing.T) {
+	wt := t.TempDir()
+	realHome := t.TempDir()
+
+	if err := ProvisionScratchHome(wt, realHome); err != nil {
+		t.Fatalf("ProvisionScratchHome: %v", err)
+	}
+
+	scratch := ScratchHomePath(wt)
+	if info, err := os.Stat(scratch); err != nil || !info.IsDir() {
+		t.Fatalf("scratch home dir not created: stat err=%v", err)
+	}
+	link := filepath.Join(scratch, ".claude")
+	target, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("reading .claude symlink: %v", err)
+	}
+	if want := filepath.Join(realHome, ".claude"); target != want {
+		t.Errorf(".claude symlink target = %q, want %q", target, want)
+	}
+
+	// The whole point of the redirect: none of these credential paths exist
+	// under the scratch tree, only the one symlinked exception.
+	for _, name := range []string{".ssh", ".netrc", ".git-credentials", ".config", ".aws"} {
+		if _, err := os.Stat(filepath.Join(scratch, name)); !os.IsNotExist(err) {
+			t.Errorf("scratch home should not contain %q, stat err = %v", name, err)
+		}
+	}
+}
+
+func TestProvisionScratchHomeEmptyRealHomeSkipsSymlink(t *testing.T) {
+	wt := t.TempDir()
+
+	if err := ProvisionScratchHome(wt, ""); err != nil {
+		t.Fatalf("ProvisionScratchHome: %v", err)
+	}
+
+	scratch := ScratchHomePath(wt)
+	if _, err := os.Stat(scratch); err != nil {
+		t.Fatalf("scratch home dir not created: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(scratch, ".claude")); !os.IsNotExist(err) {
+		t.Errorf("no realHome given: .claude symlink should not exist, stat err = %v", err)
+	}
+}
+
+func TestProvisionScratchHomeIsIdempotent(t *testing.T) {
+	wt := t.TempDir()
+	realHome := t.TempDir()
+
+	if err := ProvisionScratchHome(wt, realHome); err != nil {
+		t.Fatalf("first ProvisionScratchHome: %v", err)
+	}
+	if err := ProvisionScratchHome(wt, realHome); err != nil {
+		t.Fatalf("second ProvisionScratchHome should be a no-op, got: %v", err)
+	}
+
+	link := filepath.Join(ScratchHomePath(wt), ".claude")
+	target, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("reading .claude symlink: %v", err)
+	}
+	if want := filepath.Join(realHome, ".claude"); target != want {
+		t.Errorf(".claude symlink target = %q, want %q", target, want)
+	}
+}
+
+func TestProvisionScratchHomeWrapsMkdirAllError(t *testing.T) {
+	wt := t.TempDir()
+	// A regular file at .claude/argus blocks MkdirAll from creating .../home.
+	if err := os.MkdirAll(filepath.Join(wt, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".claude", "argus"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding blocking file: %v", err)
+	}
+
+	err := ProvisionScratchHome(wt, t.TempDir())
+	if err == nil {
+		t.Fatal("want error when scratch home dir can't be created, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating scratch home") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestProvisionScratchHomeWrapsRealHomeClaudeMkdirError(t *testing.T) {
+	wt := t.TempDir()
+	realHome := t.TempDir()
+	// A regular file at realHome/.claude blocks MkdirAll from ensuring it's a
+	// directory before the symlink is allowed to point at it.
+	if err := os.WriteFile(filepath.Join(realHome, ".claude"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding blocking file: %v", err)
+	}
+
+	err := ProvisionScratchHome(wt, realHome)
+	if err == nil {
+		t.Fatal("want error when real home's .claude dir can't be created, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating real home .claude dir") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestProvisionScratchHomeWrapsLstatError(t *testing.T) {
+	wt := t.TempDir()
+	if err := ProvisionScratchHome(wt, t.TempDir()); err != nil {
+		t.Fatalf("seeding scratch home: %v", err)
+	}
+	scratch := ScratchHomePath(wt)
+	// No execute permission on scratch means Lstat can't even resolve the
+	// ".claude" component inside it — a permission error, not "not exist".
+	if err := os.Chmod(scratch, 0o000); err != nil {
+		t.Fatalf("chmod scratch home: %v", err)
+	}
+	defer func() { _ = os.Chmod(scratch, 0o700) }() // let t.TempDir() clean up
+
+	err := ProvisionScratchHome(wt, t.TempDir())
+	if err == nil {
+		t.Fatal("want error when the .claude symlink can't be statted, got nil")
+	}
+	if !strings.Contains(err.Error(), "checking scratch home .claude symlink") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestProvisionScratchHomeWrapsSymlinkError(t *testing.T) {
+	wt := t.TempDir()
+	if err := ProvisionScratchHome(wt, ""); err != nil {
+		t.Fatalf("seeding scratch home: %v", err)
+	}
+	scratch := ScratchHomePath(wt)
+	// Read+execute but no write: Lstat resolves cleanly to "not exist", but
+	// creating the new symlink entry itself is refused.
+	if err := os.Chmod(scratch, 0o500); err != nil {
+		t.Fatalf("chmod scratch home: %v", err)
+	}
+	defer func() { _ = os.Chmod(scratch, 0o700) }() // let t.TempDir() clean up
+
+	err := ProvisionScratchHome(wt, t.TempDir())
+	if err == nil {
+		t.Fatal("want error when the .claude symlink can't be created, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlinking scratch home .claude") {
+		t.Errorf("error should be wrapped with context, got: %v", err)
+	}
+}
+
 func TestRunWorktreeBootstrapCommandTimeoutIsKilled(t *testing.T) {
 	// Passing an already-short-deadlined parent ctx makes WithTimeout's
 	// effective deadline the earlier one, exercising the 5-minute timeout
