@@ -1329,6 +1329,146 @@ func TestExecuteSpawnLineCarriesScratchHomeRedirect(t *testing.T) {
 	}
 }
 
+// fakeEnvBroker is a CredentialBroker stub that returns a fixed WorkerEnv,
+// distinct from recordingBroker (whose WorkerEnv always returns nil) so a
+// broker-present test can assert ARGUS_WORKER=1 coexists with real broker env
+// entries instead of masking either one.
+type fakeEnvBroker struct{}
+
+func (fakeEnvBroker) WorkerEnv(string, string) []string {
+	return []string{"ANTHROPIC_API_KEY=sentinel"}
+}
+func (fakeEnvBroker) Revoke(string) int { return 0 }
+
+// TestExecuteSpawnEnvCarriesArgusWorkerSignalWithNilBroker guards the
+// worker-identity signal ADR 0002 promises: every worker spawn carries
+// ARGUS_WORKER=1 even when no credential broker is configured, since the
+// signal is about session identity, not credentials.
+func TestExecuteSpawnEnvCarriesArgusWorkerSignalWithNilBroker(t *testing.T) {
+	repo := t.TempDir()
+	rr := &recordingRunner{}
+	runner := func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		}
+		return rr.run(ctx, args...)
+	}
+	cfg := &Config{
+		Client: herdr.NewWithRunner(runner),
+		Now:    time.Now,
+		Base:   "main",
+		Home:   t.TempDir(),
+	}
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if _, err := execute(context.Background(), cfg, plans); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	var spawnLine string
+	for _, call := range rr.subcommands() {
+		if strings.HasPrefix(call, "pane run ") {
+			spawnLine = call
+		}
+	}
+	if !strings.Contains(spawnLine, "ARGUS_WORKER='1'") {
+		t.Errorf("spawn line should carry the ARGUS_WORKER=1 identity signal: %s", spawnLine)
+	}
+}
+
+// TestExecuteSpawnEnvCarriesArgusWorkerSignalWithBrokerConfigured is the same
+// guard with a broker present, so the always-on signal is proven additive to
+// (not replaced by) cfg.Broker.WorkerEnv's own entries.
+func TestExecuteSpawnEnvCarriesArgusWorkerSignalWithBrokerConfigured(t *testing.T) {
+	repo := t.TempDir()
+	rr := &recordingRunner{}
+	runner := func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		}
+		return rr.run(ctx, args...)
+	}
+	cfg := &Config{
+		Client: herdr.NewWithRunner(runner),
+		Now:    time.Now,
+		Base:   "main",
+		Home:   t.TempDir(),
+		Broker: fakeEnvBroker{},
+	}
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if _, err := execute(context.Background(), cfg, plans); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	var spawnLine string
+	for _, call := range rr.subcommands() {
+		if strings.HasPrefix(call, "pane run ") {
+			spawnLine = call
+		}
+	}
+	if !strings.Contains(spawnLine, "ARGUS_WORKER='1'") {
+		t.Errorf("spawn line should carry ARGUS_WORKER=1 alongside broker env: %s", spawnLine)
+	}
+	if !strings.Contains(spawnLine, "ANTHROPIC_API_KEY='sentinel'") {
+		t.Errorf("spawn line should still carry the broker's own env: %s", spawnLine)
+	}
+}
+
+// TestExecuteWrapsSpawnLineViaRuntimeAdapterCarriesArgusWorkerSignal proves
+// the signal also survives the runtime-adapter path, where workerEnv crosses
+// as ARGUS_RUNTIME_ENV JSON rather than an inline shell assignment.
+func TestExecuteWrapsSpawnLineViaRuntimeAdapterCarriesArgusWorkerSignal(t *testing.T) {
+	writeFakeAdapter(t, "fake", `echo "$ARGUS_RUNTIME_ENV"`)
+
+	repo := t.TempDir()
+	rr := &recordingRunner{}
+	runner := func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
+			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
+		}
+		return rr.run(ctx, args...)
+	}
+	cfg := &Config{
+		Client:        herdr.NewWithRunner(runner),
+		Now:           time.Now,
+		Base:          "main",
+		WorkerRuntime: "fake",
+	}
+	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if _, err := execute(context.Background(), cfg, plans); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	var spawnLine string
+	for _, call := range rr.subcommands() {
+		if strings.HasPrefix(call, "pane run ") {
+			spawnLine = call
+		}
+	}
+	jsonStart := strings.Index(spawnLine, "{")
+	if jsonStart == -1 {
+		t.Fatalf("spawn line should contain the adapter's echoed ARGUS_RUNTIME_ENV JSON, got %q", spawnLine)
+	}
+	var gotEnv map[string]string
+	if err := json.Unmarshal([]byte(spawnLine[jsonStart:]), &gotEnv); err != nil {
+		t.Fatalf("spawn line should be the adapter's echoed ARGUS_RUNTIME_ENV JSON, got %q: %v", spawnLine, err)
+	}
+	if gotEnv["ARGUS_WORKER"] != "1" {
+		t.Errorf("ARGUS_RUNTIME_ENV should carry ARGUS_WORKER=1, got %v", gotEnv)
+	}
+}
+
 func TestExecuteFailsWhenConfiguredRuntimeAdapterIsMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // no argus-runtime-* resolves
 

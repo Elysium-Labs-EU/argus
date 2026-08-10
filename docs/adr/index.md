@@ -7,3 +7,4 @@ numbered sequentially. Run `make adr-find Q="concept"` to locate the ADR
 | Number | Title | Status |
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
+| [0002](0002-orchestrator-governance.md) | Orchestrator-session governance | Accepted |

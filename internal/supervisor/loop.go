@@ -1119,12 +1119,17 @@ func execute(ctx context.Context, cfg *Config, plans []WorkerPlan) ([]*workerSta
 			return fail(i, err)
 		}
 
-		// When a broker is configured, the launch line carries this worker's
-		// phantom credentials inline, so the agent authenticates through argus
-		// and is not handed a real key in its own environment.
-		var workerEnv []string
+		// ARGUS_WORKER=1 is the worker-identity signal an orchestrator-global
+		// hook checks to no-op inside a worker (see docs/adr/0002). It rides
+		// every worker spawn unconditionally, independent of whether a broker
+		// is configured, since it is a signal about the session, not a
+		// credential. When a broker is configured, the launch line also
+		// carries this worker's phantom credentials inline, so the agent
+		// authenticates through argus and is not handed a real key in its own
+		// environment.
+		workerEnv := []string{"ARGUS_WORKER=1"}
 		if cfg.Broker != nil {
-			workerEnv = cfg.Broker.WorkerEnv(taskLabel(p.Task), p.Branch)
+			workerEnv = append(workerEnv, cfg.Broker.WorkerEnv(taskLabel(p.Task), p.Branch)...)
 		}
 
 		spawnLine, err := resolveSpawnLine(ctx, cfg, p, workerEnv)
