@@ -1056,96 +1056,6 @@ func TestUsesHostSpawn(t *testing.T) {
 	}
 }
 
-func TestScratchHomeEnv(t *testing.T) {
-	scratch := ScratchHomePath("/repo/.claude/worktrees/feat-x")
-	want := []string{
-		"HOME=" + scratch,
-		"XDG_CONFIG_HOME=" + filepath.Join(scratch, ".config"),
-		"GIT_CONFIG_GLOBAL=" + filepath.Join(scratch, ".gitconfig"),
-	}
-	got := scratchHomeEnv("/repo/.claude/worktrees/feat-x")
-	if !slices.Equal(got, want) {
-		t.Errorf("scratchHomeEnv = %v, want %v", got, want)
-	}
-}
-
-// TestResolveSpawnLineInjectsScratchHomeEnvForHostSpawn is the acceptance
-// test for the credential-read fix: the plain host-shell spawn path must
-// carry HOME (and XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL) pointed at the scratch
-// dir, so gh/git and every other tool that consults $HOME by convention
-// resolve there instead of argus's own real home.
-func TestResolveSpawnLineInjectsScratchHomeEnvForHostSpawn(t *testing.T) {
-	cfg := &Config{}
-	p := &WorkerPlan{Worker: Worker{Worktree: "/repo/wt"}}
-
-	line, err := resolveSpawnLine(context.Background(), cfg, p, nil)
-	if err != nil {
-		t.Fatalf("resolveSpawnLine: %v", err)
-	}
-	for _, want := range scratchHomeEnv("/repo/wt") {
-		key, val, _ := strings.Cut(want, "=")
-		if !strings.Contains(line, key+"='"+val+"'") {
-			t.Errorf("spawn line missing %s, got: %s", want, line)
-		}
-	}
-}
-
-// TestProvisionWorktreeProvisionsScratchHomeForHostSpawn exercises the real
-// production write path (provisionWorktree) rather than calling
-// ProvisionScratchHome directly, so a future change to provisionWorktree's
-// own wiring (skip condition, argument, ordering) is caught here even if
-// ProvisionScratchHome itself is untouched.
-func TestProvisionWorktreeProvisionsScratchHomeForHostSpawn(t *testing.T) {
-	repo := t.TempDir()
-	realHome := t.TempDir()
-	cfg := &Config{Now: time.Now, Base: "main", Home: realHome}
-	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
-	if err != nil {
-		t.Fatalf("BuildPlan: %v", err)
-	}
-
-	if err = provisionWorktree(context.Background(), cfg, &plans[0]); err != nil {
-		t.Fatalf("provisionWorktree: %v", err)
-	}
-
-	link := filepath.Join(ScratchHomePath(plans[0].Worktree), ".claude")
-	target, err := os.Readlink(link)
-	if err != nil {
-		t.Fatalf("reading .claude symlink: %v", err)
-	}
-	if want := filepath.Join(realHome, ".claude"); target != want {
-		t.Errorf(".claude symlink target = %q, want %q", target, want)
-	}
-}
-
-// TestProvisionWorktreeWrapsProvisionScratchHomeError forces
-// ProvisionScratchHome's own error path from inside provisionWorktree,
-// mirroring how TestExecuteAbortsSpawnWhenWorktreeBootstrapCommandFails pins
-// the bootstrap-command error one step earlier in the same function.
-func TestProvisionWorktreeWrapsProvisionScratchHomeError(t *testing.T) {
-	repo := t.TempDir()
-	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
-	if err != nil {
-		t.Fatalf("BuildPlan: %v", err)
-	}
-	wt := plans[0].Worktree
-	// A regular file at .claude/argus blocks ProvisionScratchHome's own
-	// MkdirAll of .../argus/home.
-	if err := os.MkdirAll(filepath.Join(wt, ".claude"), 0o755); err != nil {
-		t.Fatalf("mkdir .claude: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(wt, ".claude", "argus"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("seeding blocking file: %v", err)
-	}
-
-	cfg := &Config{Now: time.Now, Base: "main"}
-	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err == nil {
-		t.Fatal("want error when ProvisionScratchHome fails, got nil")
-	} else if !strings.Contains(err.Error(), "provisioning scratch home for") {
-		t.Errorf("error should be wrapped with context, got: %v", err)
-	}
-}
-
 func TestProvisionWorktreeWrapsInvalidateStatusError(t *testing.T) {
 	repo := t.TempDir()
 	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
@@ -1173,10 +1083,7 @@ func TestProvisionWorktreeWrapsInvalidateStatusError(t *testing.T) {
 }
 
 // TestProvisionWorktreeWrapsStatusWriteError forces protocol.Write's own
-// error path. cfg.WorkerRuntime is set so ProvisionScratchHome (which would
-// otherwise create .claude/argus first, leaving it writable) is skipped —
-// see usesHostSpawn — letting this test control that directory's
-// permissions itself.
+// error path.
 func TestProvisionWorktreeWrapsStatusWriteError(t *testing.T) {
 	repo := t.TempDir()
 	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
@@ -1196,7 +1103,7 @@ func TestProvisionWorktreeWrapsStatusWriteError(t *testing.T) {
 	}
 	defer func() { _ = os.Chmod(argusDir, 0o700) }() // let t.TempDir() clean up
 
-	cfg := &Config{Now: time.Now, Base: "main", WorkerRuntime: "docker"}
+	cfg := &Config{Now: time.Now, Base: "main"}
 	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err == nil {
 		t.Fatal("want error when protocol.Write fails, got nil")
 	} else if !strings.Contains(err.Error(), "recording base branch for") {
@@ -1264,68 +1171,6 @@ func TestProvisionWorktreeWrapsOwnershipSpawnError(t *testing.T) {
 		t.Fatal("want error when ownership.Spawn fails, got nil")
 	} else if !strings.Contains(err.Error(), "writing owner lease for") {
 		t.Errorf("error should be wrapped with context, got: %v", err)
-	}
-}
-
-// TestProvisionWorktreeSkipsScratchHomeForRuntimeAdapter guards the other
-// half of usesHostSpawn's split: a container/podman adapter already starts
-// with an empty environment and no host filesystem mounted, so
-// provisionWorktree must not even create the scratch dir for it.
-func TestProvisionWorktreeSkipsScratchHomeForRuntimeAdapter(t *testing.T) {
-	repo := t.TempDir()
-	cfg := &Config{Now: time.Now, Base: "main", Home: t.TempDir(), WorkerRuntime: "docker"}
-	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
-	if err != nil {
-		t.Fatalf("BuildPlan: %v", err)
-	}
-
-	if err := provisionWorktree(context.Background(), cfg, &plans[0]); err != nil {
-		t.Fatalf("provisionWorktree: %v", err)
-	}
-
-	if _, err := os.Stat(ScratchHomePath(plans[0].Worktree)); !os.IsNotExist(err) {
-		t.Errorf("a runtime-adapter worker should get no scratch home dir at all, stat err = %v", err)
-	}
-}
-
-// TestExecuteSpawnLineCarriesScratchHomeRedirect is the end-to-end version of
-// TestResolveSpawnLineInjectsScratchHomeEnvForHostSpawn, exercised through
-// the real production dispatch path (execute -> resolveSpawnLine ->
-// PaneRun), matching how TestExecuteWrapsSpawnLineViaRuntimeAdapterWhenConfigured
-// pins the adapter side of the same call chain.
-func TestExecuteSpawnLineCarriesScratchHomeRedirect(t *testing.T) {
-	repo := t.TempDir()
-	rr := &recordingRunner{}
-	runner := func(ctx context.Context, args ...string) ([]byte, error) {
-		if len(args) >= 2 && args[0] == "worktree" && args[1] == "create" {
-			return []byte(`{"result":{"root_pane":{"pane_id":"w9:p1"},"worktree":{"path":"` + repo + `/.claude/worktrees/feat-x"}}}`), nil
-		}
-		return rr.run(ctx, args...)
-	}
-	cfg := &Config{
-		Client: herdr.NewWithRunner(runner),
-		Now:    time.Now,
-		Base:   "main",
-		Home:   t.TempDir(),
-	}
-	plans, err := BuildPlan([]Worker{{Task: "t", Branch: "feat-x", RepoRoot: repo}}, "origin/main", nil, nil, nil, "", false, nil)
-	if err != nil {
-		t.Fatalf("BuildPlan: %v", err)
-	}
-
-	if _, err := execute(context.Background(), cfg, plans); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	var spawnLine string
-	for _, call := range rr.subcommands() {
-		if strings.HasPrefix(call, "pane run ") {
-			spawnLine = call
-		}
-	}
-	scratch := ScratchHomePath(plans[0].Worktree)
-	if !strings.Contains(spawnLine, "HOME='"+scratch+"'") {
-		t.Errorf("spawn line should carry the scratch HOME redirect: %s", spawnLine)
 	}
 }
 

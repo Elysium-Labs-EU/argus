@@ -2,15 +2,12 @@
 
 argus spawns each worker as a shell command typed into a herdr pane. By
 default that command runs directly on the host, in the same OS user and
-filesystem as argus itself — credproxy (`internal/credproxy`) keeps the real
-`ANTHROPIC_API_KEY` out of the worker's environment, and `SpawnCommand`
-redirects the worker's own `HOME` to an empty per-worker scratch dir with
-only `.claude` symlinked back to the real one (see `ProvisionScratchHome`),
-so `~/.ssh`, `~/.netrc`, `~/.git-credentials`, `~/.config/gh`, and `~/.aws`
-are unreachable by the `~`-relative convention every credential-aware tool
-uses. That still leaves an absolute-path read (a worker that determines the
-real home directory some other way) and unrestricted outbound network open —
-a runtime adapter closes those by running the worker in an isolated
+filesystem as argus itself, with the same `HOME` as argus's own process —
+credproxy (`internal/credproxy`) keeps the real `ANTHROPIC_API_KEY` out of
+the worker's environment, but `~/.ssh`, `~/.netrc`, `~/.git-credentials`,
+`~/.config/gh`, and `~/.aws` remain reachable by the `~`-relative convention
+every credential-aware tool uses, and outbound network is unrestricted — a
+runtime adapter closes those by running the worker in an isolated
 environment (a container, a namespace, or nothing at all) whose mount table
 and network simply don't contain those paths and hosts.
 
@@ -145,7 +142,7 @@ stays `nil` and no credential env reaches `ARGUS_RUNTIME_ENV` at all.
 
 For an unwrapped worker (`--worker-runtime none`, the default) that is not
 fatal — the worker runs on the host's own filesystem and reaches `~/.claude`
-via its scratch HOME's symlink, same as running `claude` by hand. For an isolated worker it *is*
+directly, same as running `claude` by hand. For an isolated worker it *is*
 fatal: the whole point of a runtime adapter is that `~/.claude` does not exist
 in its mount table (see above), so there is no fallback credential source
 left. Before this was caught, that produced a worker that spawned
@@ -160,8 +157,8 @@ runtime surprise. Today there are two ways around it:
 
 - Set `ANTHROPIC_API_KEY` so credproxy has a key to front.
 - Drop `--worker-runtime` (or pass `none`) and accept the unwrapped worker's
-  weaker isolation — it still shares the host's filesystem and network, even
-  though its scratch HOME closes off `~/.ssh`/`~/.aws`-style convention reads.
+  weaker isolation — it shares the host's filesystem and network, including
+  `~/.ssh`/`~/.aws`-style convention reads.
 
 Bridging OAuth/subscription credentials into an isolated worker properly —
 either by extending credproxy to front session-token auth the same way it
