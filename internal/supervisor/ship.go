@@ -88,7 +88,15 @@ func quotedAfter(msg, prefix string) (string, bool) {
 // worker's brief/status/verdict and the generated permission file. MeasureDiff
 // excludes the same paths (via isControlPlanePath, prune.go) so the gate never
 // escalates on lines that ship was always going to drop.
-var controlPlanePaths = []string{".claude/argus", ".claude/settings.local.json"}
+//
+// .argus-report-body.json is the one entry here argus itself never writes —
+// it's the worktree-root scratch file a worker materializes when it passes
+// `argus worker report --file` a body it wrote out first instead of piping it
+// over stdin. It still needs the same treatment as the rest of this list:
+// left alone, it inflates the measured diff enough to trip the unwaivable
+// under-report check, and an unfiltered `git add -A` would sweep it into the
+// PR.
+var controlPlanePaths = []string{".claude/argus", ".claude/settings.local.json", ".argus-report-body.json"}
 
 // CommitAll stages every change in the worktree and commits it. It returns
 // ErrNothingToCommit when nothing worth shipping remains, so shipping a worktree
