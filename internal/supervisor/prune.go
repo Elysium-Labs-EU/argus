@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -291,6 +292,15 @@ func hasUnpushedCommits(ctx context.Context, worktree string) bool {
 // (empty when the directory was already gone), so a caller can tell an
 // operator where to look to undo it.
 //
+// The relocation also clears golangci-lint's cache (see cleanLintCache):
+// golangci-lint keys cached results in part by each linted file's absolute
+// path, so once c.Path stops existing there, a sibling worktree's next
+// `make lint` can replay a cached finding against a file that lived at that
+// now-gone path, surfacing as a phantom error for a diff that never touched
+// it. Only the actual relocation triggers this — a candidate whose directory
+// was already gone (DirGone) didn't just get moved out from under its path
+// by this run, so there's nothing new for prune itself to have poisoned.
+//
 // When c.PaneID is set, it also closes that herdr pane — and the pane's
 // workspace too, if it was left as the only one there — mirroring how
 // prepareWorktree spawns a worktree and its pane together. This step is
@@ -304,6 +314,7 @@ func CleanWorktree(ctx context.Context, repoRoot string, client herdr.Client, c 
 		if err != nil {
 			return "", "", err
 		}
+		cleanLintCache(ctx)
 	}
 	if _, err := git(ctx, repoRoot, "worktree", "remove", "--force", c.Path); err != nil {
 		return trashPath, "", fmt.Errorf("cleaning worktree registration for %s: %w", c.Path, err)
@@ -315,6 +326,19 @@ func CleanWorktree(ctx context.Context, repoRoot string, client herdr.Client, c 
 		forgetPaneRecord(repoRoot, c.Path)
 	}
 	return trashPath, paneWarning, nil
+}
+
+// cleanLintCache runs `golangci-lint cache clean` after CleanWorktree
+// relocates a worktree out from under its path — see CleanWorktree's doc
+// comment for why the relocation itself is what poisons the cache. Best-effort
+// and silent, like markLifecyclePruned: golangci-lint may not be installed or
+// on PATH in every environment prune runs in, and a cache-hygiene step must
+// never fail (or slow down) the clean itself over that.
+func cleanLintCache(ctx context.Context) {
+	if _, err := exec.LookPath("golangci-lint"); err != nil {
+		return
+	}
+	_ = exec.CommandContext(ctx, "golangci-lint", "cache", "clean").Run()
 }
 
 // forgetPaneRecord removes worktree's entry from repoRoot's pane registry
