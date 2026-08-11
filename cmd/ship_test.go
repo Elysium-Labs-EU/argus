@@ -827,6 +827,132 @@ func TestShipChangeCommitsPushesAndOpensPR(t *testing.T) {
 	}
 }
 
+// TestShipChangeWarnsWhenFreshCommitConflicts confirms shipChange's
+// post-commit check (warnIfShipConflicts) warns the operator when the commit
+// CommitAll just made will conflict with origin/base, rather than only
+// finding out once the PR opens DIRTY. Push still succeeds (a new branch
+// name has nothing of its own on origin to fast-forward against), so this
+// is purely a warning, not a ship failure.
+func TestShipChangeWarnsWhenFreshCommitConflicts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	git := func(dir string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", "-b", "main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare init: %v\n%s", err, out)
+	}
+	seed := t.TempDir()
+	git(seed, "init", "-q", "-b", "main")
+	git(seed, "config", "user.email", "t@t")
+	git(seed, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(seed, "f.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(seed, "add", "-A")
+	git(seed, "commit", "-q", "-m", "seed")
+	git(seed, "remote", "add", "origin", remote)
+	git(seed, "push", "-q", "-u", "origin", "main")
+
+	// wt clones before the sibling's change lands, so its own branch diverges
+	// from the same base main is still at right now — matching a worker's
+	// worktree, which is created once and never re-synced until this ship
+	// (via warnIfShipConflicts's own FetchBase) fetches origin again.
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", remote, wt).CombinedOutput(); err != nil {
+		t.Fatalf("clone wt: %v\n%s", err, out)
+	}
+	git(wt, "config", "user.email", "t@t")
+	git(wt, "config", "user.name", "t")
+	git(wt, "checkout", "-q", "-b", "feat-x", "origin/main")
+
+	// A sibling change lands on main after wt already cloned.
+	sibling := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", remote, sibling).CombinedOutput(); err != nil {
+		t.Fatalf("clone sibling: %v\n%s", err, out)
+	}
+	git(sibling, "config", "user.email", "t@t")
+	git(sibling, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(sibling, "f.txt"), []byte("origin-change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(sibling, "add", "-A")
+	git(sibling, "commit", "-q", "-m", "origin edits f.txt")
+	git(sibling, "push", "-q", "origin", "main")
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("branch-change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newShipCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+
+	f := &fakeForge{}
+	target := &shipTarget{host: "fake", owner: "acme", name: "widget", branch: "feat-x", prTitle: "fix: feat-x", commitMsg: "fix: feat-x"}
+	if err := shipChange(cmd, f, &shipArgs{worktree: wt, base: "main"}, target); err != nil {
+		t.Fatalf("shipChange: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "will conflict with origin/main") {
+		t.Errorf("want a post-commit conflict warning, got: %q", buf.String())
+	}
+	if f.opened == nil {
+		t.Error("a conflict warning must not block ship from still opening the PR")
+	}
+}
+
+// TestWarnIfShipConflictsNoopWhenBaseUnfetchable confirms a worktree whose
+// origin can't be fetched (no origin remote configured here) is left silent
+// — this check is best-effort and must never itself surface an error, only a
+// warning when it can actually determine one.
+func TestWarnIfShipConflictsNoopWhenBaseUnfetchable(t *testing.T) {
+	wt := gitRepo(t)
+	var buf bytes.Buffer
+	warnIfShipConflicts(context.Background(), &buf, testLogger(t), wt, "main", "feat-x")
+	if buf.String() != "" {
+		t.Errorf("want no output when origin/base can't be fetched, got: %q", buf.String())
+	}
+}
+
+// TestWarnIfShipConflictsNoopWhenClean confirms a worktree whose HEAD
+// already matches origin/base produces no warning.
+func TestWarnIfShipConflictsNoopWhenClean(t *testing.T) {
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", "-b", "main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare init: %v\n%s", err, out)
+	}
+	seed := t.TempDir()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	git(seed, "init", "-q", "-b", "main")
+	git(seed, "config", "user.email", "t@t")
+	git(seed, "config", "user.name", "t")
+	git(seed, "commit", "-q", "--allow-empty", "-m", "base")
+	git(seed, "remote", "add", "origin", remote)
+	git(seed, "push", "-q", "-u", "origin", "main")
+
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", remote, wt).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+
+	var buf bytes.Buffer
+	warnIfShipConflicts(context.Background(), &buf, testLogger(t), wt, "main", "main")
+	if buf.String() != "" {
+		t.Errorf("want no output for a worktree already matching origin/base, got: %q", buf.String())
+	}
+}
+
 // TestShipChangeReusesExistingPRInsteadOfDuplicating covers a ship retry
 // after a prior run was killed between push succeeding and OpenPR completing:
 // CommitAll/Push are no-ops the second time round, but without a FindPR check

@@ -2327,14 +2327,14 @@ func fakePaneListAndPromptRunner(agentStatus func() string, promptErr error, pro
 	}
 }
 
-// TestCheckHerdrStuckNudgesDoneBeforeEscalating verifies that a
-// worker whose pane herdr reports "done" gets exactly one AgentPrompt
-// reminder to run `argus worker report` before the gate escalates to a
-// human — the mismatch is entirely mechanical, so a re-prompt gets first
-// crack at fixing it. A worker that ignores the nudge and stays stuck for a
-// second full threshold window still escalates, and never gets a second
-// nudge.
-func TestCheckHerdrStuckNudgesDoneBeforeEscalating(t *testing.T) {
+// TestCheckHerdrStuckNudgesDoneRepeatedlyWhileAlive verifies that a worker
+// whose pane herdr reports "done" gets a fresh AgentPrompt reminder to run
+// `argus worker report` every time it crosses herdrStuckThreshold, for as
+// long as each nudge is accepted — a worker waiting on a long backgrounded
+// command (e.g. this repo's own gate_verify_command) keeps proving it's
+// alive this way and must never be escalated merely for staying "done" a
+// long time.
+func TestCheckHerdrStuckNudgesDoneRepeatedlyWhileAlive(t *testing.T) {
 	var promptCalls int
 	client := herdr.NewWithRunner(fakePaneListAndPromptRunner(func() string { return "done" }, nil, &promptCalls))
 	st := &workerState{plan: &WorkerPlan{Worker: Worker{Task: "t"}}, paneID: "w1:p1"}
@@ -2343,12 +2343,11 @@ func TestCheckHerdrStuckNudgesDoneBeforeEscalating(t *testing.T) {
 	if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("must not escalate before herdrStuckThreshold is crossed")
 	}
-
 	if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
 		t.Fatal("crossing the threshold for the first time must nudge, not escalate")
 	}
 	if promptCalls != 1 {
-		t.Fatalf("expected exactly one AgentPrompt nudge, got %d", promptCalls)
+		t.Fatalf("expected 1 cumulative AgentPrompt nudge, got %d", promptCalls)
 	}
 	if st.herdrEscalation != "" {
 		t.Error("a freshly nudged worker must not be escalated yet")
@@ -2357,19 +2356,24 @@ func TestCheckHerdrStuckNudgesDoneBeforeEscalating(t *testing.T) {
 		t.Errorf("nudging should reset the stuck timer to give the worker a fresh window, got %v", st.herdrStuckElapsed)
 	}
 
-	// The worker ignores the nudge and stays "done" for another full
-	// threshold window: this time it must escalate, and must not nudge again.
-	if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
-		t.Fatal("must not escalate before the second threshold window is crossed")
-	}
-	if !checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
-		t.Fatal("must escalate once the worker stays stuck through a second threshold window")
-	}
-	if promptCalls != 1 {
-		t.Errorf("must not nudge a worker more than once per stuck streak, got %d prompt calls", promptCalls)
-	}
-	if st.herdrEscalation == "" {
-		t.Error("expected herdrEscalation to be set")
+	// Each subsequent window needs two ticks (sub-threshold, then crossing)
+	// since a successful nudge just reset herdrStuckElapsed to zero.
+	for window := 2; window <= 4; window++ {
+		if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
+			t.Fatalf("window %d: must not escalate before the window is crossed", window)
+		}
+		if checkHerdrStuck(context.Background(), client, log, st, time.Minute) {
+			t.Fatalf("window %d: crossing the threshold must nudge, not escalate", window)
+		}
+		if promptCalls != window {
+			t.Fatalf("window %d: expected %d cumulative AgentPrompt nudges, got %d", window, window, promptCalls)
+		}
+		if st.herdrEscalation != "" {
+			t.Errorf("window %d: a freshly nudged worker must not be escalated yet", window)
+		}
+		if st.herdrStuckElapsed != 0 {
+			t.Errorf("window %d: nudging should reset the stuck timer to give the worker a fresh window, got %v", window, st.herdrStuckElapsed)
+		}
 	}
 }
 

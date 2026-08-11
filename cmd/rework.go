@@ -358,17 +358,33 @@ func recordReworkAttempt(worktree string, now time.Time) error {
 // its own --max-rounds allowance from zero. No round is dispatched for this
 // call: findings is whatever the last round (or the initial verdict) already
 // found.
+//
+// This refusal must never overwrite a verdict.json that is already Approved:
+// an explicit --findings call (e.g. a follow-up unrelated to what was
+// approved) skips prepareReworkRun's "nothing to rework" short-circuit and
+// can reach an already-exhausted budget on round 1, with nothing dispatched
+// and nothing re-examined. Clobbering an approving verdict there would make
+// exhausting the budget worse than never having called rework at all — ship
+// would refuse a change that was already cleared. The current verdict is
+// checked here, right before writing, rather than trusted from a caller's
+// earlier snapshot, since nothing else in this call path re-reads it.
 func escalateReworkBudgetExceeded(out io.Writer, worktree string, findings []string, attempted, budget int) error {
 	summary := fmt.Sprintf("rework budget exceeded: %d attempted round(s) (budget %d) with no approving verdict", attempted, budget)
-	a := protocol.Approval{
-		Approved:  false,
-		Source:    protocol.SourceReworkBudget,
-		Summary:   summary,
-		Reasons:   findings,
-		UpdatedAt: time.Now(),
+	cur, found, err := protocol.LoadApproval(worktree)
+	if err != nil {
+		return fmt.Errorf("loading current verdict before recording rework-budget-exceeded: %w", err)
 	}
-	if err := protocol.WriteApproval(worktree, &a); err != nil {
-		return fmt.Errorf("recording rework-budget-exceeded verdict: %w", err)
+	if !found || !cur.Approved {
+		a := protocol.Approval{
+			Approved:  false,
+			Source:    protocol.SourceReworkBudget,
+			Summary:   summary,
+			Reasons:   findings,
+			UpdatedAt: time.Now(),
+		}
+		if err := protocol.WriteApproval(worktree, &a); err != nil {
+			return fmt.Errorf("recording rework-budget-exceeded verdict: %w", err)
+		}
 	}
 	_, _ = fmt.Fprintf(out, "%s %s — escalating to the supervisor\n", ui.LabelError.Render("✗"), summary)
 	return nil

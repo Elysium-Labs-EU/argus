@@ -955,6 +955,44 @@ func TestRunReworkBudgetPersistsAcrossInvocations(t *testing.T) {
 	}
 }
 
+// TestRunReworkBudgetExceededPreservesApprovingVerdict is the regression test
+// for the reported bug: an explicit --findings call for an unrelated
+// follow-up bypasses prepareReworkRun's "already approved, nothing to
+// rework" short-circuit, and can land on an already-exhausted cumulative
+// budget before dispatching a single round. Refusing must not overwrite the
+// worktree's existing approving verdict — ship must still see it as
+// approved, since nothing about the approved change was re-examined.
+func TestRunReworkBudgetExceededPreservesApprovingVerdict(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDir(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: true, Source: "review", Summary: "looks good"}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	if err := protocol.WriteReworkState(dir, &protocol.ReworkState{RoundsAttempted: 3}); err != nil {
+		t.Fatalf("seeding rework state: %v", err)
+	}
+	cmd, buf := testCmd()
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected herdr call: an already-exhausted budget must refuse before any dispatch: %v", args)
+		return nil, nil
+	})
+
+	err := runRework(cmd, client, &fakeReviewer{}, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "feat-x", maxRounds: 3, maxReworkBudget: 3, maxReworkBudgetExplicit: true,
+		findings: []string{"unrelated small follow-up"},
+	})
+	if err != nil {
+		t.Fatalf("runRework: %v", err)
+	}
+	if !strings.Contains(buf.String(), "rework budget exceeded") {
+		t.Errorf("expected a budget-exceeded refusal message:\n%s", buf.String())
+	}
+	approval, found, aerr := protocol.LoadApproval(dir)
+	if aerr != nil || !found || !approval.Approved || approval.Summary != "looks good" {
+		t.Errorf("want the prior approving verdict preserved untouched, found=%v approval=%+v err=%v", found, approval, aerr)
+	}
+}
+
 func TestRunReworkNeedsHumanEscalatesImmediately(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := initGitDir(t)
