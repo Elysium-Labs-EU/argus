@@ -477,7 +477,7 @@ func TestConflictsWithCatchesSameFunctionEditedByBothSides(t *testing.T) {
 		t.Fatalf("FetchBase: %v", err)
 	}
 
-	textConflict, err := gitMergeConflicts(ctx, wt, base)
+	textConflict, err := gitMergeConflicts(ctx, wt, base, "HEAD")
 	if err != nil {
 		t.Fatalf("gitMergeConflicts: %v", err)
 	}
@@ -519,6 +519,338 @@ func TestConflictsWithIgnoresEditsToDifferentFunctions(t *testing.T) {
 	}
 	if conflicts {
 		t.Error("ConflictsWith should not flag a conflict for edits to unrelated functions")
+	}
+}
+
+// TestConflictsWithDetectsUncommittedConflictAtZeroCommitsAhead reproduces
+// argus#624: a worktree whose branch has zero commits ahead of base — the
+// default state of every finished argus worker, since workers are forbidden
+// from committing until ship — but whose uncommitted working tree genuinely
+// conflicts with a sibling change that already landed on base. Before
+// effectiveHeadRef, ConflictsWith tested HEAD alone, which is identical to
+// origin/base here, so it always reported clean.
+func TestConflictsWithDetectsUncommittedConflictAtZeroCommitsAhead(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGitRepo(t)
+	origin := mustRemote(t, wt)
+
+	if n, err := CommitsAheadOfBase(ctx, wt, base); err != nil || n != 0 {
+		t.Fatalf("test setup: want zero commits ahead of base right after clone, got %d (err %v)", n, err)
+	}
+
+	// A sibling change lands on base first.
+	other := gitTempDir(t)
+	gitDo(t, filepath.Dir(other), "clone", "-q", origin, filepath.Base(other))
+	if err := os.WriteFile(filepath.Join(other, "f.txt"), []byte("origin-change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, other, "add", "-A")
+	gitDo(t, other, "commit", "-q", "-m", "origin edits line1")
+	gitDo(t, other, "push", "-q", "origin", base)
+
+	// wt's own change is left uncommitted, exactly as a finished-but-unshipped
+	// argus worker would leave it.
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("branch-change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FetchBase(ctx, wt, base); err != nil {
+		t.Fatalf("FetchBase: %v", err)
+	}
+	if n, err := CommitsAheadOfBase(ctx, wt, base); err != nil || n != 0 {
+		t.Fatalf("test setup: HEAD must still be zero commits ahead of base (only the working tree changed), got %d (err %v)", n, err)
+	}
+
+	conflicts, err := ConflictsWith(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("ConflictsWith: %v", err)
+	}
+	if !conflicts {
+		t.Error("ConflictsWith must detect a conflict from uncommitted working-tree state, even at zero commits ahead of base")
+	}
+}
+
+// TestConflictsWithCatchesUncommittedSameFunctionEditAtZeroCommitsAhead is
+// the uncommitted-worktree analog of
+// TestConflictsWithCatchesSameFunctionEditedByBothSides: the worker's own
+// edit is never committed, so a HEAD-only check would see wt's HEAD as
+// identical to base and never even reach the same-function heuristic.
+func TestConflictsWithCatchesUncommittedSameFunctionEditAtZeroCommitsAhead(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGoRepo(t, reconcileBase)
+
+	other := gitTempDir(t)
+	gitDo(t, filepath.Dir(other), "clone", "-q", mustRemote(t, wt), filepath.Base(other))
+	writeAndCommit(t, other, reconcileWithGuard, "145: add guard")
+	gitDo(t, other, "push", "-q", "origin", base)
+
+	// The worktree's own rename edit is left uncommitted.
+	if err := os.WriteFile(filepath.Join(wt, "loop.go"), []byte(reconcileWithRename), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FetchBase(ctx, wt, base); err != nil {
+		t.Fatalf("FetchBase: %v", err)
+	}
+	if n, err := CommitsAheadOfBase(ctx, wt, base); err != nil || n != 0 {
+		t.Fatalf("test setup: want zero commits ahead of base, got %d (err %v)", n, err)
+	}
+
+	textConflict, err := gitMergeConflicts(ctx, wt, base, "HEAD")
+	if err != nil {
+		t.Fatalf("gitMergeConflicts: %v", err)
+	}
+	if textConflict {
+		t.Fatal("test setup should reproduce a textually clean merge against plain HEAD")
+	}
+
+	conflicts, err := ConflictsWith(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("ConflictsWith: %v", err)
+	}
+	if !conflicts {
+		t.Error("ConflictsWith should flag a conflict from the uncommitted same-function edit, even at zero commits ahead of base")
+	}
+}
+
+// TestConflictsWithCleanZeroCommitsAheadReportsNoConflict confirms a
+// worktree with zero commits ahead of base *and* no uncommitted changes —
+// the case where "nothing to rebase" is actually true — still reports no
+// conflict, so effectiveHeadRef's dirty check doesn't turn every clean
+// worker into a false positive.
+func TestConflictsWithCleanZeroCommitsAheadReportsNoConflict(t *testing.T) {
+	ctx := context.Background()
+	wt, base := initGitRepo(t)
+
+	if err := FetchBase(ctx, wt, base); err != nil {
+		t.Fatalf("FetchBase: %v", err)
+	}
+
+	conflicts, err := ConflictsWith(ctx, wt, base)
+	if err != nil {
+		t.Fatalf("ConflictsWith: %v", err)
+	}
+	if conflicts {
+		t.Error("a genuinely clean worktree with zero commits ahead of base must not report a conflict")
+	}
+}
+
+// TestEffectiveHeadRefCleanWorktreeReturnsHead confirms the cheap, common
+// path: no uncommitted changes means no synthetic commit is built at all.
+func TestEffectiveHeadRefCleanWorktreeReturnsHead(t *testing.T) {
+	ctx := context.Background()
+	wt, _ := initGitRepo(t)
+
+	ref, err := effectiveHeadRef(ctx, wt)
+	if err != nil {
+		t.Fatalf("effectiveHeadRef: %v", err)
+	}
+	if ref != "HEAD" {
+		t.Errorf("effectiveHeadRef on a clean worktree = %q, want %q", ref, "HEAD")
+	}
+}
+
+// TestEffectiveHeadRefPropagatesDirtyCheckError confirms a
+// hasUncommittedChanges failure (a non-git worktree) is wrapped and returned
+// rather than silently treated as clean.
+func TestEffectiveHeadRefPropagatesDirtyCheckError(t *testing.T) {
+	ctx := context.Background()
+	_, err := effectiveHeadRef(ctx, t.TempDir())
+	if err == nil {
+		t.Fatal("want an error checking uncommitted changes for a non-git worktree")
+	}
+	if !strings.Contains(err.Error(), "checking worktree for uncommitted changes") {
+		t.Errorf("error should wrap the underlying failure, got %v", err)
+	}
+}
+
+// TestSnapshotWorktreeCommitCapturesUncommittedState confirms the synthetic
+// commit's tree actually reflects the working tree's uncommitted edits and
+// new untracked files — not just whatever HEAD already had — that its sole
+// parent is the worktree's real HEAD, and that building it never disturbs
+// worktree's real HEAD or index.
+func TestSnapshotWorktreeCommitCapturesUncommittedState(t *testing.T) {
+	ctx := context.Background()
+	wt, _ := initGitRepo(t)
+
+	head, err := HeadSHA(ctx, wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	if werr := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("modified\n"), 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	if werr := os.WriteFile(filepath.Join(wt, "new.txt"), []byte("untracked\n"), 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+
+	sha, err := snapshotWorktreeCommit(ctx, wt)
+	if err != nil {
+		t.Fatalf("snapshotWorktreeCommit: %v", err)
+	}
+
+	parent, err := git(ctx, wt, "rev-parse", sha+"^")
+	if err != nil {
+		t.Fatalf("resolving snapshot commit's parent: %v", err)
+	}
+	if parent != head {
+		t.Errorf("snapshot commit's parent = %s, want worktree's real HEAD %s", parent, head)
+	}
+
+	for name, want := range map[string]string{"f.txt": "modified", "new.txt": "untracked"} {
+		got, gerr := git(ctx, wt, "show", sha+":"+name)
+		if gerr != nil {
+			t.Fatalf("reading %s from snapshot commit: %v", name, gerr)
+		}
+		if got != want {
+			t.Errorf("%s in snapshot commit = %q, want %q", name, got, want)
+		}
+	}
+
+	if realHead, herr := HeadSHA(ctx, wt); herr != nil || realHead != head {
+		t.Errorf("snapshotWorktreeCommit must not move worktree's real HEAD, got %s want %s (err %v)", realHead, head, herr)
+	}
+	status, serr := git(ctx, wt, "status", "--porcelain")
+	if serr != nil {
+		t.Fatalf("git status: %v", serr)
+	}
+	if status == "" {
+		t.Error("worktree's real index/working tree should still show the uncommitted changes after taking a snapshot")
+	}
+}
+
+// TestSnapshotWorktreeCommitTempFileErrors confirms a failure creating the
+// throwaway index file (a TMPDIR pointing nowhere, standing in for any
+// os.CreateTemp failure) is wrapped and returned rather than panicking or
+// silently producing a bogus commit.
+func TestSnapshotWorktreeCommitTempFileErrors(t *testing.T) {
+	ctx := context.Background()
+	wt, _ := initGitRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "new.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	_, err := snapshotWorktreeCommit(ctx, wt)
+	if err == nil {
+		t.Fatal("want an error when the throwaway index file can't be created")
+	}
+	if !strings.Contains(err.Error(), "creating temporary index for worktree snapshot") {
+		t.Errorf("error should name the CreateTemp failure, got %v", err)
+	}
+}
+
+// TestSnapshotWorktreeCommitCommitTreeFailureWrapped confirms a commit-tree
+// failure — a fake git stand-in that succeeds through read-tree/add/write-tree
+// but fails commit-tree itself, a shape a real git repo can't be coaxed into
+// producing on demand — surfaces wrapped with context rather than a bare,
+// unchecked commit SHA.
+func TestSnapshotWorktreeCommitCommitTreeFailureWrapped(t *testing.T) {
+	ctx := context.Background()
+	wt, _ := initGitRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "new.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := t.TempDir()
+	script := filepath.Join(bin, "git")
+	content := `#!/bin/sh
+case "$*" in
+  *"commit-tree "*) echo "commit-tree failed" >&2; exit 1 ;;
+  *"write-tree"*) echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ;;
+  *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("writing fake git: %v", err)
+	}
+	fakeBinPATH(t, bin)
+
+	_, err := snapshotWorktreeCommit(ctx, wt)
+	if err == nil {
+		t.Fatal("want an error when commit-tree fails")
+	}
+	if !strings.Contains(err.Error(), "creating worktree snapshot commit") {
+		t.Errorf("error should name the commit-tree failure, got %v", err)
+	}
+}
+
+// TestSnapshotWorktreeCommitUnbornHeadErrors confirms a repo with no commits
+// at all (so HEAD does not resolve) surfaces read-tree's own failure wrapped
+// with context, rather than silently producing a bogus commit.
+func TestSnapshotWorktreeCommitUnbornHeadErrors(t *testing.T) {
+	ctx := context.Background()
+	wt := t.TempDir()
+	gitInit(t, wt)
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := snapshotWorktreeCommit(ctx, wt)
+	if err == nil {
+		t.Fatal("want an error snapshotting a worktree with no HEAD commit yet")
+	}
+	if !strings.Contains(err.Error(), "seeding worktree snapshot index from HEAD") {
+		t.Errorf("error should name the read-tree failure, got %v", err)
+	}
+}
+
+// TestSnapshotWorktreeCommitUnreadableFileErrors confirms a worktree
+// containing a file `git add -A` itself can't read (a genuine OS-level
+// failure, not merely a git-repo-shape problem) surfaces snapshotGit's own
+// wrapped error rather than silently skipping the unreadable file.
+func TestSnapshotWorktreeCommitUnreadableFileErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions, so this can't force a read failure")
+	}
+	ctx := context.Background()
+	wt, _ := initGitRepo(t)
+
+	bad := filepath.Join(wt, "unreadable.txt")
+	if err := os.WriteFile(bad, []byte("secret\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bad, 0o644) })
+
+	_, err := snapshotWorktreeCommit(ctx, wt)
+	if err == nil {
+		t.Fatal("want an error snapshotting a worktree containing a file git can't read")
+	}
+	if !strings.Contains(err.Error(), "snapshotting worktree into a temporary index") {
+		t.Errorf("error should name the add -A failure, got %v", err)
+	}
+}
+
+// TestSnapshotGitWrapsStderr confirms snapshotGit's error names the failing
+// subcommand and carries its own stderr, not just the exec package's generic
+// exit message.
+func TestSnapshotGitWrapsStderr(t *testing.T) {
+	ctx := context.Background()
+	wt := t.TempDir()
+	gitInit(t, wt)
+
+	_, err := snapshotGit(ctx, wt, os.Environ(), "rev-parse", "--verify", "does-not-exist")
+	if err == nil {
+		t.Fatal("want an error resolving a nonexistent ref")
+	}
+	if !strings.Contains(err.Error(), "git rev-parse:") {
+		t.Errorf("error should name the failing subcommand, got %v", err)
+	}
+}
+
+// TestSnapshotGitFallsBackToGenericErrorWhenStderrEmpty confirms a failing
+// subprocess with no stderr output still produces a non-empty wrapped error
+// (falling back to err.Error() itself) instead of silently swallowing it.
+func TestSnapshotGitFallsBackToGenericErrorWhenStderrEmpty(t *testing.T) {
+	ctx := context.Background()
+	bin := t.TempDir()
+	writeFakeBinary(t, bin, "git", 1) // writes to stdout only, never stderr
+	fakeBinPATH(t, bin)
+
+	_, err := snapshotGit(ctx, t.TempDir(), os.Environ(), "write-tree")
+	if err == nil {
+		t.Fatal("want an error from a failing git stand-in")
 	}
 }
 
@@ -625,7 +957,7 @@ func TestConflictsWithCatchesGenericFuncEditedByBothSides(t *testing.T) {
 		t.Fatalf("FetchBase: %v", err)
 	}
 
-	textConflict, err := gitMergeConflicts(ctx, wt, base)
+	textConflict, err := gitMergeConflicts(ctx, wt, base, "HEAD")
 	if err != nil {
 		t.Fatalf("gitMergeConflicts: %v", err)
 	}
@@ -1016,7 +1348,7 @@ func TestGrantRebaseAllowStripsDenyFloorOverlappingVerifyCommand(t *testing.T) {
 func TestGitMergeConflictsNonConflictErrorPropagates(t *testing.T) {
 	ctx := context.Background()
 	notGit := t.TempDir()
-	conflicts, err := gitMergeConflicts(ctx, notGit, "main")
+	conflicts, err := gitMergeConflicts(ctx, notGit, "main", "HEAD")
 	if err == nil {
 		t.Fatal("want an error from merge-tree against a non-git worktree")
 	}
@@ -1028,14 +1360,16 @@ func TestGitMergeConflictsNonConflictErrorPropagates(t *testing.T) {
 	}
 }
 
-// TestConflictsWithPropagatesMergeTreeError confirms ConflictsWith forwards
-// gitMergeConflicts' own error rather than swallowing it into a plain false.
+// TestConflictsWithPropagatesMergeTreeError confirms ConflictsWith propagates
+// an error from its own preliminary checks (here, effectiveHeadRef's
+// hasUncommittedChanges call against a non-git worktree) rather than
+// swallowing it into a plain false.
 func TestConflictsWithPropagatesMergeTreeError(t *testing.T) {
 	ctx := context.Background()
 	notGit := t.TempDir()
 	conflicts, err := ConflictsWith(ctx, notGit, "main")
 	if err == nil {
-		t.Fatal("want ConflictsWith to propagate the underlying merge-tree error")
+		t.Fatal("want ConflictsWith to propagate the underlying error")
 	}
 	if conflicts {
 		t.Error("an error path must not also report a conflict")
@@ -1048,7 +1382,7 @@ func TestConflictsWithPropagatesMergeTreeError(t *testing.T) {
 func TestSameFunctionTouchedByBothMergeBaseErrorPropagates(t *testing.T) {
 	ctx := context.Background()
 	notGit := t.TempDir()
-	_, err := sameFunctionTouchedByBoth(ctx, notGit, "main")
+	_, err := sameFunctionTouchedByBoth(ctx, notGit, "main", "HEAD")
 	if err == nil {
 		t.Fatal("want an error resolving merge-base against a non-git worktree")
 	}
@@ -1164,7 +1498,7 @@ func TestSameFunctionTouchedByBothIgnoresFileOnlyOnOneSide(t *testing.T) {
 		t.Fatalf("FetchBase: %v", err)
 	}
 
-	conflicts, err := sameFunctionTouchedByBoth(ctx, wt, base)
+	conflicts, err := sameFunctionTouchedByBoth(ctx, wt, base, "HEAD")
 	if err != nil {
 		t.Fatalf("sameFunctionTouchedByBoth: %v", err)
 	}

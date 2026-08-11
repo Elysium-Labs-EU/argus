@@ -26,34 +26,131 @@ func FetchBase(ctx context.Context, worktree, base string) error {
 	return err
 }
 
-// ConflictsWith reports whether the worktree's HEAD would conflict when rebased
-// onto origin/<base>. git's own merge-tree is trusted for textual conflicts, but
-// not as a proxy for "semantically safe to combine": two branches can each edit
-// the same function without their edits textually overlapping (one inserts a
-// guard clause immediately above a line the other renames, say), and git's
-// context-based 3-way merge picks a side for that line without ever surfacing a
-// conflict — silently dropping the other branch's edit. So a textually clean
-// merge gets a second, cheaper check: if both branches' diffs against the same
-// merge-base touch the same function in the same file, treat it as a conflict
-// too. False positives here just cost an unnecessary worker dispatch; the false
-// negative this replaces costs silently losing a branch's change.
+// ConflictsWith reports whether worktree would conflict when rebased onto
+// origin/<base>. argus workers are forbidden from committing their own work —
+// only ship does, at the very end — so HEAD alone is the wrong thing to test
+// against: at the exact moment a supervisor asks "does this need a rebase?",
+// HEAD is typically unchanged from base regardless of what the uncommitted
+// diff actually contains, which is exactly the false-negative window this
+// closes (see effectiveHeadRef). git's own merge-tree is trusted for textual
+// conflicts, but not as a proxy for "semantically safe to combine": two
+// branches can each edit the same function without their edits textually
+// overlapping (one inserts a guard clause immediately above a line the other
+// renames, say), and git's context-based 3-way merge picks a side for that
+// line without ever surfacing a conflict — silently dropping the other
+// branch's edit. So a textually clean merge gets a second, cheaper check: if
+// both branches' diffs against the same merge-base touch the same function in
+// the same file, treat it as a conflict too. False positives here just cost
+// an unnecessary worker dispatch; the false negative this replaces costs
+// silently losing a branch's change.
 func ConflictsWith(ctx context.Context, worktree, base string) (bool, error) {
-	textConflict, err := gitMergeConflicts(ctx, worktree, base)
+	ours, err := effectiveHeadRef(ctx, worktree)
+	if err != nil {
+		return false, err
+	}
+	textConflict, err := gitMergeConflicts(ctx, worktree, base, ours)
 	if err != nil {
 		return false, err
 	}
 	if textConflict {
 		return true, nil
 	}
-	return sameFunctionTouchedByBoth(ctx, worktree, base)
+	return sameFunctionTouchedByBoth(ctx, worktree, base, ours)
 }
 
-// gitMergeConflicts reports whether HEAD would textually conflict when merged
-// with origin/<base>. It uses `git merge-tree --write-tree`, which computes the
-// merge without touching the working tree and exits non-zero (code 1) when the
-// merge has conflicts.
-func gitMergeConflicts(ctx context.Context, worktree, base string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "merge-tree", "--write-tree", "origin/"+base, "HEAD") //nolint:gosec // fixed git binary; worktree/base argus-derived
+// effectiveHeadRef resolves the commit ConflictsWith should treat as "ours":
+// worktree's real HEAD when the working tree is clean, or a synthetic,
+// unreferenced commit standing in for what HEAD would become if everything
+// uncommitted were committed right now, when it's dirty.
+func effectiveHeadRef(ctx context.Context, worktree string) (string, error) {
+	dirty, err := hasUncommittedChanges(ctx, worktree)
+	if err != nil {
+		return "", fmt.Errorf("checking worktree for uncommitted changes: %w", err)
+	}
+	if !dirty {
+		return "HEAD", nil
+	}
+	return snapshotWorktreeCommit(ctx, worktree)
+}
+
+// snapshotWorktreeCommit builds a commit representing worktree's HEAD plus
+// its current index and working tree — tracked modifications and untracked,
+// non-ignored files alike — attached to no ref, so it stays unreachable and
+// is left for git's own garbage collection once this check is done with it.
+// It works through a throwaway index file (via GIT_INDEX_FILE) rather than
+// worktree's real .git/index, so nothing here disturbs what a worker (or a
+// human) actually has staged. Committer identity is fixed rather than read
+// from this machine's git config: the commit is never inspected for who made
+// it, only diffed against, so it must not depend on a config value a CI
+// runner or minimal container might not have set at all.
+func snapshotWorktreeCommit(ctx context.Context, worktree string) (string, error) {
+	tmp, err := os.CreateTemp("", "argus-rebase-index-")
+	if err != nil {
+		return "", fmt.Errorf("creating temporary index for worktree snapshot: %w", err)
+	}
+	indexPath := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(indexPath) // git populates a fresh index at this path itself
+	defer func() { _ = os.Remove(indexPath) }()
+
+	env := append(os.Environ(),
+		"GIT_INDEX_FILE="+indexPath,
+		"GIT_AUTHOR_NAME=argus", "GIT_AUTHOR_EMAIL=argus@localhost",
+		"GIT_COMMITTER_NAME=argus", "GIT_COMMITTER_EMAIL=argus@localhost",
+	)
+	// read-tree HEAD seeds the throwaway index with HEAD's own tree first, so
+	// the add -A below diffs against a starting point that actually reflects
+	// HEAD — without it, an empty index can only ever report every worktree
+	// path as newly added, never a deletion of something HEAD has that the
+	// working tree no longer does.
+	if _, rerr := snapshotGit(ctx, worktree, env, "read-tree", "HEAD"); rerr != nil {
+		return "", fmt.Errorf("seeding worktree snapshot index from HEAD: %w", rerr)
+	}
+	if _, aerr := snapshotGit(ctx, worktree, env, "add", "-A"); aerr != nil {
+		return "", fmt.Errorf("snapshotting worktree into a temporary index: %w", aerr)
+	}
+	tree, err := snapshotGit(ctx, worktree, env, "write-tree")
+	if err != nil {
+		return "", fmt.Errorf("writing worktree snapshot tree: %w", err)
+	}
+	sha, err := snapshotGit(ctx, worktree, env, "commit-tree", tree, "-p", "HEAD",
+		"-m", "argus rebase conflict check: uncommitted worktree snapshot")
+	if err != nil {
+		return "", fmt.Errorf("creating worktree snapshot commit: %w", err)
+	}
+	return sha, nil
+}
+
+// snapshotGit runs one git subcommand against worktree with env replacing the
+// inherited process environment — the seam snapshotWorktreeCommit needs to
+// point read-tree/add/write-tree/commit-tree at a throwaway GIT_INDEX_FILE
+// and a fixed commit identity.
+func snapshotGit(ctx context.Context, worktree string, env []string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", worktree}, args...)...) //nolint:gosec // fixed git binary; worktree/args are argus-derived
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		sub := "command"
+		if len(args) > 0 {
+			sub = args[0]
+		}
+		msg := err.Error()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			msg = strings.TrimSpace(string(ee.Stderr))
+		}
+		return "", fmt.Errorf("git %s: %s", sub, msg)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitMergeConflicts reports whether ours (worktree's real HEAD, or a
+// synthetic snapshot commit — see effectiveHeadRef) would textually conflict
+// when merged with origin/<base>. It uses `git merge-tree --write-tree`,
+// which computes the merge without touching the working tree and exits
+// non-zero (code 1) when the merge has conflicts.
+func gitMergeConflicts(ctx context.Context, worktree, base, ours string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "merge-tree", "--write-tree", "origin/"+base, ours) //nolint:gosec // fixed git binary; worktree/base/ours argus-derived
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 {
@@ -64,17 +161,17 @@ func gitMergeConflicts(ctx context.Context, worktree, base string) (bool, error)
 	return false, nil
 }
 
-// sameFunctionTouchedByBoth reports whether HEAD and origin/<base> each carry a
-// change (vs their shared merge-base) that touches the same function in the
+// sameFunctionTouchedByBoth reports whether ours and origin/<base> each carry
+// a change (vs their shared merge-base) that touches the same function in the
 // same file. It never inspects the merge result itself — only the two sides'
 // independent diffs — so it catches the loss before it happens rather than
 // after.
-func sameFunctionTouchedByBoth(ctx context.Context, worktree, base string) (bool, error) {
-	mergeBase, err := git(ctx, worktree, "merge-base", "HEAD", "origin/"+base)
+func sameFunctionTouchedByBoth(ctx context.Context, worktree, base, ours string) (bool, error) {
+	mergeBase, err := git(ctx, worktree, "merge-base", ours, "origin/"+base)
 	if err != nil {
 		return false, fmt.Errorf("resolving merge base with origin/%s: %w", base, err)
 	}
-	ours, err := touchedFunctions(ctx, worktree, mergeBase, "HEAD")
+	oursFuncs, err := touchedFunctions(ctx, worktree, mergeBase, ours)
 	if err != nil {
 		return false, err
 	}
@@ -82,7 +179,7 @@ func sameFunctionTouchedByBoth(ctx context.Context, worktree, base string) (bool
 	if err != nil {
 		return false, err
 	}
-	for file, funcs := range ours {
+	for file, funcs := range oursFuncs {
 		theirFuncs, ok := theirs[file]
 		if !ok {
 			continue

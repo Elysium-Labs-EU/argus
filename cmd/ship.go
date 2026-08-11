@@ -279,6 +279,7 @@ func shipChange(cmd *cobra.Command, f forge.Forge, a *shipArgs, target *shipTarg
 		logger.Fail("commit", target.branch, cerr)
 		return cerr
 	}
+	warnIfShipConflicts(ctx, out, logger, a.worktree, a.base, target.branch)
 	if perr := ui.WithSpinner("pushing branch...", func() error {
 		return supervisor.Push(ctx, a.worktree, target.branch)
 	}); perr != nil {
@@ -420,6 +421,31 @@ func postShipJira(ctx context.Context, out io.Writer, logger *eventlog.Logger, a
 func warnJiraPostShip(out io.Writer, logger *eventlog.Logger, key string, err error) {
 	logger.Fail("jira_post_ship", key, err)
 	_, _ = fmt.Fprintf(out, "%s jira post-ship for %s: %v\n", ui.LabelWarning.Render("!"), key, err)
+}
+
+// warnIfShipConflicts checks the commit CommitAll just made against
+// origin/base and warns the operator immediately if it will conflict, rather
+// than leaving them to discover a DIRTY PR only after ship has already
+// opened it — the same merge-tree/same-function check `argus rebase` uses
+// (see supervisor.ConflictsWith), run once more here because ship's own
+// commit is the first point this worktree's history actually reflects
+// everything the worker changed, complete and committed. Best-effort: a
+// worktree/base this check can't resolve must never block a ship that has
+// already committed and is about to push — the operator finds out from the
+// PR's own mergeable state instead, same as before this existed.
+func warnIfShipConflicts(ctx context.Context, out io.Writer, logger *eventlog.Logger, worktree, base, branch string) {
+	if ferr := supervisor.FetchBase(ctx, worktree, base); ferr != nil {
+		return
+	}
+	conflicts, cerr := supervisor.ConflictsWith(ctx, worktree, base)
+	if cerr != nil {
+		return
+	}
+	if conflicts {
+		logger.Action("ship", branch, "will-conflict", base)
+		_, _ = fmt.Fprintf(out, "%s %s will conflict with origin/%s once pushed — run `argus rebase --worktree %s` after this PR opens\n",
+			ui.LabelWarning.Render("!"), branch, base, worktree)
+	}
 }
 
 // enforceShipGate runs this repo's hook/lint enforcement before shipChange
