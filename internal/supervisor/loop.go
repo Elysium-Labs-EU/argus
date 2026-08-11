@@ -1053,18 +1053,11 @@ type workerState struct {
 	// wall-clock reads) while herdr's own agent_status for this pane reports
 	// blocked or done; it resets to zero the moment that stops being true.
 	herdrStuckElapsed time.Duration
-	// herdrNudged is set once checkHerdrStuck has sent its one AgentPrompt
-	// reminder for the pane's current stuck streak, so a still-stuck pane
-	// escalates on the next threshold crossing instead of nudging forever.
-	// It resets alongside herdrStuckElapsed the moment the pane stops
-	// looking stuck, so a worker that gets stuck again later is nudged
-	// again.
-	herdrNudged     bool
-	hasFile         bool
-	measuredOK      bool
-	planEvidenceOK  bool
-	hasPlanEvidence bool
-	priorMeasuredOK bool
+	hasFile           bool
+	measuredOK        bool
+	planEvidenceOK    bool
+	hasPlanEvidence   bool
+	priorMeasuredOK   bool
 }
 
 // effective returns the status the gate should judge: the worker's reported phase,
@@ -1438,12 +1431,16 @@ func resolveSpawnLine(ctx context.Context, cfg *Config, p *WorkerPlan, workerEnv
 // identical to "pane hasn't started working yet" until this fires.
 const herdrStuckThreshold = 2 * time.Minute
 
-// herdrNudgeMessage is the one reminder checkHerdrStuck sends into a "done"
-// pane before escalating: the mismatch it targets (a worker whose chat
-// claims completion but never called `argus worker report`) is entirely
-// mechanical — the worker already knows what to report, it just didn't run
-// the command — so a single re-prompt resolves it without waiting on a
-// human to notice the gate's warning.
+// herdrNudgeMessage is the reminder checkHerdrStuck sends into a "done" pane
+// every time it crosses herdrStuckThreshold, before escalating: the mismatch
+// it targets (a worker whose chat claims completion but never called `argus
+// worker report`) is entirely mechanical — the worker already knows what to
+// report, it just didn't run the command — so a re-prompt resolves it
+// without waiting on a human to notice the gate's warning. The same nudge
+// also doubles as a liveness heartbeat for a worker genuinely still running
+// (e.g. a backgrounded gate_verify_command): each accepted nudge proves the
+// pane is alive and resets the threshold, so a re-prompt that a worker
+// answers "still going" never escalates on its own.
 const herdrNudgeMessage = "Your pane looks idle but status.json hasn't reached a terminal phase. If your work is actually finished, run `argus worker report <phase>` now with the JSON body your brief describes — that call, not this chat, is what tells argus you're ready for review."
 
 // herdrNudgeTimeout bounds AgentPrompt's own --wait --until working call
@@ -1497,13 +1494,18 @@ func FindPane(panes []herdr.Pane, paneID string) (herdr.Pane, bool) {
 // says nothing about the worker's real state, so it must not itself count as
 // evidence of being stuck.
 //
-// A pane stuck at "done" gets exactly one AgentPrompt reminder (see
-// herdrNudgeMessage) before this escalates — its agent turn already ended
-// cleanly, so the likeliest cause is a worker that claimed completion in
-// chat and forgot the mandatory report call, which a text nudge can fix. A
-// pane stuck at "blocked", or idle with status.json never written at all
-// (idleWithoutReport), is waiting on an unanswered prompt that no text nudge
-// resolves, so it escalates immediately, as before.
+// A pane stuck at "done" gets a fresh AgentPrompt reminder (see
+// herdrNudgeMessage) every time it crosses herdrStuckThreshold, not just
+// once: its agent turn having ended could mean a worker that claimed
+// completion in chat and forgot the mandatory report call, which a text
+// nudge fixes directly, or a worker that simply yielded its turn waiting on
+// a long backgrounded command (e.g. this repo's own gate_verify_command) and
+// is still very much alive. The two are indistinguishable from agent_status
+// alone, so escalation waits for the one signal that does distinguish them:
+// a nudge the pane fails to accept at all. A pane stuck at "blocked", or
+// idle with status.json never written at all (idleWithoutReport), is
+// waiting on an unanswered prompt that no text nudge resolves, so it
+// escalates immediately, as before.
 func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Logger, st *workerState, tick time.Duration) bool {
 	if st.paneID == "" {
 		return false
@@ -1523,7 +1525,6 @@ func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Log
 	pane, found := FindPane(panes, st.paneID)
 	if !found || (!herdrStuck(pane.AgentStatus) && !idleWithoutReport(pane.AgentStatus, st.hasFile)) {
 		st.herdrStuckElapsed = 0
-		st.herdrNudged = false
 		return false
 	}
 
@@ -1532,8 +1533,7 @@ func checkHerdrStuck(ctx context.Context, client herdr.Client, log *eventlog.Log
 		return false
 	}
 
-	if pane.AgentStatus == "done" && !st.herdrNudged {
-		st.herdrNudged = true
+	if pane.AgentStatus == "done" {
 		if err := client.AgentPrompt(ctx, st.paneID, herdrNudgeMessage, herdrNudgeTimeout); err == nil {
 			st.herdrStuckElapsed = 0
 			if log != nil {

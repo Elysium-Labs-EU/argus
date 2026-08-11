@@ -8,3 +8,4 @@ numbered sequentially. Run `make adr-find Q="concept"` to locate the ADR
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
 | [0002](0002-orchestrator-governance.md) | Orchestrator-session governance | Accepted |
+| [0003](0003-repeat-herdr-nudge-as-liveness-heartbeat.md) | Repeat herdr nudge as liveness heartbeat | Accepted |

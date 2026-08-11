@@ -491,11 +491,13 @@ func TestPaneStuckTrackerSkipsNoPane(t *testing.T) {
 	}
 }
 
-// TestPaneStuckTrackerNudgesDoneBeforeEscalating verifies that a pane herdr
-// reports "done" gets exactly one AgentPrompt reminder to run `argus worker
-// report` before escalating — the mismatch is entirely mechanical, so a
-// re-prompt gets first crack at fixing it.
-func TestPaneStuckTrackerNudgesDoneBeforeEscalating(t *testing.T) {
+// TestPaneStuckTrackerNudgesDoneRepeatedlyWhileAlive verifies that a pane
+// herdr reports "done" gets a fresh AgentPrompt reminder to run `argus
+// worker report` every time it crosses herdrStuckThreshold, for as long as
+// each nudge is accepted — a worker waiting on a long backgrounded command
+// (e.g. this repo's own gate_verify_command) keeps proving it's alive this
+// way and must never be escalated merely for staying "done" a long time.
+func TestPaneStuckTrackerNudgesDoneRepeatedlyWhileAlive(t *testing.T) {
 	var promptCalls int
 	client := herdr.NewWithRunner(fakePaneListAndPromptRunner(func() string { return "done" }, nil, &promptCalls))
 	var tracker paneStuckTracker
@@ -511,20 +513,27 @@ func TestPaneStuckTrackerNudgesDoneBeforeEscalating(t *testing.T) {
 		t.Fatalf("crossing the threshold for the first time must nudge, not escalate, got %v", err)
 	}
 	if promptCalls != 1 {
-		t.Fatalf("expected exactly one AgentPrompt nudge, got %d", promptCalls)
+		t.Fatalf("expected 1 cumulative AgentPrompt nudge, got %d", promptCalls)
 	}
 	if tracker.elapsed != 0 {
 		t.Errorf("nudging should reset the stuck timer to give the worker a fresh window, got %v", tracker.elapsed)
 	}
 
-	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
-		t.Fatalf("must not escalate before the second threshold window is crossed, got %v", err)
-	}
-	if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err == nil {
-		t.Fatal("must escalate once the worker stays stuck through a second threshold window")
-	}
-	if promptCalls != 1 {
-		t.Errorf("must not nudge a worker more than once per stuck streak, got %d prompt calls", promptCalls)
+	// Each subsequent window needs two ticks (sub-threshold, then crossing)
+	// since a successful nudge just reset elapsed to zero.
+	for window := 2; window <= 4; window++ {
+		if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
+			t.Fatalf("window %d: must not escalate before the window is crossed, got %v", window, err)
+		}
+		if err := tracker.check(context.Background(), client, "w1:p1", &buf, false, time.Minute); err != nil {
+			t.Fatalf("window %d: crossing the threshold must nudge, not escalate, got %v", window, err)
+		}
+		if promptCalls != window {
+			t.Fatalf("window %d: expected %d cumulative AgentPrompt nudges, got %d", window, window, promptCalls)
+		}
+		if tracker.elapsed != 0 {
+			t.Errorf("window %d: nudging should reset the stuck timer to give the worker a fresh window, got %v", window, tracker.elapsed)
+		}
 	}
 }
 
