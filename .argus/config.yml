@@ -2,6 +2,7 @@
 # .argus/config.yml — all keys are optional; see `argus init`.
 base_branch: "main"
 worker_placement: "tab"
+launcher: "claude --permission-mode dontAsk --model sonnet"
 phases:
   working:
     allow:
