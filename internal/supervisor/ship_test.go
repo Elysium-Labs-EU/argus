@@ -87,6 +87,7 @@ func TestCommitAllExcludesControlPlane(t *testing.T) {
 	write(".claude/argus/status.json", `{"phase":"awaiting_review"}`)
 	write(".claude/argus/brief.md", "do the thing")
 	write(".claude/settings.local.json", "{}")
+	write(".argus-report-body.json", `{"phase":"awaiting_review"}`)
 
 	if err := CommitAll(context.Background(), wt, "feat: real change"); err != nil {
 		t.Fatalf("CommitAll: %v", err)
@@ -101,6 +102,9 @@ func TestCommitAllExcludesControlPlane(t *testing.T) {
 	}
 	if strings.Contains(files, ".claude") {
 		t.Errorf("control-plane files leaked into the commit; files=%q", files)
+	}
+	if strings.Contains(files, ".argus-report-body.json") {
+		t.Errorf("worker report-body scratch file leaked into the commit; files=%q", files)
 	}
 }
 
@@ -413,7 +417,7 @@ func TestCommitAllResetControlPlaneFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	useFakeGitFailing(t, "reset -q -- .claude/argus .claude/settings.local.json")
+	useFakeGitFailing(t, "reset -q -- .claude/argus .claude/settings.local.json .argus-report-body.json")
 	if err := CommitAll(context.Background(), wt, "msg"); err == nil {
 		t.Fatal("want error when unstaging the control plane fails")
 	}

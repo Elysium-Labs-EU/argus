@@ -220,6 +220,40 @@ func TestMeasureDiffExcludesControlPlaneFiles(t *testing.T) {
 	}
 }
 
+// TestMeasureDiffExcludesUntrackedReportBodyScratchFile is the regression
+// test for the exact symptom that put .argus-report-body.json in
+// controlPlanePaths: a worker that passes `argus worker report --file` a
+// body it wrote out at the worktree root first, rather than piping it over
+// stdin, leaves that file untracked and — unlike the control-plane files
+// covered by TestMeasureDiffExcludesControlPlaneFiles above — it was never
+// gitignored, so `git ls-files --others --exclude-standard` used to surface
+// it here and inflate the measured diff past the worker's own self-reported
+// line count, tripping the gate's unwaivable under-report check on an
+// otherwise clean change.
+func TestMeasureDiffExcludesUntrackedReportBodyScratchFile(t *testing.T) {
+	wt := gitWorktreeWithDiff(t) // has a tracked edit to f.go (+2) vs HEAD
+	scratch := filepath.Join(wt, ".argus-report-body.json")
+	if err := os.WriteFile(scratch, []byte(strings.Repeat(`{"phase":"working"}`+"\n", 20)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ds, files, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	for _, f := range files {
+		if f == ".argus-report-body.json" {
+			t.Errorf("measured files must not include the report-body scratch file, got %v", files)
+		}
+	}
+	if ds.Insertions >= 20 {
+		t.Errorf("report-body scratch file inflated measured insertions: %+v", ds)
+	}
+	if ds.Files != 1 {
+		t.Errorf("expected only the real f.go edit to be measured, got %+v files=%v", ds, files)
+	}
+}
+
 // TestMeasureDiffCatchesConfigPlantedViaRename is the full end-to-end
 // regression test for the rename bypass: a worker that plants
 // .argus/config.yml by renaming an unrelated tracked file onto it (git
