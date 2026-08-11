@@ -675,6 +675,75 @@ func TestCleanWorktreeDirAlreadyGoneOnlyRemovesRegistration(t *testing.T) {
 	}
 }
 
+// setupFakeGolangciLint puts a stub "golangci-lint" executable on PATH that
+// appends its invocation args (space-joined) as one line to the returned
+// marker file, so a test can assert cleanLintCache actually invoked it (and
+// with what args) without depending on the real tool being installed.
+func setupFakeGolangciLint(t *testing.T) (marker string) {
+	t.Helper()
+	stubDir := t.TempDir()
+	marker = filepath.Join(t.TempDir(), "calls.log")
+	stub := "#!/bin/sh\necho \"$@\" >> " + marker + "\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "golangci-lint"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return marker
+}
+
+func TestCleanLintCacheInvokesGolangciLintWhenOnPath(t *testing.T) {
+	marker := setupFakeGolangciLint(t)
+	cleanLintCache(context.Background())
+
+	out, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("golangci-lint stub was never invoked: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "cache clean" {
+		t.Errorf("invocation args = %q, want %q", got, "cache clean")
+	}
+}
+
+func TestCleanLintCacheSilentNoOpWhenNotOnPath(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // empty dir: golangci-lint is unresolvable
+	cleanLintCache(context.Background())
+}
+
+// TestCleanWorktreeCleansLintCacheOnlyWhenItActuallyRelocates guards the scope
+// of the fix: cleanLintCache runs when CleanWorktree moves a worktree's
+// directory out from under its path (the event that actually poisons
+// golangci-lint's path-keyed cache), but not when the directory was already
+// gone before this run — nothing changed at that path in this call, so
+// there's nothing new for prune itself to have caused.
+func TestCleanWorktreeCleansLintCacheOnlyWhenItActuallyRelocates(t *testing.T) {
+	marker := setupFakeGolangciLint(t)
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-lint-cache")
+	c := &PruneCandidate{Path: worktree, Branch: "feat-lint-cache", SafeToClean: true}
+
+	if _, _, err := CleanWorktree(context.Background(), repoRoot, herdr.Client{}, c); err != nil {
+		t.Fatalf("CleanWorktree: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("want golangci-lint cache clean invoked after a real relocation, marker not found: %v", err)
+	}
+}
+
+func TestCleanWorktreeSkipsLintCacheWhenDirAlreadyGone(t *testing.T) {
+	marker := setupFakeGolangciLint(t)
+	repoRoot, worktree := initRepoWithWorktree(t, "feat-lint-cache-gone")
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatal(err)
+	}
+	c := &PruneCandidate{Path: worktree, Branch: "feat-lint-cache-gone", SafeToClean: true, DirGone: true}
+
+	if _, _, err := CleanWorktree(context.Background(), repoRoot, herdr.Client{}, c); err != nil {
+		t.Fatalf("CleanWorktree: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("want no lint cache clean when the directory was already gone before this run, marker exists")
+	}
+}
+
 func mergedNow() *time.Time {
 	now := time.Now()
 	return &now
