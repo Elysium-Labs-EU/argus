@@ -693,26 +693,25 @@ func WaitForStatus(ctx context.Context, client herdr.Client, paneID, worktree st
 type paneStuckTracker struct {
 	elapsed  time.Duration
 	wasStuck bool
-	nudged   bool
 }
 
 // check cross-references herdr's live agent_status for paneID against hasFile
 // (whether status.json has been written at all this dispatch) using the same
-// herdrStuck/idleWithoutReport signals, herdrStuckThreshold, and one-shot
+// herdrStuck/idleWithoutReport signals, herdrStuckThreshold, and repeated
 // "done" nudge as checkHerdrStuck, printing the same one-line notice to out
-// on the stuck/recovered edge. It returns a non-nil error once the pane has
-// sat stuck for herdrStuckThreshold with no working recovery — a worker that
-// is never going to write status.json on its own — instead of leaving
-// WaitForStatus's caller polling forever with no signal at all. This is the
-// fix for the actual reported bug: a rework/rebase dispatch into a worktree
-// with no live agent falls back to spawning a fresh one (see
-// dispatchIntoPane), and a freshly spawned agent landing on an interactive
-// prompt herdr's blocked-detector doesn't recognize (e.g. a first-run MCP
-// server consent gate) read as merely "idle" — indistinguishable from
-// "hasn't started yet" — forever, with no herdrStuck("blocked"/"done") ever
-// firing to end the wait. paneID == "" and a herdr transport error (which
-// says nothing about the worker's real state) both leave the tracker
-// unchanged.
+// on the stuck/recovered edge. It returns a non-nil error only once a nudge
+// itself fails to reach the pane — a worker that keeps accepting nudges is
+// proven alive, however long its own work (e.g. this repo's own
+// gate_verify_command) takes, so herdrStuckThreshold bounds the gap between
+// heartbeats, not the worker's total run time. This is the fix for the
+// actual reported bug: a rework/rebase dispatch into a worktree with no live
+// agent falls back to spawning a fresh one (see dispatchIntoPane), and a
+// freshly spawned agent landing on an interactive prompt herdr's
+// blocked-detector doesn't recognize (e.g. a first-run MCP server consent
+// gate) read as merely "idle" — indistinguishable from "hasn't started yet"
+// — forever, with no herdrStuck("blocked"/"done") ever firing to end the
+// wait. paneID == "" and a herdr transport error (which says nothing about
+// the worker's real state) both leave the tracker unchanged.
 func (t *paneStuckTracker) check(ctx context.Context, client herdr.Client, paneID string, out io.Writer, hasFile bool, tick time.Duration) error {
 	if paneID == "" {
 		return nil
@@ -733,7 +732,6 @@ func (t *paneStuckTracker) check(ctx context.Context, client herdr.Client, paneI
 	t.wasStuck = stuck
 	if !stuck {
 		t.elapsed = 0
-		t.nudged = false
 		return nil
 	}
 
@@ -742,8 +740,7 @@ func (t *paneStuckTracker) check(ctx context.Context, client herdr.Client, paneI
 		return nil
 	}
 
-	if pane.AgentStatus == "done" && !t.nudged {
-		t.nudged = true
+	if pane.AgentStatus == "done" {
 		if perr := client.AgentPrompt(ctx, paneID, herdrNudgeMessage, herdrNudgeTimeout); perr == nil {
 			t.elapsed = 0
 			return nil
