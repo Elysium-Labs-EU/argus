@@ -31,6 +31,13 @@ type ReviewRequest struct {
 	ReviewNote  string
 	Reasons     []string
 	HardReasons []string
+	// RealWorldProof is the worker's self-reported real_world_proof, set only
+	// when the change touched a proof-required path (see review.go's
+	// ProofForReview, the same match Assess uses for its own gate check). The
+	// gate at review.go:134 only checks that this field is non-empty; whether
+	// the text actually demonstrates what it claims is left to the reviewer,
+	// so reviewPrompt surfaces it as an unverified claim, not fact.
+	RealWorldProof string
 	// PriorFindings carries a previous request-changes verdict's Reasons for this
 	// same worktree, when one exists (see protocol.LoadApproval). A fresh review
 	// otherwise has no memory of what an earlier round already flagged, so a
@@ -204,6 +211,16 @@ func reviewPrompt(req *ReviewRequest) string {
 		for _, f := range req.PriorFindings {
 			fmt.Fprintf(&b, "  - %s\n", f)
 		}
+	}
+	if req.RealWorldProof != "" {
+		b.WriteString("\nThis change touched a path that requires real-world proof. The worker\n")
+		b.WriteString("self-reported the following as its real_world_proof — treat it as an\n")
+		b.WriteString("UNVERIFIED WORKER CLAIM, not established fact: the gate only checked that\n")
+		b.WriteString("this field was non-empty, not that it actually demonstrates what it claims.\n")
+		b.WriteString("Judge for yourself whether it does:\n")
+		b.WriteString("```\n")
+		b.WriteString(req.RealWorldProof)
+		b.WriteString("\n```\n")
 	}
 	b.WriteString("\nDiff:\n```diff\n")
 	b.WriteString(req.Diff)

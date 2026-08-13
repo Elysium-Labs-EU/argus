@@ -194,6 +194,61 @@ func TestDefaultReviewPolicyExcludesSelfConfigPath(t *testing.T) {
 	}
 }
 
+// TestProofForReview pins the fix for issue #603's reviewer/gate disagreement
+// over what "proof" means: the reviewer prompt must see real_world_proof only
+// when the same proof-required-path match Assess itself uses is present, and
+// never otherwise — including when a proof text happens to be set on a change
+// that never touched such a path.
+func TestProofForReview(t *testing.T) {
+	cases := []struct {
+		policy *ReviewPolicy
+		name   string
+		want   string
+		status protocol.Status
+	}{
+		{
+			name: "proof-required path with proof returns the proof text",
+			status: protocol.Status{
+				FilesTouched:   []string{"internal/service/systemd.go"},
+				RealWorldProof: "ran on orb debian, systemctl status active",
+			},
+			want: "ran on orb debian, systemctl status active",
+		},
+		{
+			name: "proof-required path with no proof returns empty",
+			status: protocol.Status{
+				FilesTouched: []string{"internal/service/systemd.go"},
+			},
+			want: "",
+		},
+		{
+			name: "non-proof-required path omits proof even when set",
+			status: protocol.Status{
+				FilesTouched:   []string{"internal/config/config.go"},
+				RealWorldProof: "ran on orb debian, systemctl status active",
+			},
+			want: "",
+		},
+		{
+			name:   "nil policy falls back to DefaultReviewPolicy the same as Assess",
+			policy: nil,
+			status: protocol.Status{
+				FilesTouched:   []string{"cmd/install/main.go"},
+				RealWorldProof: "installed and verified the service starts",
+			},
+			want: "installed and verified the service starts",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ProofForReview(&tc.status, tc.policy); got != tc.want {
+				t.Errorf("ProofForReview() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestAssessIntentionalFailureIsNotedNotEscalated pins the fix that lets a
 // worker mark a deliberate break-then-revert test run as expected: the run
 // itself must not appear in Reasons (it would read as a real regression to a
