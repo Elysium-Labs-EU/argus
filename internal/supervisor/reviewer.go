@@ -97,8 +97,17 @@ func (r CLIReviewer) WithLog(log *eventlog.Logger) CLIReviewer {
 // as before) so a bad --worktree or --base surfaces git's actual stderr,
 // translated where recognized — previously stderr was discarded entirely and
 // both failures collapsed into an identical, undiagnosable "exit status 128".
+//
+// Diffs against ResolveEffectiveDiffBase's merge-base of base and HEAD, not
+// base directly, for the same reason MeasureDiff does (see its doc comment):
+// otherwise a reviewer reading this diff would see a revert of every commit
+// base picked up after the worktree branched, not just the worker's own change.
 func DiffFor(ctx context.Context, worktree, base string) (string, error) {
-	out, err := git(ctx, worktree, "diff", base)
+	effBase, err := ResolveEffectiveDiffBase(ctx, worktree, base)
+	if err != nil {
+		return "", err
+	}
+	out, err := git(ctx, worktree, "diff", effBase)
 	if err != nil {
 		return "", fmt.Errorf("diffing worktree against %s: %w", base, err)
 	}

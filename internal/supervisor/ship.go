@@ -69,6 +69,12 @@ func translateGitFailure(worktree, msg string) error {
 	if ref, ok := quotedAfter(msg, "bad revision '"); ok {
 		return &ui.UserError{Err: fmt.Errorf("no such ref: %s", ref), Hint: "check --base"}
 	}
+	// `git merge-base <bad-ref> HEAD` — the one ResolveEffectiveDiffBase runs —
+	// fails with this phrasing instead of "ambiguous argument"/"bad revision"
+	// above, unquoted and with no trailing punctuation to cut on.
+	if _, ref, ok := strings.Cut(msg, "Not a valid object name "); ok {
+		return &ui.UserError{Err: fmt.Errorf("no such ref: %s", strings.TrimSpace(ref)), Hint: "check --base"}
+	}
 	return nil
 }
 

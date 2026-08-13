@@ -710,6 +710,11 @@ func measureReconcileDiffs(ctx context.Context, cfg *Config, states []*workerSta
 		st.measured = ds
 		st.measuredFiles = files
 		st.measuredOK = true
+		// Best-effort and purely informational (see workerState.commitsBehindBase):
+		// an error here just leaves the count at 0, the same as "not behind".
+		if behind, berr := CommitsBehindBase(ctx, st.plan.Worktree, cfg.Base); berr == nil {
+			st.commitsBehindBase = behind
+		}
 		// Only a rework round supplies a pre-round hash to compare against, so
 		// hashing every worker's touched files in the main loop would be pure
 		// wasted I/O — compute the post-round hash only where gateVerdict's
@@ -1058,6 +1063,12 @@ type workerState struct {
 	planEvidenceOK    bool
 	hasPlanEvidence   bool
 	priorMeasuredOK   bool
+	// commitsBehindBase is CommitsBehindBase's own count for this worker's
+	// worktree, best-effort like the hash fields above: 0 either means the
+	// branch is genuinely current with base, or the count could not be
+	// measured — both render identically (no note), which is fine since this
+	// is purely informational, never a gate check.
+	commitsBehindBase int
 }
 
 // effective returns the status the gate should judge: the worker's reported phase,
