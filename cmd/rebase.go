@@ -15,6 +15,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/ownership"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/repoconfig"
 	"github.com/Elysium-Labs-EU/argus/internal/supervisor"
 	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
@@ -316,11 +317,12 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	// base this specific dispatch is actually targeting (see its own doc
 	// comment).
 	cfg := loadProjectConfig(ctx, opts.worktree)
+	rebaseAllow := supervisor.RebasePhaseAllow(baseBranch, cfg.ShipVerifyCommand, cfg.GateVerifyCommand)
 	if gerr := supervisor.GrantRebaseAllow(opts.worktree, baseBranch, cfg.ShipVerifyCommand, cfg.GateVerifyCommand); gerr != nil {
 		return fmt.Errorf("granting rebase allow before dispatch: %w", gerr)
 	}
 
-	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget()); err != nil {
+	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget(&cfg, rebaseAllow)); err != nil {
 		return err
 	}
 
@@ -388,30 +390,38 @@ func commitRebaseResolution(ctx context.Context, worktree, branch, base string, 
 // the two commands that re-dispatch into a worktree a worker already ran in,
 // rather than spawning a brand new one via the full supervise pipeline — so
 // the pane-reuse-vs-spawn logic below is written once.
+// Fields are ordered for struct alignment (fieldalignment-enforced), not
+// logical order — see repoPhases's own doc comment below for what
+// repoAllow/rebaseAllow/sandboxAllowWrite/repoPhases/experimentalSandbox are
+// actually for.
 type dispatchTarget struct {
-	credentialEnv map[string]string
-	worktree      string
-	launcher      string
-	workerRuntime string
-	// label, when set, is the herdr tab label dispatchIntoPane applies (via
-	// TabRename) once it confirms paneID has no live agent — a genuinely
-	// fresh pane, not a live session being re-tasked. rebaseOpts never sets
-	// this; only reworkOpts does, derived from supervisor.TicketKey (see its
-	// own dispatchTarget), since rebase's dispatch never had a labeling
-	// requirement of its own. "" is a no-op: leave herdr's own default label
-	// alone.
-	label            string
-	noCredProxy      bool
-	livenessTimeout  time.Duration
-	livenessInterval time.Duration
+	credentialEnv       map[string]string
+	repoPhases          protocol.PhaseConfig
+	label               string
+	worktree            string
+	launcher            string
+	workerRuntime       string
+	repoAllow           []string
+	sandboxAllowWrite   []string
+	rebaseAllow         []string
+	livenessTimeout     time.Duration
+	livenessInterval    time.Duration
+	noCredProxy         bool
+	experimentalSandbox bool
 }
 
-// dispatchTarget builds the dispatchIntoPane input from a rebaseOpts.
-func (o *rebaseOpts) dispatchTarget() *dispatchTarget {
+// dispatchTarget builds the dispatchIntoPane input from a rebaseOpts. rc is
+// the repo's own .argus/config.yml already resolved from the trusted main
+// checkout (see loadProjectConfig, called once by dispatchRebaseWorker);
+// rebaseAllow is the exact grant dispatchRebaseWorker already computed for
+// this dispatch's base, so the settings re-render never drops it.
+func (o *rebaseOpts) dispatchTarget(rc *repoconfig.Config, rebaseAllow []string) *dispatchTarget {
 	return &dispatchTarget{
 		worktree: o.worktree, launcher: o.launcher, workerRuntime: o.workerRuntime,
 		noCredProxy: o.noCredProxy, credentialEnv: o.credentialEnv,
 		livenessTimeout: o.livenessTimeout, livenessInterval: o.livenessInterval,
+		repoPhases: rc.Phases, repoAllow: rc.Allow, rebaseAllow: rebaseAllow,
+		experimentalSandbox: rc.ExperimentalWorkerSandbox, sandboxAllowWrite: rc.SandboxAllowWrite,
 	}
 }
 
@@ -453,6 +463,9 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 
 	logger.Action("dispatch", branch, "spawn-new-agent", paneID)
 	relabelFreshPane(ctx, logger, client, paneID, branch, target.label)
+	if rerr := reRenderSettingsBeforeSpawn(target); rerr != nil {
+		return fmt.Errorf("re-rendering settings before respawning worker in pane %s: %w", paneID, rerr)
+	}
 	spawnLine, cleanup, err := buildRebaseSpawnLine(ctx, logger, target.worktree, branch, target.launcher, target.workerRuntime, target.noCredProxy, target.credentialEnv)
 	defer cleanup()
 	if err != nil {
@@ -477,6 +490,25 @@ func dispatchIntoPane(ctx context.Context, logger *eventlog.Logger, client herdr
 	// only once the agent starts actually running) still fails fast instead
 	// of hanging forever.
 	return waitForAgentLive(ctx, client, paneID, target.livenessTimeout, target.livenessInterval)
+}
+
+// reRenderSettingsBeforeSpawn re-renders worktree's settings.local.json from
+// target's carried config immediately before dispatchIntoPane's spawn-new-
+// agent branch launches a fresh Claude Code session in paneID, mirroring
+// provisionWorktree's own bake at spawn time (internal/supervisor/loop.go).
+// Without this, a worker respawned into an existing worktree's pane —
+// rework's and rebase's shared "no live agent" fallback — runs under
+// whatever permission set was baked in at that worktree's *original* spawn:
+// settings.local.json is read only once, at session launch, so a fresh
+// launch is exactly the moment it must be regenerated. extraAllow is read
+// back from the worktree's own persisted --allow flags (see
+// protocol.LoadExtraAllow) rather than threaded through target, mirroring
+// the live check-tool hook's own read of the same file — a missing or
+// unreadable file fails open to no extra flags rather than blocking the
+// respawn.
+func reRenderSettingsBeforeSpawn(target *dispatchTarget) error {
+	extraAllow, _ := protocol.LoadExtraAllow(target.worktree)
+	return supervisor.WriteSettings(target.worktree, target.repoPhases, target.repoAllow, extraAllow, target.rebaseAllow, target.experimentalSandbox, target.sandboxAllowWrite)
 }
 
 // relabelFreshPane best-effort renames paneID's tab to label, once
