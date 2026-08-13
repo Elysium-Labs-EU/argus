@@ -1122,7 +1122,18 @@ func TestDispatchRebaseWorkerAbortsLeftoverMergeBeforeDispatch(t *testing.T) {
 
 	logger := eventlog.New(nil, "rebase", "test-run", nil)
 	client := fakeRebaseClient("w1:p1", nil, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// dispatchRebaseWorkerAbortDeadline (not 50ms, the value every sibling
+	// 50ms-deadline test in this file uses) because, unlike those, this is
+	// the one test where AbortInProgressMerge finds a real MERGE_HEAD and so
+	// actually runs `git merge --abort` — a real subprocess doing real work,
+	// not just mergeInProgress's cheap rev-parse check. A 50ms deadline races
+	// that subprocess: exec.CommandContext SIGKILLs its child the instant ctx
+	// expires, so a slow-but-correct abort under a loaded -race runner gets
+	// killed mid-run instead of finishing ("git merge: signal: killed"). No
+	// fake worker here ever reports a status, so the deadline is still what
+	// ends the wait — it just needs enough headroom for the abort itself to
+	// never lose the race.
+	ctx, cancel := context.WithTimeout(context.Background(), dispatchRebaseWorkerAbortDeadline)
 	defer cancel()
 	if err := dispatchRebaseWorker(ctx, logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
 		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
@@ -1134,6 +1145,14 @@ func TestDispatchRebaseWorkerAbortsLeftoverMergeBeforeDispatch(t *testing.T) {
 		t.Errorf("MERGE_HEAD should be cleared before dispatch, stat error = %v", err)
 	}
 }
+
+// dispatchRebaseWorkerAbortDeadline bounds
+// TestDispatchRebaseWorkerAbortsLeftoverMergeBeforeDispatch's ctx: generous
+// enough that a real `git merge --abort` subprocess is never killed by ctx
+// cancellation even on a loaded -race runner, short enough that the test
+// still terminates promptly since no fake worker in it ever writes a status
+// for WaitForStatus to see.
+const dispatchRebaseWorkerAbortDeadline = 2 * time.Second
 
 // fakeRebaseClientStuckPane is fakeRebaseClient plus a "pane list" that always
 // reports agentStatus for paneID — used to drive WaitForStatus's
