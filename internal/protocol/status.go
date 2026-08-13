@@ -121,15 +121,15 @@ type Steer struct {
 	Delivered bool `json:"delivered"`
 }
 
-// MaxSteersPerWorking caps how many *delivered* steer messages a single
-// working or awaiting_review leg may receive before `argus worker steer`
-// refuses further ones. Without a cap, steer would become an unbounded
-// side-channel a supervisor could lean on instead of the phase-transition
-// table itself — endlessly redirecting a worker mid-turn rather than ever
-// letting it reach a terminal phase. Failed deliveries are recorded in
-// Steers for the trace but excluded from this count, so a run of transient
-// herdr/agent-busy failures can't lock a supervisor out of steering before a
-// single message actually lands.
+// MaxSteersPerWorking caps how many *delivered* steer messages a worktree
+// may receive across its whole lifetime before `argus worker steer` refuses
+// further ones. Without a cap, steer would become an unbounded side-channel
+// a supervisor could lean on instead of the phase-transition table itself —
+// endlessly redirecting a worker mid-turn rather than ever letting it reach
+// a terminal phase. Failed deliveries are recorded in Steers for the trace
+// but excluded from this count, so a run of transient herdr/agent-busy
+// failures can't lock a supervisor out of steering before a single message
+// actually lands.
 const MaxSteersPerWorking = 3
 
 // Status is the whole typed payload a worker writes to its status file. Fields
@@ -166,13 +166,13 @@ type Status struct {
 	// by that report's own JSON body (which never sends it).
 	Question *Question `json:"question,omitempty"`
 	Answer   *Answer   `json:"answer,omitempty"`
-	// Steers is the durable trace of every `argus worker steer` message
-	// delivered while this phase leg is live. A worker's own report body
-	// never sets this key, and runWorkerReport does not carry it forward the
-	// way it does Base/Title/Question/Answer — so every worker-initiated
-	// phase transition resets it to empty, giving each fresh phase leg its
-	// own MaxSteersPerWorking budget instead of accumulating across the whole
-	// worktree's lifetime.
+	// Steers is the durable trace of every `argus worker steer` message ever
+	// delivered to this worktree. A worker's own report body never sets this
+	// key — runWorkerReport carries the on-disk value forward the same way
+	// it does Base, so a worker's next phase report can't silently erase a
+	// trace the worker never wrote in the first place. MaxSteersPerWorking's
+	// cap is therefore counted across the worktree's whole lifetime, not
+	// reset per phase leg.
 	Steers []Steer `json:"steers"`
 	// Plan is the worker's todo list, reported during the planning phase (issue
 	// #103). It is the typed evidence RequiresPlanEvidence checks before

@@ -424,14 +424,13 @@ func TestRunWorkerReportFreshQuestionResetsAnswer(t *testing.T) {
 	}
 }
 
-// TestRunWorkerReportResetsSteersAcrossReports pins the reset half of the
-// steer budget: a worker's own report body never carries a "steers" key, and
-// runWorkerReport does not carry the prior value forward the way it does
-// Base/Title/Question/Answer — so any worker-initiated phase transition
-// clears the working leg's steer count, giving the next working leg a fresh
-// MaxSteersPerWorking budget instead of accumulating across the worktree's
-// whole lifetime.
-func TestRunWorkerReportResetsSteersAcrossReports(t *testing.T) {
+// TestRunWorkerReportPreservesSteersAcrossReports pins the carry-forward fix:
+// a supervisor's `argus worker steer` appends onto status.json directly, not
+// through a worker's own report body (which never carries a "steers" key at
+// all), so a worker's next phase report must not silently erase that durable
+// audit trace the way it used to — restoring the field's own documented
+// "durable trace" contract (see protocol.Status.Steers).
+func TestRunWorkerReportPreservesSteersAcrossReports(t *testing.T) {
 	wt := t.TempDir()
 	seed := protocol.Status{
 		Phase:  protocol.PhaseWorking,
@@ -449,8 +448,49 @@ func TestRunWorkerReportResetsSteersAcrossReports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(got.Steers) != 0 {
-		t.Errorf("Steers = %+v after the worker's own report, want it reset to empty", got.Steers)
+	if len(got.Steers) != 2 || got.Steers[0].Text != "note 1" || got.Steers[1].Text != "note 2" {
+		t.Errorf("Steers = %+v after the worker's own report, want the prior trace preserved unchanged", got.Steers)
+	}
+}
+
+// TestRunWorkerReportNormalReportStillUpdatesPhasePlanAndDiffStat pins that
+// the Steers carry-forward fix doesn't regress the rest of a normal report:
+// Phase, Plan, and DiffStat must still come from the reported body even when
+// a preserved Steers trace is also being carried forward on the same write.
+func TestRunWorkerReportNormalReportStillUpdatesPhasePlanAndDiffStat(t *testing.T) {
+	wt := t.TempDir()
+	seed := protocol.Status{
+		Phase:  protocol.PhaseWorking,
+		Steers: []protocol.Steer{{Text: "note 1", Delivered: true}},
+	}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+
+	body := &protocol.Status{
+		Task:     "t",
+		Branch:   "b",
+		Plan:     []string{"run the tests", "report self_test"},
+		DiffStat: protocol.DiffStat{Files: 3, Insertions: 42, Deletions: 7},
+	}
+	if err := runWorkerReport(wt, protocol.PhaseSelfTest, body, fixedNow(time.Now())); err != nil {
+		t.Fatalf("self_test report rejected: %v", err)
+	}
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Phase != protocol.PhaseSelfTest {
+		t.Errorf("Phase = %q, want self_test", got.Phase)
+	}
+	if len(got.Plan) != 2 || got.Plan[0] != "run the tests" {
+		t.Errorf("Plan = %+v, want the reported plan", got.Plan)
+	}
+	if got.DiffStat != (protocol.DiffStat{Files: 3, Insertions: 42, Deletions: 7}) {
+		t.Errorf("DiffStat = %+v, want the reported diff stat", got.DiffStat)
+	}
+	if len(got.Steers) != 1 || got.Steers[0].Text != "note 1" {
+		t.Errorf("Steers = %+v, want the prior trace still preserved alongside the normal update", got.Steers)
 	}
 }
 

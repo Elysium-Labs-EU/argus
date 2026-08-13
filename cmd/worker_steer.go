@@ -40,11 +40,12 @@ left) has nowhere for the note to land.
 
 Steer does not itself change the worker's reported phase; the worker still
 reports its next phase once it acts on the note, the same as any other
-report. Each phase leg gets at most MaxSteersPerWorking *delivered* notes —
-a note that fails to deliver (e.g. the agent is busy mid-turn) does not count
-against that budget, only ones that actually reach the worker's pane. A
-worker's own next phase report resets the budget, so repeated steering can't
-become a silent substitute for the phase-transition table itself.`,
+report. A worktree gets at most MaxSteersPerWorking *delivered* notes across
+its whole lifetime — a note that fails to deliver (e.g. the agent is busy
+mid-turn) does not count against that budget, only ones that actually reach
+the worker's pane. The trace survives every later report, so the budget
+never resets; once it's spent, further steering needs ` + "`argus rework`" + `
+instead of a substitute for the phase-transition table itself.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger, closeLog := openRunLog(cmd, "worker-steer")
