@@ -12,6 +12,7 @@ import (
 	"github.com/Elysium-Labs-EU/argus/internal/eventlog"
 	"github.com/Elysium-Labs-EU/argus/internal/herdr"
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
+	"github.com/Elysium-Labs-EU/argus/internal/ui"
 )
 
 const workerSteerTestPaneID = "w1:p1"
@@ -63,7 +64,7 @@ func TestRunWorkerSteerRejectsMissingStatus(t *testing.T) {
 	}
 }
 
-func TestRunWorkerSteerRejectsNonWorkingWorker(t *testing.T) {
+func TestRunWorkerSteerRejectsBlockedWorker(t *testing.T) {
 	wt := initGitDir(t)
 	seed := protocol.Status{Phase: protocol.PhaseBlocked}
 	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
@@ -74,10 +75,47 @@ func TestRunWorkerSteerRejectsNonWorkingWorker(t *testing.T) {
 
 	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now()))
 	if err == nil {
-		t.Fatal("want an error steering a non-working worker, got nil")
+		t.Fatal("want an error steering a blocked worker, got nil")
 	}
-	if !strings.Contains(err.Error(), "not working") {
-		t.Errorf("error = %q, want it to mention the worker is not working", err.Error())
+	if !strings.Contains(err.Error(), "not steerable") {
+		t.Errorf("error = %q, want it to mention the worker is not steerable", err.Error())
+	}
+	var ue *ui.UserError
+	if !errors.As(err, &ue) {
+		t.Fatalf("error = %T, want a *ui.UserError carrying a hint", err)
+	}
+	if !strings.Contains(ue.Hint, "argus worker answer") {
+		t.Errorf("hint = %q, want it to point a blocked worker at `argus worker answer`", ue.Hint)
+	}
+}
+
+// TestRunWorkerSteerAcceptsAwaitingReviewWorker pins the fix itself: a
+// worker reporting awaiting_review still has a live pane, so a report-only
+// defect can be corrected with a steer instead of costing a full rework
+// round (see docs/adr/0009-steer-accepts-awaiting-review.md).
+func TestRunWorkerSteerAcceptsAwaitingReviewWorker(t *testing.T) {
+	wt := initGitDir(t)
+	seed := protocol.Status{Phase: protocol.PhaseAwaitingReview}
+	if err := protocol.Write(protocol.StatusPath(wt), &seed); err != nil {
+		t.Fatalf("seeding status: %v", err)
+	}
+	client := fakeSteerClient(true, nil)
+	testCmdCtx, _ := testCmd()
+
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	if err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "the summary table is missing a column", ownerFlags{}, fixedNow(now)); err != nil {
+		t.Fatalf("runWorkerSteer: want an awaiting_review worker steerable, got %v", err)
+	}
+
+	got, err := protocol.Load(protocol.StatusPath(wt))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Steers) != 1 || !got.Steers[0].Delivered {
+		t.Fatalf("Steers = %+v, want a single delivered note", got.Steers)
+	}
+	if got.Phase != protocol.PhaseAwaitingReview {
+		t.Errorf("Phase = %q, want unchanged awaiting_review — steer never moves phase", got.Phase)
 	}
 }
 

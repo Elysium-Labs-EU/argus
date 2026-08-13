@@ -23,7 +23,7 @@ func newWorkerSteerCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "steer <worktree> <text>",
-		Short: "Inject a follow-up note into a worker that is still working",
+		Short: "Inject a follow-up note into a worker that still has a live pane",
 		Long: `Steer lets a supervisor correct a worker's direction without waiting for it
 to reach a terminal phase and re-dispatching via rework. It records TEXT onto
 the worktree's status.json as a durable trace (a new entry in Steers), then
@@ -31,14 +31,16 @@ delivers it as a chat message into the worker's live pane — the worker keeps
 its existing context and plan; the note augments its current turn rather than
 starting a fresh one.
 
-<worktree> must currently be reporting phase "working". This is deliberately
-narrower than "not yet terminal": a worker in planning has no live turn to
-steer yet, and one in self_test/blocked/awaiting_review already has a
-first-class path (report a fresh phase, or ` + "`argus worker answer`" + `).
+<worktree> must currently be reporting phase "working" or "awaiting_review".
+Both still have a live pane a note can reach: a worker in planning has no
+live turn to steer yet, one in self_test already has a first-class path
+(report a fresh phase), one in blocked needs a decision, not a nudge (use
+` + "`argus worker answer`" + `), and a terminal worker (done, or any phase with no pane
+left) has nowhere for the note to land.
 
 Steer does not itself change the worker's reported phase; the worker still
 reports its next phase once it acts on the note, the same as any other
-report. Each working leg gets at most MaxSteersPerWorking *delivered* notes —
+report. Each phase leg gets at most MaxSteersPerWorking *delivered* notes —
 a note that fails to deliver (e.g. the agent is busy mid-turn) does not count
 against that budget, only ones that actually reach the worker's pane. A
 worker's own next phase report resets the budget, so repeated steering can't
@@ -63,9 +65,9 @@ become a silent substitute for the phase-transition table itself.`,
 }
 
 // runWorkerSteer is newWorkerSteerCmd's RunE body: it validates the target
-// worker is actually working and under its steer budget, appends a Steer to
-// status.json, then delivers it into the worker's live pane. Split out of the
-// RunE closure so it is directly testable without cobra flag parsing,
+// worker is in a steerable phase and under its steer budget, appends a Steer
+// to status.json, then delivers it into the worker's live pane. Split out of
+// the RunE closure so it is directly testable without cobra flag parsing,
 // mirroring runWorkerAnswer.
 func runWorkerSteer(cmd *cobra.Command, client herdr.Client, logger *eventlog.Logger, worktree, text string, of ownerFlags, now func() time.Time) error {
 	if worktree == "" {
@@ -90,10 +92,10 @@ func runWorkerSteer(cmd *cobra.Command, client herdr.Client, logger *eventlog.Lo
 			Hint: "the worker must have reported at least once before it can be steered",
 		}
 	}
-	if cur.Phase != protocol.PhaseWorking {
+	if cur.Phase != protocol.PhaseWorking && cur.Phase != protocol.PhaseAwaitingReview {
 		return &ui.UserError{
-			Err:  fmt.Errorf("%s is not working (phase %q)", worktree, cur.Phase),
-			Hint: "worker steer only applies to a worker currently reporting phase \"working\" — use `argus worker answer` for a blocked worker, or wait for a terminal phase",
+			Err:  fmt.Errorf("%s is not steerable (phase %q)", worktree, cur.Phase),
+			Hint: "worker steer only applies to a worker currently reporting phase \"working\" or \"awaiting_review\" — use `argus worker answer` for a blocked worker, or wait for a terminal phase",
 		}
 	}
 	delivered := 0
@@ -104,7 +106,7 @@ func runWorkerSteer(cmd *cobra.Command, client herdr.Client, logger *eventlog.Lo
 	}
 	if delivered >= protocol.MaxSteersPerWorking {
 		return &ui.UserError{
-			Err:  fmt.Errorf("%s already received %d steer messages this working phase", worktree, delivered),
+			Err:  fmt.Errorf("%s already received %d steer messages this phase leg", worktree, delivered),
 			Hint: "wait for the worker to reach its next phase (which resets the budget), or let it run to a terminal phase and use `argus rework` instead of steering further",
 		}
 	}
