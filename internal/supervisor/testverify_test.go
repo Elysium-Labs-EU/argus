@@ -117,6 +117,42 @@ func TestVerifyTestsMakeTargetDropsAppendedTarget(t *testing.T) {
 	}
 }
 
+// TestVerifyTestsMakeTargetPreservesAssignmentsDropsPositionals is the
+// regression for the issue where the make branch stripped every token after
+// the target, including VAR=value assignments a worker's claimed command
+// legitimately needs (e.g. "make test TEST=Name", "make adr-find
+// Q=concept"): make reads those anywhere on the line as variable
+// assignments, not extra targets, so dropping one changes what the guarded
+// recipe runs and can fail it. A bare positional word alongside the
+// assignment must still be dropped, since make reads that one as a second,
+// nonexistent target.
+func TestVerifyTestsMakeTargetPreservesAssignmentsDropsPositionals(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+	}{
+		{name: "single assignment preserved", cmd: "make check FOO=bar"},
+		{name: "multiple assignments preserved", cmd: "make check FOO=bar BAZ=qux"},
+		{name: "bare positional word still dropped", cmd: "make check FOO=bar golangci-lint"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wt := t.TempDir()
+			makefile := "check:\n" +
+				"\ttest \"$(FOO)\" = bar\n" +
+				"\ttest \"$(BAZ)\" = \"$${BAZ:-}\"\n"
+			if err := os.WriteFile(filepath.Join(wt, "Makefile"), []byte(makefile), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tests := []protocol.TestRun{{Cmd: tc.cmd, Result: protocol.ResultPass}}
+			mismatches, _ := VerifyTests(context.Background(), wt, tests, time.Second)
+			if len(mismatches) != 0 {
+				t.Fatalf("mismatches = %v, want none — assignments must replay and reach the recipe while any stray positional word is dropped", mismatches)
+			}
+		})
+	}
+}
+
 // TestVerifyTestsMakeTargetRunsFromTargetSubdirWhenItExists covers a
 // monorepo with one Makefile per module (e.g. eos-plugins' eos-sink-* dirs):
 // a worker reports {Cmd: "make crap", Target: "eos-sink-logbench"}, and the

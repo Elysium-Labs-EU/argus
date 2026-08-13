@@ -116,12 +116,20 @@ func VerifyTests(ctx context.Context, worktree string, tests []protocol.TestRun,
 // correct change. Target's only remaining effect on replay is picking a
 // working directory:
 //
-//   - `make <target>`: make treats every token after the target name as an
-//     additional target to build, never as an argument to the recipe — a
-//     stray word turns into "No rule to make target". The target is always
-//     replayed bare, from Target's resolved directory when Target names one
-//     that exists (a monorepo with one Makefile per module, e.g. Cmd "make
-//     crap", Target "eos-sink-logbench"), else the worktree root.
+//   - `make <target>`: make treats every bare token after the target name as
+//     an additional target to build, never as an argument to the recipe — a
+//     stray word turns into "No rule to make target". Those bare positional
+//     words are dropped, but a `VAR=value` token is different: make accepts
+//     variable assignments anywhere on the command line, and a worker's
+//     claimed command routinely carries one (`make test TEST=Name`, `make
+//     adr-find Q=concept`) — dropping it changes what the guarded target
+//     actually runs and can turn a genuine pass into a fabricated failure.
+//     isMakeAssignment tells the two apart, so assignments replay alongside
+//     the bare target while positional words are still stripped. The target
+//     itself is always replayed bare, from Target's resolved directory when
+//     Target names one that exists (a monorepo with one Makefile per module,
+//     e.g. Cmd "make crap", Target "eos-sink-logbench"), else the worktree
+//     root.
 //   - Any other Cmd: when Target resolves to a real directory under
 //     worktree (the same per-module-monorepo shape), Cmd replays from
 //     there instead of the worktree root. Otherwise Cmd replays from the
@@ -130,7 +138,13 @@ func replayCommands(worktree, cmd, target string) []replayCmd {
 	cmd = stripTrailingParenthetical(cmd)
 
 	if fields := strings.Fields(cmd); len(fields) >= 2 && fields[0] == "make" {
-		return []replayCmd{{cmd: "make " + fields[1], dir: targetDir(worktree, target)}}
+		replay := []string{"make", fields[1]}
+		for _, f := range fields[2:] {
+			if isMakeAssignment(f) {
+				replay = append(replay, f)
+			}
+		}
+		return []replayCmd{{cmd: strings.Join(replay, " "), dir: targetDir(worktree, target)}}
 	}
 
 	if target != "" {
@@ -140,6 +154,21 @@ func replayCommands(worktree, cmd, target string) []replayCmd {
 	}
 
 	return []replayCmd{{cmd: cmd, dir: worktree}}
+}
+
+// makeAssignmentPattern matches a `VAR=value` token the way make itself
+// parses one: an identifier (letters, digits, underscore, not starting with
+// a digit) immediately followed by `=`. make accepts such a token anywhere
+// on the command line as a variable assignment, never as a build target —
+// unlike a bare word, which make always reads as an additional target.
+var makeAssignmentPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// isMakeAssignment reports whether token is a make variable assignment
+// (`TEST=Name`, `Q=concept`) rather than a bare positional word — the
+// distinction replayCommands' make branch needs to preserve a worker's
+// claimed VAR=value arguments while still dropping stray extra targets.
+func isMakeAssignment(token string) bool {
+	return makeAssignmentPattern.MatchString(token)
 }
 
 // targetDirIfExists resolves target against worktree and reports whether the
