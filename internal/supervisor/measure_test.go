@@ -670,6 +670,272 @@ func TestResolveWorktreeEmptyResolvesToCwd(t *testing.T) {
 	}
 }
 
+// movedBaseWorktree builds a real repo plus a linked worktree that simulates
+// argus's own worker setup: repo's "main" branch has an initial commit, a
+// worker worktree branches off it with an honest uncommitted edit to f.go,
+// and then — while the worker is still "running" — main advances with an
+// unrelated commit, the same way another PR merging to origin/main while a
+// worker works does. Returns the repo dir (where main lives) and the worker
+// worktree dir.
+func movedBaseWorktree(t *testing.T) (repo, worktree string) {
+	t.Helper()
+	repo = t.TempDir()
+	run := func(dir string, args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run(repo, "init", "-q", "--initial-branch=main")
+	run(repo, "config", "user.email", "t@t")
+	run(repo, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(repo, "f.go"), []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "add", "-A")
+	run(repo, "commit", "-q", "-m", "init")
+
+	// `git worktree add` insists on creating its target dir itself, so hand it
+	// a not-yet-existing child of a fresh temp dir rather than t.TempDir()'s
+	// own (already-created) path.
+	worktree = filepath.Join(t.TempDir(), "wt")
+	run(repo, "worktree", "add", "-q", "-b", "feature", worktree, "main")
+
+	// The worker's own honest, uncommitted edit — never committed, matching
+	// how a real worker's worktree looks when the gate measures it.
+	if err := os.WriteFile(filepath.Join(worktree, "f.go"), []byte("package x\n\nvar Added = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// main advances with an unrelated commit while the worker keeps working —
+	// exactly what a moved base looks like. The repo dir is still checked out
+	// on "main" (the new worktree took "feature"), so this commits straight
+	// onto it.
+	if err := os.WriteFile(filepath.Join(repo, "other.go"), []byte("package other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "add", "-A")
+	run(repo, "commit", "-q", "-m", "unrelated merge landed on main")
+
+	return repo, worktree
+}
+
+// TestResolveEffectiveDiffBaseIgnoresBaseMovingAhead is the regression test
+// for the moving-base bug: once main advances past the worktree's branch
+// point, the merge-base must still be the original commit the worktree
+// actually branched from, not main's new tip.
+func TestResolveEffectiveDiffBaseIgnoresBaseMovingAhead(t *testing.T) {
+	repo, worktree := movedBaseWorktree(t)
+
+	mergeBase, err := ResolveEffectiveDiffBase(context.Background(), worktree, "main")
+	if err != nil {
+		t.Fatalf("ResolveEffectiveDiffBase: %v", err)
+	}
+
+	mainTip, err := git(context.Background(), repo, "rev-parse", "main")
+	if err != nil {
+		t.Fatalf("rev-parse main: %v", err)
+	}
+	if mergeBase == mainTip {
+		t.Fatalf("merge-base must not equal main's moved tip %s, got %s", mainTip, mergeBase)
+	}
+	branchPoint, err := git(context.Background(), worktree, "rev-parse", "feature")
+	if err != nil {
+		t.Fatalf("rev-parse feature: %v", err)
+	}
+	if mergeBase != branchPoint {
+		t.Errorf("merge-base = %s, want the worktree's actual branch point %s", mergeBase, branchPoint)
+	}
+}
+
+// TestMeasureDiffIgnoresBaseMovingAhead is the full regression test for the
+// moving-base bug: MeasureDiff against a base that has advanced since the
+// worktree branched must report only the worker's own honest edit, never a
+// phantom deletion of whatever landed on base in the meantime. Before the
+// merge-base fix, this measured other.go as a deleted file (the two-dot diff
+// against main's new tip reverts main's own unrelated commit), inflating the
+// diff and risking a fabricated "under-reported diff" hard reason even though
+// the worker told the truth.
+func TestMeasureDiffIgnoresBaseMovingAhead(t *testing.T) {
+	_, worktree := movedBaseWorktree(t)
+
+	ds, files, err := MeasureDiff(context.Background(), worktree, "main")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+	if ds.Files != 1 || ds.Deletions != 0 {
+		t.Fatalf("expected only the worker's own 1-file, 0-deletion edit, got %+v files=%v", ds, files)
+	}
+	for _, f := range files {
+		if f == "other.go" {
+			t.Fatalf("MeasureDiff must not report other.go — that's main's own unrelated commit, not the worker's, got files=%v", files)
+		}
+	}
+
+	// Confirms the test actually exercises the bug this guards against: a
+	// plain two-dot diff against main's moved tip does show other.go as
+	// deleted, which is exactly the phantom revert the merge-base fix avoids.
+	oldWay, err := parseNumstat(mustNumstat(t, worktree, "main"))
+	if err != nil {
+		t.Fatalf("parseNumstat: %v", err)
+	}
+	sawPhantomDelete := false
+	for _, r := range oldWay {
+		if r.path == "other.go" && r.deletions > 0 {
+			sawPhantomDelete = true
+		}
+	}
+	if !sawPhantomDelete {
+		t.Fatal("test setup is broken: a plain two-dot diff against main should show other.go as a phantom deletion")
+	}
+}
+
+// mustNumstat runs the old, pre-fix two-dot `git diff --numstat -z <base>`
+// directly, for TestMeasureDiffIgnoresBaseMovingAhead to contrast against
+// MeasureDiff's merge-base-based result.
+func mustNumstat(t *testing.T, worktree, base string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", worktree, "diff", "--numstat", "-z", base)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git diff --numstat -z %s: %v", base, err)
+	}
+	return string(out)
+}
+
+// TestDiffForIgnoresBaseMovingAhead mirrors TestMeasureDiffIgnoresBaseMovingAhead
+// for the reviewer's own diff: the text an LLM reviewer reads must not show
+// main's own unrelated commit as a deletion either.
+func TestDiffForIgnoresBaseMovingAhead(t *testing.T) {
+	_, worktree := movedBaseWorktree(t)
+
+	diff, err := DiffFor(context.Background(), worktree, "main")
+	if err != nil {
+		t.Fatalf("DiffFor: %v", err)
+	}
+	if strings.Contains(diff, "other.go") {
+		t.Errorf("reviewer diff must not mention other.go — that's main's own unrelated commit, not the worker's:\n%s", diff)
+	}
+	if !strings.Contains(diff, "Added") {
+		t.Errorf("reviewer diff should still show the worker's own real edit:\n%s", diff)
+	}
+}
+
+// TestCommitsBehindBaseCountsCommitsBaseGainedSinceBranch is the unit test for
+// the separate staleness signal: base moved ahead by exactly the one commit
+// movedBaseWorktree adds after the worktree branches.
+func TestCommitsBehindBaseCountsCommitsBaseGainedSinceBranch(t *testing.T) {
+	_, worktree := movedBaseWorktree(t)
+
+	behind, err := CommitsBehindBase(context.Background(), worktree, "main")
+	if err != nil {
+		t.Fatalf("CommitsBehindBase: %v", err)
+	}
+	if behind != 1 {
+		t.Errorf("CommitsBehindBase = %d, want 1", behind)
+	}
+}
+
+// TestCommitsBehindBaseZeroWhenBaseUnmoved guards the other half: a worktree
+// whose base never moved must report zero, not stay unset in some way that
+// reads the same as an error.
+func TestCommitsBehindBaseZeroWhenBaseUnmoved(t *testing.T) {
+	wt := gitWorktreeWithDiff(t)
+	behind, err := CommitsBehindBase(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("CommitsBehindBase: %v", err)
+	}
+	if behind != 0 {
+		t.Errorf("CommitsBehindBase = %d, want 0 when base never moved", behind)
+	}
+}
+
+// TestGateDoesNotUnderReportWhenBaseMovedAhead is the gate-level regression
+// test: a worker whose self-report honestly matches its own small edit must
+// still auto-approve even though base advanced with unrelated commits while
+// it worked — the exact false "under-reported diff" hard escalation the
+// merge-base fix exists to prevent. See TestMeasureDiffIgnoresBaseMovingAhead
+// for the lower-level proof that MeasureDiff itself no longer inflates the
+// diff; this proves the gate draws the right conclusion from it.
+func TestGateDoesNotUnderReportWhenBaseMovedAhead(t *testing.T) {
+	_, worktree := movedBaseWorktree(t)
+
+	ds, files, err := MeasureDiff(context.Background(), worktree, "main")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+
+	st := &workerState{
+		hasFile:           true,
+		measuredOK:        true,
+		measured:          ds,
+		measuredFiles:     files,
+		commitsBehindBase: 1,
+		plan:              &WorkerPlan{Worker: Worker{Task: "honest", Worktree: worktree}},
+		status: protocol.Status{
+			Phase:    protocol.PhaseAwaitingReview,
+			DiffStat: ds,
+			Tests:    []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
+		},
+	}
+	v := gateVerdict(st, nil)
+	if hasReasonContaining(v.HardReasons, "under-reported diff") {
+		t.Fatalf("a moved base must never fabricate an under-report hard reason, got HardReasons=%v", v.HardReasons)
+	}
+	if !v.AutoApprove {
+		t.Errorf("an honest small change should auto-approve regardless of how far base moved, got Reasons=%v", v.Reasons)
+	}
+	if !hasReasonContaining(v.Notes, "commit(s) behind base") {
+		t.Errorf("expected the separate behind-base note, got Notes=%v", v.Notes)
+	}
+}
+
+func TestCommitsBehindBaseErrorsOnBadBaseRef(t *testing.T) {
+	worktree, _ := initGitRepo(t)
+	_, err := CommitsBehindBase(context.Background(), worktree, "nonexistent-base-ref")
+	if err == nil {
+		t.Fatal("want an error for a nonexistent base ref")
+	}
+	if !strings.Contains(err.Error(), "nonexistent-base-ref") {
+		t.Errorf("error should name the bad ref, got: %v", err)
+	}
+}
+
+// TestCommitsBehindBaseErrorsOnUnparseableCount covers the Atoi failure path,
+// which real git plumbing can't reach on its own (`rev-list --count` always
+// emits a plain integer) — only a stubbed git binary can hand back something
+// that doesn't parse.
+func TestCommitsBehindBaseErrorsOnUnparseableCount(t *testing.T) {
+	stubDir := t.TempDir()
+	stub := "#!/bin/sh\necho 'not-a-number'\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := CommitsBehindBase(context.Background(), t.TempDir(), "main")
+	if err == nil {
+		t.Fatal("want an error when git's own output does not parse as a count")
+	}
+	if !strings.Contains(err.Error(), "parsing commits-behind count") {
+		t.Errorf("error = %q, want it to name the parse failure", err)
+	}
+}
+
+// TestMeasureDiffErrorsOnBadBaseRef exercises MeasureDiff's own early return
+// from a merge-base resolution failure (as opposed to a bad --worktree,
+// already covered by TestReconcileMeasuresAndRecordsError).
+func TestMeasureDiffErrorsOnBadBaseRef(t *testing.T) {
+	worktree, _ := initGitRepo(t)
+	_, _, err := MeasureDiff(context.Background(), worktree, "nonexistent-base-ref")
+	if err == nil {
+		t.Fatal("want an error for a nonexistent base ref")
+	}
+	if !strings.Contains(err.Error(), "nonexistent-base-ref") {
+		t.Errorf("error should name the bad ref, got: %v", err)
+	}
+}
+
 func hasReasonContaining(reasons []string, sub string) bool {
 	for _, r := range reasons {
 		if strings.Contains(r, sub) {

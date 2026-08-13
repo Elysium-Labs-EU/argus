@@ -354,6 +354,27 @@ func TestGitTranslatesBadRevision(t *testing.T) {
 	}
 }
 
+// TestGitTranslatesNotAValidObjectName covers the fourth pattern
+// translateGitFailure recognizes: "fatal: Not a valid object name <ref>",
+// unquoted and with no trailing punctuation to cut on unlike the other three
+// — the shape `git merge-base <bad> HEAD` uses (see ResolveEffectiveDiffBase,
+// which MeasureDiff/DiffFor now route through before ever reaching a plain
+// `git diff`).
+func TestGitTranslatesNotAValidObjectName(t *testing.T) {
+	worktree, _ := initGitRepo(t)
+	_, err := git(context.Background(), worktree, "merge-base", "nonexistent-base-ref", "HEAD")
+	if err == nil {
+		t.Fatal("want an error for a nonexistent ref")
+	}
+	var uerr *ui.UserError
+	if !errors.As(err, &uerr) {
+		t.Fatalf("want *ui.UserError, got %T: %v", err, err)
+	}
+	if !strings.Contains(uerr.Error(), "nonexistent-base-ref") {
+		t.Errorf("error %q does not name the bad ref", uerr.Error())
+	}
+}
+
 // initPlainRepo builds a minimal, remote-less git repo for tests that only
 // need CommitAll's staging machinery, not a real origin.
 func initPlainRepo(t *testing.T) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/Elysium-Labs-EU/argus/internal/protocol"
@@ -131,4 +132,48 @@ func VerifyBaseRef(ctx context.Context, gitDir string, rb ResolvedBase) error {
 		}
 	}
 	return nil
+}
+
+// ResolveEffectiveDiffBase resolves the ref MeasureDiff and DiffFor actually
+// diff a worktree's HEAD against: merge-base(base, HEAD) — the three-dot
+// equivalent a merge would actually apply — rather than base's own moving
+// tip. A worker never commits, and never rebases onto argus's own base while
+// it works, so once base advances past the worktree's spawn point (another
+// PR merges to origin/main while this worker is still running), a plain
+// two-dot `git diff base` includes a revert of every intervening merge: it
+// inflates the measured size and invents deletions the branch never made,
+// which used to fabricate an unwaivable "under-reported diff" hard reason
+// and show the reviewer phantom reverts of already-merged work.
+//
+// This is the one place that derivation happens — both MeasureDiff and
+// DiffFor call it, so the size the gate checks and the diff the reviewer
+// reads can never diverge. It does not care whether base itself carries an
+// "origin/" prefix or not (callers pass either shape today): `git
+// merge-base` resolves whatever ref string it's given the same way `git
+// diff`/`git rev-parse` already do.
+func ResolveEffectiveDiffBase(ctx context.Context, worktree, base string) (string, error) {
+	ref, err := git(ctx, worktree, "merge-base", base, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolving merge-base of %s and HEAD: %w", base, err)
+	}
+	return ref, nil
+}
+
+// CommitsBehindBase reports how many commits base has moved ahead of the
+// worktree's HEAD since they diverged — a distinct, informational signal
+// from what MeasureDiff/DiffFor measure. Without it, a base that advanced
+// while a worker was running had no way to surface as "this checkout is
+// stale" instead of masquerading as an inflated or under-reported diff (see
+// ResolveEffectiveDiffBase). Best-effort: callers that only want this for
+// display should treat an error as "unknown" rather than fail on it.
+func CommitsBehindBase(ctx context.Context, worktree, base string) (int, error) {
+	out, err := git(ctx, worktree, "rev-list", "--count", "HEAD.."+base)
+	if err != nil {
+		return 0, fmt.Errorf("counting commits base %s has moved ahead of HEAD: %w", base, err)
+	}
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		return 0, fmt.Errorf("parsing commits-behind count %q: %w", out, err)
+	}
+	return n, nil
 }

@@ -25,12 +25,19 @@ import (
 // FilesTouched when gating: the worker could be buggy or omit files. The measured
 // numbers are what the gate and report use; status.json is only a hint.
 //
+// It diffs against ResolveEffectiveDiffBase's merge-base of base and HEAD, not
+// base directly: a worker never commits, so if base (e.g. origin/main) advances
+// past the worktree's spawn point while the worker is still running, a plain
+// two-dot diff against base's moving tip would include a revert of every
+// intervening merge, inflating the measured size with deletions the branch
+// never made — see ResolveEffectiveDiffBase's own doc comment.
+//
 // It combines two sources because `git diff` alone would miss the common case of a
 // worker ADDING new files (untracked files are invisible to git diff, which once
 // let a 257-line new test file gate through as "2 lines"): the tracked diff via
-// `git diff --numstat -z <base>`, plus every untracked, non-ignored file counted
-// as added lines. -z (not cosmetic) makes git emit a rename as two separate
-// NUL-terminated path tokens instead of an abbreviated, ambiguous
+// `git diff --numstat -z <merge-base>`, plus every untracked, non-ignored file
+// counted as added lines. -z (not cosmetic) makes git emit a rename as two
+// separate NUL-terminated path tokens instead of an abbreviated, ambiguous
 // "old => new" / "prefix{old => new}suffix" text form — parseNumstat resolves
 // a rename to its current (post-change) path, so a worker can't smuggle an
 // edit to a control-plane or self-protection path past FilesTouched-keyed
@@ -41,11 +48,15 @@ import (
 // raw numstat text beforehand — the same resolved path is what both the
 // filter and the returned file list use, so the two can't diverge.
 func MeasureDiff(ctx context.Context, worktree, base string) (protocol.DiffStat, []string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--numstat", "-z", base) //nolint:gosec // fixed git binary; worktree/base are argus-derived
+	effBase, err := ResolveEffectiveDiffBase(ctx, worktree, base)
+	if err != nil {
+		return protocol.DiffStat{}, nil, err
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--numstat", "-z", effBase) //nolint:gosec // fixed git binary; worktree/base are argus-derived
 	var out bytes.Buffer
 	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return protocol.DiffStat{}, nil, fmt.Errorf("measuring diff against %s: %w", base, err)
+	if runErr := cmd.Run(); runErr != nil {
+		return protocol.DiffStat{}, nil, fmt.Errorf("measuring diff against %s: %w", base, runErr)
 	}
 	records, err := parseNumstat(out.String())
 	if err != nil {

@@ -238,6 +238,15 @@ func applyMeasuredChecks(v *Verdict, st *workerState, eff *protocol.Status) {
 			v.Reasons = append(v.Reasons, reason)
 			v.HardReasons = append(v.HardReasons, reason)
 		}
+		// A separate, explicit, non-blocking signal: base moved on since this
+		// worktree branched. MeasureDiff/DiffFor already diff against their
+		// merge-base rather than base's own tip (see ResolveEffectiveDiffBase),
+		// so this never inflates the diff or trips the under-report check above
+		// — it is visibility only, not evidence of anything wrong with the
+		// worker's own report.
+		if st.commitsBehindBase > 0 {
+			v.Notes = append(v.Notes, fmt.Sprintf("branch is %d commit(s) behind base — diff measured against the merge-base, not base's moving tip", st.commitsBehindBase))
+		}
 	}
 	// A worker that reaches a terminal phase claiming completed, verified work
 	// but touched zero files per git is exactly the failure mode that let a
