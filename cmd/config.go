@@ -26,6 +26,7 @@ environment variable argus should read it from instead of its own built-in
 default.`,
 	}
 	cmd.AddCommand(newConfigSetCmd())
+	cmd.AddCommand(newConfigGetCmd())
 	cmd.AddCommand(configCheckCmd)
 	return cmd
 }
@@ -60,6 +61,41 @@ ship/rebase for the equivalent one-off override.`,
 				return serr
 			}
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s set %s in %s\n", ui.LabelSuccess.Render("✓"), args[0], path)
+			return nil
+		},
+	}
+}
+
+func newConfigGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "get <key>",
+		Aliases: []string{"show"},
+		Short:   "Read back a persisted config value",
+		Long: `Get prints the value persisted for <key> in ~/.argus/config.toml — the same
+key namespace "argus config set" writes to, e.g.:
+
+  argus config get credential.github.com
+  argus config show credential.anthropic
+
+Exits non-zero with a "not set" message if <key> has no persisted value.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := config.Path()
+			if err != nil {
+				return err
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				return err
+			}
+			value, found, gerr := cfg.Get(args[0])
+			if gerr != nil {
+				return &ui.UserError{Err: gerr}
+			}
+			if !found {
+				return &ui.UserError{Err: fmt.Errorf("%s is not set in %s", args[0], path)}
+			}
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), value)
 			return nil
 		},
 	}

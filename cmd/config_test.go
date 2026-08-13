@@ -34,6 +34,76 @@ func TestConfigSetWritesCredentialOverride(t *testing.T) {
 	}
 }
 
+func TestConfigGetRoundTripsValueWrittenBySet(t *testing.T) {
+	t.Setenv("ARGUS_CONFIG_FILE", filepath.Join(t.TempDir(), "config.toml"))
+
+	setCmd := newConfigCmd()
+	setCmd.SetOut(&bytes.Buffer{})
+	setCmd.SetArgs([]string{"set", "credential.github.com", "MY_GH_TOKEN"})
+	if err := setCmd.Execute(); err != nil {
+		t.Fatalf("config set: %v", err)
+	}
+
+	getCmd := newConfigCmd()
+	buf := &bytes.Buffer{}
+	getCmd.SetOut(buf)
+	getCmd.SetArgs([]string{"get", "credential.github.com"})
+	if err := getCmd.Execute(); err != nil {
+		t.Fatalf("config get: %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != "MY_GH_TOKEN" {
+		t.Errorf("config get output = %q, want MY_GH_TOKEN", got)
+	}
+}
+
+func TestConfigShowAliasRoundTripsValueWrittenBySet(t *testing.T) {
+	t.Setenv("ARGUS_CONFIG_FILE", filepath.Join(t.TempDir(), "config.toml"))
+
+	setCmd := newConfigCmd()
+	setCmd.SetOut(&bytes.Buffer{})
+	setCmd.SetArgs([]string{"set", "credential.anthropic", "MY_CLAUDE_KEY"})
+	if err := setCmd.Execute(); err != nil {
+		t.Fatalf("config set: %v", err)
+	}
+
+	showCmd := newConfigCmd()
+	buf := &bytes.Buffer{}
+	showCmd.SetOut(buf)
+	showCmd.SetArgs([]string{"show", "credential.anthropic"})
+	if err := showCmd.Execute(); err != nil {
+		t.Fatalf("config show: %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != "MY_CLAUDE_KEY" {
+		t.Errorf("config show output = %q, want MY_CLAUDE_KEY", got)
+	}
+}
+
+func TestConfigGetUnsetKeyErrorsNonZero(t *testing.T) {
+	t.Setenv("ARGUS_CONFIG_FILE", filepath.Join(t.TempDir(), "config.toml"))
+
+	cmd := newConfigCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"get", "credential.github.com"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected an error for an unset key, got nil")
+	}
+	if !strings.Contains(err.Error(), "not set") {
+		t.Errorf("error = %q, want it to mention \"not set\"", err.Error())
+	}
+}
+
+func TestConfigGetRejectsUnsupportedKey(t *testing.T) {
+	t.Setenv("ARGUS_CONFIG_FILE", filepath.Join(t.TempDir(), "config.toml"))
+
+	cmd := newConfigCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"get", "launcher"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error for an unsupported config key, got nil")
+	}
+}
+
 func TestConfigSetRejectsUnsupportedKey(t *testing.T) {
 	t.Setenv("ARGUS_CONFIG_FILE", filepath.Join(t.TempDir(), "config.toml"))
 
