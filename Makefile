@@ -54,8 +54,19 @@ gitnexus: ## Index this repo with GitNexus for AI-assisted code search (no insta
 
 adr-find: ## Find the ADR for a concept, e.g. make adr-find Q="deny floor"
 	@test -n "$(Q)" || (echo 'Usage: make adr-find Q="concept"'; exit 1)
-	@echo "== docs/adr matches for '$(Q)' =="
-	@grep -ril -- "$(Q)" docs/adr 2>/dev/null || echo "  (no filename or content match)"
+	@echo "== docs/adr matches for '$(Q)' (status alongside each) =="
+	@matches="$$(grep -ril -- "$(Q)" docs/adr 2>/dev/null)"; \
+	if [ -z "$$matches" ]; then \
+		echo "  (no filename or content match)"; \
+	else \
+		for f in $$matches; do \
+			status="$$(grep -m1 '^Status:' "$$f" 2>/dev/null | sed 's/^Status:[[:space:]]*//')"; \
+			if [ -z "$$status" ]; then \
+				status="$$(awk '/^## Status$$/{f=1;next} f && NF{print;exit}' "$$f")"; \
+			fi; \
+			echo "  $$f [$${status:-unknown}]"; \
+		done; \
+	fi
 	@echo "== ast-grep: code comments referencing an ADR by number =="
 	@if command -v ast-grep >/dev/null 2>&1; then \
 		ast-grep scan --rule docs/adr/adr-reference.sgrule.yml . 2>/dev/null | grep -i -- "$(Q)" || echo "  (no matching code reference)"; \
