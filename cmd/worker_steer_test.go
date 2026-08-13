@@ -325,6 +325,113 @@ func TestRunWorkerSteerDeliveryStalledFallsBackToPaneRun(t *testing.T) {
 	}
 }
 
+// TestRunWorkerSteerDeliveryWaitTimeoutFallsBackWhenPaneWasIdle pins the fix
+// itself: a genuine-but-slow pickup on an idle/done pane can surface as the
+// generic "agent wait timed out" code instead of the dedicated stalled one
+// (both just mean "confirmation window closed before anything was
+// observed"), and previously only the dedicated code triggered the pane-run
+// recovery — so this exact, real delivery was reported as a failure. A pane
+// that was idle before the prompt was ever sent has nothing else to
+// attribute a later "working" to, so recovery here must succeed and count
+// against the budget, exactly like the dedicated-stalled case above.
+func TestRunWorkerSteerDeliveryWaitTimeoutFallsBackWhenPaneWasIdle(t *testing.T) {
+	wt := initGitDir(t)
+	seedWorkingStatus(t, wt, nil)
+
+	var paneRunText string
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "worktree":
+			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, workerSteerTestPaneID), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":"done"}}}`, workerSteerTestPaneID), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "prompt":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrWaitTimeout)
+		case len(args) > 1 && args[0] == "agent" && args[1] == "wait":
+			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":"working"}}}`, workerSteerTestPaneID), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			paneRunText = args[3]
+			return []byte(`{"result":{}}`), nil
+		case len(args) > 1 && args[0] == "pane" && args[1] == "send-keys":
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+	testCmdCtx, _ := testCmd()
+
+	if err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now())); err != nil {
+		t.Fatalf("runWorkerSteer: want the wait-timeout fallback to succeed, got %v", err)
+	}
+	if paneRunText == "" {
+		t.Error("want the steer delivered via a pane-run fallback, saw no `pane run` call")
+	}
+
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if len(got.Steers) != 1 || !got.Steers[0].Delivered {
+		t.Fatalf("Steers = %+v, want it marked delivered via the pane-run fallback", got.Steers)
+	}
+}
+
+// TestRunWorkerSteerBusyMidTurnNotRetypedAndNotCounted pins the asymmetry
+// MaxSteersPerWorking's doc comment describes: a worker whose agent is busy
+// mid-turn (already "working" before the steer was ever sent) drops the note
+// rather than queuing it, so this must neither retype into that pane nor
+// mark the steer delivered nor let it count against the budget — unlike the
+// idle-pane case above, which shares the same herdr.ErrWaitTimeout but must
+// recover.
+func TestRunWorkerSteerBusyMidTurnNotRetypedAndNotCounted(t *testing.T) {
+	wt := initGitDir(t)
+	seedWorkingStatus(t, wt, nil)
+
+	var paneRunCalled bool
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "worktree":
+			return fmt.Appendf(nil, `{"result":{"root_pane":{"pane_id":%q}}}`, workerSteerTestPaneID), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":"working"}}}`, workerSteerTestPaneID), nil
+		case len(args) > 1 && args[0] == "agent" && args[1] == "prompt":
+			return nil, fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrWaitTimeout)
+		case len(args) > 1 && args[0] == "pane" && args[1] == "run":
+			paneRunCalled = true
+			return []byte(`{"result":{}}`), nil
+		default:
+			return []byte(`{"result":{}}`), nil
+		}
+	})
+	testCmdCtx, _ := testCmd()
+
+	err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, "note", ownerFlags{}, fixedNow(time.Now()))
+	if err == nil {
+		t.Fatal("want an error when the worker's agent is busy mid-turn, got nil")
+	}
+	if paneRunCalled {
+		t.Error("want no `pane run` retype into a pane already busy mid-turn — that text would be dropped, not queued")
+	}
+
+	got, loadErr := protocol.Load(protocol.StatusPath(wt))
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if len(got.Steers) != 1 || got.Steers[0].Delivered {
+		t.Fatalf("Steers = %+v, want it recorded but not marked delivered", got.Steers)
+	}
+
+	// A run of these must never exhaust the budget: MaxSteersPerWorking only
+	// counts delivered notes.
+	for i := 1; i < protocol.MaxSteersPerWorking+2; i++ {
+		if err := runWorkerSteer(testCmdCtx, client, steerLogger(), wt, fmt.Sprintf("note %d", i), ownerFlags{}, fixedNow(time.Now())); err == nil {
+			t.Fatalf("attempt %d: want a delivery error (busy mid-turn), got nil", i)
+		} else if strings.Contains(err.Error(), "steer messages this working phase") {
+			t.Fatalf("attempt %d: want the budget untouched by undelivered busy-mid-turn attempts, got a cap rejection: %v", i, err)
+		}
+	}
+}
+
 func TestRunWorkerSteerDeliveryNonStalledPromptErrorPropagates(t *testing.T) {
 	wt := initGitDir(t)
 	seedWorkingStatus(t, wt, nil)
