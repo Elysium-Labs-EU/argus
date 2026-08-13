@@ -97,11 +97,11 @@ type Answer struct {
 	Option int `json:"option,omitempty"`
 }
 
-// Steer records one supervisor follow-up injected into a worker that is still
-// in PhaseWorking — see `argus worker steer`. Unlike Answer, it resolves
-// nothing and never touches Phase: it is a live chat message delivered into
-// the worker's own turn, not a phase transition, so it sits outside
-// legalTransitions entirely.
+// Steer records one supervisor follow-up injected into a worker that is
+// still in PhaseWorking or PhaseAwaitingReview — see `argus worker steer`.
+// Unlike Answer, it resolves nothing and never touches Phase: it is a live
+// chat message delivered into the worker's own turn, not a phase
+// transition, so it sits outside legalTransitions entirely.
 type Steer struct {
 	DeliveredAt time.Time `json:"delivered_at"`
 	Text        string    `json:"text"`
@@ -114,13 +114,14 @@ type Steer struct {
 }
 
 // MaxSteersPerWorking caps how many *delivered* steer messages a single
-// working leg may receive before `argus worker steer` refuses further ones.
-// Without a cap, steer would become an unbounded side-channel a supervisor
-// could lean on instead of the phase-transition table itself — endlessly
-// redirecting a worker mid-turn rather than ever letting it reach a terminal
-// phase. Failed deliveries are recorded in Steers for the trace but excluded
-// from this count, so a run of transient herdr/agent-busy failures can't lock
-// a supervisor out of steering before a single message actually lands.
+// working or awaiting_review leg may receive before `argus worker steer`
+// refuses further ones. Without a cap, steer would become an unbounded
+// side-channel a supervisor could lean on instead of the phase-transition
+// table itself — endlessly redirecting a worker mid-turn rather than ever
+// letting it reach a terminal phase. Failed deliveries are recorded in
+// Steers for the trace but excluded from this count, so a run of transient
+// herdr/agent-busy failures can't lock a supervisor out of steering before a
+// single message actually lands.
 const MaxSteersPerWorking = 3
 
 // Status is the whole typed payload a worker writes to its status file. Fields
@@ -158,10 +159,10 @@ type Status struct {
 	Question *Question `json:"question,omitempty"`
 	Answer   *Answer   `json:"answer,omitempty"`
 	// Steers is the durable trace of every `argus worker steer` message
-	// delivered while this working leg is live. A worker's own report body
+	// delivered while this phase leg is live. A worker's own report body
 	// never sets this key, and runWorkerReport does not carry it forward the
 	// way it does Base/Title/Question/Answer — so every worker-initiated
-	// phase transition resets it to empty, giving each fresh working leg its
+	// phase transition resets it to empty, giving each fresh phase leg its
 	// own MaxSteersPerWorking budget instead of accumulating across the whole
 	// worktree's lifetime.
 	Steers []Steer `json:"steers"`
