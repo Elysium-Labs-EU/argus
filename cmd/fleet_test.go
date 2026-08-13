@@ -295,6 +295,7 @@ func TestFleetFieldAndCellHelpers(t *testing.T) {
 		t.Errorf("prCell(unreadable) = %q, want unreadable", got)
 	}
 
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	unreadableOwner := &supervisor.FleetRow{OwnerFile: supervisor.FileUnreadable}
 	if got := heartbeatCell(unreadableOwner); got != "unreadable" {
 		t.Errorf("heartbeatCell(unreadable) = %q, want unreadable", got)
@@ -303,9 +304,13 @@ func TestFleetFieldAndCellHelpers(t *testing.T) {
 	if got := heartbeatCell(absentOwner); got != "-" {
 		t.Errorf("heartbeatCell(absent) = %q, want -", got)
 	}
-	okOwner := &supervisor.FleetRow{OwnerFile: supervisor.FileOK, HeartbeatAge: 90 * time.Second}
+	okOwner := &supervisor.FleetRow{OwnerFile: supervisor.FileOK, Owner: ownership.Owner{HeartbeatAt: now.Add(-90 * time.Second)}, HeartbeatAge: 90 * time.Second}
 	if got := heartbeatCell(okOwner); !strings.HasSuffix(got, " ago") {
 		t.Errorf("heartbeatCell(ok) = %q, want a duration suffixed with \" ago\"", got)
+	}
+	zeroHeartbeatOwner := &supervisor.FleetRow{OwnerFile: supervisor.FileOK, HeartbeatAge: 50 * 365 * 24 * time.Hour}
+	if got := heartbeatCell(zeroHeartbeatOwner); got != "-" {
+		t.Errorf("heartbeatCell(zero heartbeat_at) = %q, want -", got)
 	}
 
 	unreadableStatusForAge := &supervisor.FleetRow{StatusFile: supervisor.FileUnreadable}
@@ -316,10 +321,13 @@ func TestFleetFieldAndCellHelpers(t *testing.T) {
 	if got := phaseAgeCell(absentStatusForAge, time.Now()); got != "-" {
 		t.Errorf("phaseAgeCell(absent) = %q, want -", got)
 	}
-	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	okStatusForAge := &supervisor.FleetRow{StatusFile: supervisor.FileOK, Status: protocol.Status{UpdatedAt: now.Add(-90 * time.Second)}}
 	if got := phaseAgeCell(okStatusForAge, now); got != "1m30s ago" {
 		t.Errorf("phaseAgeCell(ok) = %q, want 1m30s ago", got)
+	}
+	zeroUpdatedAtStatus := &supervisor.FleetRow{StatusFile: supervisor.FileOK}
+	if got := phaseAgeCell(zeroUpdatedAtStatus, now); got != "-" {
+		t.Errorf("phaseAgeCell(zero updated_at) = %q, want -", got)
 	}
 
 	unreadableStatusForTitle := &supervisor.FleetRow{StatusFile: supervisor.FileUnreadable}
