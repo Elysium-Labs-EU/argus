@@ -234,6 +234,11 @@ func runWorkerReport(worktree string, next protocol.Phase, rest *protocol.Status
 	if rest.Title == "" {
 		rest.Title = cur.Title
 	}
+	// Steers is appended to status.json directly by `argus worker steer`, not
+	// by the worker's own report body — carry it forward the same way Base
+	// is, or a worker's very next report silently erases the durable audit
+	// trace a supervisor's steer just wrote.
+	rest.Steers = cur.Steers
 	return protocol.Write(protocol.StatusPath(worktree), rest)
 }
 
