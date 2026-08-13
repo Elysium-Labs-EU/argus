@@ -170,8 +170,15 @@ func initGitRepo(t *testing.T) (worktree, base string) {
 		}
 	}
 
-	// Bare origin with a main branch holding one file.
+	// Bare origin with a main branch holding one file. gc.auto=0 keeps
+	// receive-pack from ever spawning a detached `git gc --auto` on push: left
+	// enabled, that background repack can still be rewriting origin's pack
+	// files the moment the local clone below raw-copies them, vanishing a
+	// .tmp-*-pack-*.rev mid-copy and failing the clone — the same
+	// background-writer hazard gitTempDir's cleanup already retries around,
+	// but the clone step has no equivalent protection.
 	run(origin, "init", "-q", "--bare", "-b", base, ".")
+	run(origin, "config", "gc.auto", "0")
 	seed := gitTempDir(t)
 	run(seed, "init", "-q", "-b", base, ".")
 	if err := os.WriteFile(filepath.Join(seed, "f.txt"), []byte("line1\n"), 0o644); err != nil {
