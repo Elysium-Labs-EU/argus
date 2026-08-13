@@ -3,5 +3,5 @@ language: go
 rule:
   kind: comment
   regex: 'ADR[- ][0-9]{4}'
-message: Comment references an ADR by number, cross-check it against docs/adr/index.md
+message: Comment references an ADR by number, cross-check it with `make adr-find Q="..."`
 severity: info
