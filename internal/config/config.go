@@ -82,3 +82,16 @@ func (c *Config) Set(key, value string) error {
 	c.Credential[name] = value
 	return nil
 }
+
+// Get resolves a `argus config get <key>` command against cfg. It parses key
+// the same way Set does, so get/set stay symmetric over the same
+// credential.<name> namespace. found is false both for an unsupported key
+// namespace and for a supported key with no persisted value.
+func (c *Config) Get(key string) (value string, found bool, err error) {
+	name, ok := strings.CutPrefix(key, "credential.")
+	if !ok || name == "" {
+		return "", false, fmt.Errorf("unsupported config key %q (supported: credential.<name>, e.g. credential.github.com)", key)
+	}
+	value, found = c.Credential[name]
+	return value, found, nil
+}

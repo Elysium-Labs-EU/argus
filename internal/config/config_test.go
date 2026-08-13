@@ -157,6 +157,48 @@ func TestSetRejectsEmptyCredentialName(t *testing.T) {
 	}
 }
 
+func TestGetReturnsValueSetBySet(t *testing.T) {
+	var cfg Config
+	if err := cfg.Set("credential.github.com", "MY_GH_TOKEN"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	value, found, err := cfg.Get("credential.github.com")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found = true for a key just set")
+	}
+	if value != "MY_GH_TOKEN" {
+		t.Errorf("value = %q, want MY_GH_TOKEN", value)
+	}
+}
+
+func TestGetUnsetKeyReportsNotFound(t *testing.T) {
+	var cfg Config
+	value, found, err := cfg.Get("credential.github.com")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if found {
+		t.Errorf("expected found = false for an unset key, got value %q", value)
+	}
+}
+
+func TestGetRejectsUnsupportedKey(t *testing.T) {
+	var cfg Config
+	if _, _, err := cfg.Get("launcher"); err == nil {
+		t.Fatal("expected an error for an unsupported config key, got nil")
+	}
+}
+
+func TestGetRejectsEmptyCredentialName(t *testing.T) {
+	var cfg Config
+	if _, _, err := cfg.Get("credential."); err == nil {
+		t.Fatal("expected an error for an empty credential name, got nil")
+	}
+}
+
 func TestLoadRejectsMalformedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("not a valid line at all\n"), 0o600); err != nil {
