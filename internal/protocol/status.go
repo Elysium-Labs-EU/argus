@@ -49,6 +49,14 @@ type DiffStat struct {
 	Files      int `json:"files"`
 	Insertions int `json:"insertions"`
 	Deletions  int `json:"deletions"`
+	// CodeInsertions and CodeDeletions are the subset of Insertions/Deletions
+	// that excludes files classified as test or documentation (see
+	// isTestOrDocPath in internal/supervisor/measure.go). The review gate's
+	// max_diff_lines ceiling compares against these, not the totals above, so
+	// tests and an ADR a repo's own policy mandates for every change don't
+	// count against a ceiling meant to bound reviewable code size.
+	CodeInsertions int `json:"code_insertions"`
+	CodeDeletions  int `json:"code_deletions"`
 }
 
 // TestRun records one test invocation and its outcome. Cmd must be the

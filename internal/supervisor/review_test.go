@@ -70,15 +70,45 @@ func TestAssess(t *testing.T) {
 			reasonHint: "test failed",
 		},
 		{
-			name: "oversized diff escalates",
+			name: "oversized code diff escalates",
 			status: protocol.Status{
 				Phase:    protocol.PhaseAwaitingReview,
 				Tests:    pass,
-				DiffStat: protocol.DiffStat{Insertions: 500, Deletions: 100},
+				DiffStat: protocol.DiffStat{Insertions: 500, Deletions: 100, CodeInsertions: 500, CodeDeletions: 100},
 			},
 			policy:     &ReviewPolicy{MaxDiffLines: 400},
 			approve:    false,
 			reasonHint: "exceeds max",
+		},
+		{
+			// The ceiling exists to bound reviewable code size; a repo that
+			// requires tests and an ADR for every change would otherwise trip
+			// it on essentially every compliant change, forcing needless
+			// review of nothing but mandated bulk.
+			name: "large test/docs-only diff does not escalate",
+			status: protocol.Status{
+				Phase: protocol.PhaseAwaitingReview,
+				Tests: pass,
+				DiffStat: protocol.DiffStat{
+					Insertions: 700, Deletions: 100, // total is well over the ceiling
+					CodeInsertions: 0, CodeDeletions: 0, // but none of it is code
+				},
+			},
+			policy:  &ReviewPolicy{MaxDiffLines: 400},
+			approve: true,
+		},
+		{
+			name: "mixed diff escalates only when the code portion alone exceeds the ceiling",
+			status: protocol.Status{
+				Phase: protocol.PhaseAwaitingReview,
+				Tests: pass,
+				DiffStat: protocol.DiffStat{
+					Insertions: 700, Deletions: 100, // total exceeds the ceiling
+					CodeInsertions: 200, CodeDeletions: 50, // code portion does not
+				},
+			},
+			policy:  &ReviewPolicy{MaxDiffLines: 400},
+			approve: true,
 		},
 		// This case used to be "shared path escalates", set SharedGlobs, and
 		// asserted a distinct "shared path" reason. SharedGlobs was

@@ -174,6 +174,96 @@ func TestMeasureDiffExcludesUntrackedBinaryFile(t *testing.T) {
 	}
 }
 
+// TestIsTestOrDocPath pins the classification rule the review gate's
+// max_diff_lines ceiling relies on to exclude test/doc bulk: TEST is
+// `*_test.go` or anything under a `testdata/` directory, DOCS is a `.md`/
+// `.txt` file or anything under a `docs/` directory. Segment matches must be
+// whole path segments, not substrings — a directory merely named
+// "nontestdata" or "docsite" is not testdata/docs.
+func TestIsTestOrDocPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"internal/supervisor/measure.go", false},
+		{"internal/supervisor/measure_test.go", true},
+		{"cmd/testdata/fixture.json", true},
+		{"testdata/fixture.json", true},
+		{"docs/adr/0001-foo.md", true},
+		{"README.md", true},
+		{"NOTES.txt", true},
+		{"internal/nontestdata/thing.go", false},
+		{"internal/docsite/thing.go", false},
+		{"internal/config/config.go", false},
+	}
+	for _, tc := range cases {
+		if got := isTestOrDocPath(tc.path); got != tc.want {
+			t.Errorf("isTestOrDocPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestMeasureDiffCodeLinesExcludeTestAndDocFiles proves the fix for issue
+// #623: a diff dominated by mandated test/doc bulk (tracked and untracked,
+// modified and newly added) must not inflate CodeInsertions/CodeDeletions,
+// while Insertions/Deletions keep summing everything for reporting.
+func TestMeasureDiffCodeLinesExcludeTestAndDocFiles(t *testing.T) {
+	wt := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+
+	write := func(rel, content string) {
+		full := filepath.Join(wt, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Tracked baseline, then tracked edits below (append-only, so each
+	// contributes only insertions, no deletions).
+	write("code.go", "package x\n")
+	write("code_test.go", "package x\n")
+	write("docs/notes.md", "# notes\n")
+	run("add", "-A")
+	run("commit", "-q", "-m", "base")
+
+	write("code.go", "package x\n"+strings.Repeat("added\n", 3))
+	write("code_test.go", "package x\n"+strings.Repeat("added\n", 5))
+	write("docs/notes.md", "# notes\n"+strings.Repeat("added\n", 7))
+
+	// Untracked additions: one code file, one testdata fixture, one doc.
+	write("cmd/new.go", strings.Repeat("line\n", 4))
+	write("testdata/fixture.txt", strings.Repeat("line\n", 6))
+	write("README.md", strings.Repeat("line\n", 2))
+
+	ds, _, err := MeasureDiff(context.Background(), wt, "HEAD")
+	if err != nil {
+		t.Fatalf("MeasureDiff: %v", err)
+	}
+
+	wantTotal := 3 + 5 + 7 + 4 + 6 + 2
+	if got := ds.Insertions; got != wantTotal {
+		t.Errorf("Insertions = %d, want %d (must keep counting everything)", got, wantTotal)
+	}
+	wantCode := 3 + 4 // code.go's tracked edit + cmd/new.go's untracked addition
+	if got := ds.CodeInsertions; got != wantCode {
+		t.Errorf("CodeInsertions = %d, want %d (test/doc lines must be excluded)", got, wantCode)
+	}
+	if ds.CodeDeletions != 0 {
+		t.Errorf("CodeDeletions = %d, want 0 (no deletions in this diff)", ds.CodeDeletions)
+	}
+}
+
 // status.json changes on every normal work session, and a repo that never
 // gitignored .claude can carry a tracked copy of it forward from an earlier
 // branch — either way it must not inflate the measured diff, since ship
@@ -398,12 +488,12 @@ func TestGateOversizedDiffIsNotAHardReason(t *testing.T) {
 	st := &workerState{
 		hasFile:       true,
 		measuredOK:    true,
-		measured:      protocol.DiffStat{Files: 1, Insertions: 500, Deletions: 100},
+		measured:      protocol.DiffStat{Files: 1, Insertions: 500, Deletions: 100, CodeInsertions: 500, CodeDeletions: 100},
 		measuredFiles: []string{"cmd/root.go"},
 		plan:          &WorkerPlan{Worker: Worker{Task: "big-but-honest"}},
 		status: protocol.Status{
 			Phase:    protocol.PhaseAwaitingReview,
-			DiffStat: protocol.DiffStat{Files: 1, Insertions: 500, Deletions: 100},
+			DiffStat: protocol.DiffStat{Files: 1, Insertions: 500, Deletions: 100, CodeInsertions: 500, CodeDeletions: 100},
 			Tests:    []protocol.TestRun{{Cmd: "go test", Result: protocol.ResultPass}},
 		},
 	}
