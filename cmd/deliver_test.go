@@ -23,10 +23,19 @@ type deliverFakeConfig struct {
 	paneRunErr      error
 	paneSendKeysErr error
 	agentWaitErr    error
-	agentLive       bool
+	// agentStatus is the pane's baseline agent_status the initial "agent get"
+	// reports, before AgentPrompt is ever called — defaults to "done" (the
+	// idle-from-a-prior-turn case the pane-run fallback is meant for) when
+	// empty. Set to "working" to model a pane already mid an unrelated turn.
+	agentStatus string
+	agentLive   bool
 }
 
 func fakeDeliverClient(cfg *deliverFakeConfig) herdr.Client {
+	status := cfg.agentStatus
+	if status == "" {
+		status = "done"
+	}
 	return herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
 		switch {
 		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
@@ -36,7 +45,7 @@ func fakeDeliverClient(cfg *deliverFakeConfig) herdr.Client {
 			if !cfg.agentLive {
 				return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
 			}
-			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":"working"}}}`, deliverTestPaneID), nil
+			return fmt.Appendf(nil, `{"result":{"agent":{"pane_id":%q,"agent":"claude","agent_status":%q}}}`, deliverTestPaneID, status), nil
 		case len(args) > 1 && args[0] == "agent" && args[1] == "prompt":
 			if cfg.agentPromptErr != nil {
 				return nil, cfg.agentPromptErr
@@ -144,6 +153,36 @@ func TestDeliverPaneMessage(t *testing.T) {
 				agentPromptErr: fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrAgentPromptStalled),
 			},
 			wantActions: []string{"prompt-stalled-fallback-pane-run", "delivered-via-fallback"},
+		},
+		{
+			// A genuine but slow pickup on an idle/done pane can surface as the
+			// generic wait-timeout code instead of the dedicated stalled one —
+			// both mean "confirmation window closed with nothing observed yet",
+			// and a pane that was idle before the prompt has nothing else to
+			// attribute a later "working" to, so this must recover exactly like
+			// the dedicated-stalled case above.
+			name: "wait-timeout prompt error still falls back when pane was idle",
+			cfg: deliverFakeConfig{
+				agentLive:      true,
+				agentStatus:    "done",
+				agentPromptErr: fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrWaitTimeout),
+			},
+			wantActions: []string{"prompt-stalled-fallback-pane-run", "delivered-via-fallback"},
+		},
+		{
+			// A pane already "working" before the prompt was ever sent is mid
+			// an unrelated turn that silently drops both the original prompt and
+			// any retyped fallback text — retrying would only let the fallback's
+			// own (level-triggered) AgentWait rediscover that pre-existing busy
+			// state and misreport it as a fresh pickup. This must stay a hard
+			// failure with no retype attempted.
+			name: "prompt error while pane already busy working is not recoverable",
+			cfg: deliverFakeConfig{
+				agentLive:      true,
+				agentStatus:    "working",
+				agentPromptErr: fmt.Errorf("herdr agent: exit status 1: %w", herdr.ErrWaitTimeout),
+			},
+			wantErr: "herdr agent: exit status 1",
 		},
 	}
 
