@@ -401,6 +401,22 @@ func tokenizePath(path string) map[string]struct{} {
 	return words
 }
 
+// ProofForReview returns the worker's real_world_proof when the change touched
+// a proof-required path, or "" otherwise — the same match Assess uses to decide
+// whether missing proof escalates the gate, reused here to decide whether the
+// reviewer's prompt should see the claim at all. A nil policy uses
+// DefaultReviewPolicy(), matching Assess's own fallback.
+func ProofForReview(s *protocol.Status, policy *ReviewPolicy) string {
+	p := DefaultReviewPolicy()
+	if policy != nil {
+		p = *policy
+	}
+	if _, _, ok := firstProofRequiredPath(s.FilesTouched, p.ProofRequiredPaths); ok {
+		return s.RealWorldProof
+	}
+	return ""
+}
+
 func firstProofRequiredPath(files, paths []string) (file, matched string, ok bool) {
 	for _, f := range files {
 		if m, hit := matchAny(f, paths); hit {

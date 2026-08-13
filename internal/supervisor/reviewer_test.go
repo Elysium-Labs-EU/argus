@@ -237,6 +237,29 @@ func TestReviewPromptCarriesReviewNote(t *testing.T) {
 	}
 }
 
+// TestReviewPromptCarriesRealWorldProof pins the fix for issue #603: the
+// reviewer used to have zero reference to real_world_proof, so it reported
+// "no proof supplied" against genuine evidence the gate had already accepted
+// as present. The prompt must now carry the claim, labeled as unverified, and
+// must omit it entirely when ReviewRequest.RealWorldProof is unset (a
+// non-proof-required change, per ProofForReview).
+func TestReviewPromptCarriesRealWorldProof(t *testing.T) {
+	with := reviewPrompt(&ReviewRequest{
+		Task:           "t",
+		Diff:           "d",
+		RealWorldProof: "ran on orb debian, systemctl status active",
+	})
+	for _, want := range []string{"UNVERIFIED WORKER CLAIM", "ran on orb debian, systemctl status active"} {
+		if !strings.Contains(with, want) {
+			t.Errorf("prompt missing %q:\n%s", want, with)
+		}
+	}
+	without := reviewPrompt(&ReviewRequest{Task: "t", Diff: "d"})
+	if strings.Contains(without, "UNVERIFIED WORKER CLAIM") {
+		t.Errorf("no-RealWorldProof prompt should not mention an unverified claim")
+	}
+}
+
 func TestNewCLIReviewerAndWithLog(t *testing.T) {
 	r := NewCLIReviewer("sonnet", "high")
 	if r.model != "sonnet" || r.effort != "high" || r.run == nil {

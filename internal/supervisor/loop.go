@@ -874,15 +874,17 @@ func reviewOne(ctx context.Context, cfg *Config, st *workerState, verdict *Verdi
 		recordApproval(cfg, st, false, "gate", "review could not run: "+st.reviewDiffErr.Error(), verdict.Reasons)
 		return
 	}
+	eff := st.effective()
 	res, err := cfg.Reviewer.Review(ctx, &ReviewRequest{
-		Task:          st.plan.Task,
-		Branch:        st.plan.Branch,
-		Worktree:      st.plan.Worktree,
-		Diff:          st.reviewDiff,
-		Reasons:       verdict.Reasons,
-		HardReasons:   verdict.HardReasons,
-		PriorFindings: priorFindings(st.plan.Worktree),
-		ReviewNote:    cfg.ReviewNote,
+		Task:           st.plan.Task,
+		Branch:         st.plan.Branch,
+		Worktree:       st.plan.Worktree,
+		Diff:           st.reviewDiff,
+		Reasons:        verdict.Reasons,
+		HardReasons:    verdict.HardReasons,
+		PriorFindings:  priorFindings(st.plan.Worktree),
+		ReviewNote:     cfg.ReviewNote,
+		RealWorldProof: ProofForReview(&eff, cfg.Policy),
 	})
 	if err != nil {
 		st.reviewErr = err
