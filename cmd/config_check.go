@@ -141,6 +141,8 @@ func checkOrWriteDeny(out io.Writer, path, repo string, write bool) error {
 	}
 	_, _ = fmt.Fprintf(out, "%s added %s to %s (raw herdr pane mutation bypasses argus's delivery-confirmed dispatch; use `argus worker steer`/`answer` instead — revert this if you have a real reason to keep raw access)\n",
 		ui.LabelSuccess.Render("✓"), strings.Join(added, ", "), path)
+	_, _ = fmt.Fprintf(out, "  %s scopes the orchestrating session's own Bash tool only — a worker's Bash permissions come from its own per-worktree settings.local.json and never read this file\n",
+		path)
 	return nil
 }
 

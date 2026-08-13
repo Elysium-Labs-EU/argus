@@ -286,6 +286,16 @@ argus config check           # read-only: reports what's missing
   git. Every operator running argus from their own checkout needs to run
   `config check --write` once. Workers never call herdr directly so they don't
   need the deny entries; a supervising session does.
+- **This is the orchestrator-Bash boundary, and it needs no `ARGUS_WORKER`
+  guard.** `config check` reads/writes only the orchestrating session's own
+  `.claude/settings.json`; a worker's Bash permissions come from its own
+  per-worktree rendered `settings.local.json` (see "Workers launch under
+  Claude Code's `dontAsk` permission mode" above) and never read
+  `.claude/settings.json` at all. That's unlike a Claude Code hook, which
+  Claude Code merges from the user-global config into every session,
+  workers included — the reason the adopting repo's own `CLAUDE.md` documents
+  an `ARGUS_WORKER=1` guard idiom for orchestrator-global hooks. No analogous
+  leak exists here, so no analogous guard is needed for this file.
 
 **Scope the entry away from `ship`, not just to a subcommand.** Bash
 allow-glob matches only a command *prefix* — there's no syntax to permit
