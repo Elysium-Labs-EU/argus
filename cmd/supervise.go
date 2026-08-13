@@ -139,9 +139,9 @@ cannot be disabled by repo config.`,
 			// The main repo checkout's own .argus/config.yml (see
 			// internal/repoconfig) — read from the first resolved worker's
 			// RepoRoot, since a single supervise invocation targets one repo
-			// in practice. --attach already required an explicit --base above
-			// and never writes worker settings (see supervisor.Attach), so it
-			// has no RepoRoot and needs none here.
+			// in practice. attachWorkers resolves RepoRoot from each target's
+			// git checkout (supervisor.RepoRoot), same as buildWorkers does
+			// for spawn, so this fires for --attach too.
 			var repoRoot string
 			if len(workers) > 0 {
 				repoRoot = workers[0].RepoRoot
@@ -554,11 +554,23 @@ func attachWorkers(ctx context.Context, client herdr.Client, workspace string, w
 				Hint: "an --attach worktree must be a git checkout that already exists",
 			}
 		}
+		// RepoRoot lets RunE find and load this repo's own .argus/config.yml
+		// (see the caller's repoRoot handling) the same way the spawn path
+		// already does — without it an attached worktree's review gate silently
+		// used flag-or-built-in defaults instead of the repo's configured
+		// max_diff_lines, proof_required_paths, etc.
+		repoRoot, err := supervisor.RepoRoot(ctx, t.worktree)
+		if err != nil {
+			return nil, &ui.UserError{
+				Err:  fmt.Errorf("resolving repo root for %s: %w", t.worktree, err),
+				Hint: "an --attach worktree must be a git checkout that already exists",
+			}
+		}
 		task := branch
 		if s, lerr := protocol.Load(protocol.StatusPath(t.worktree)); lerr == nil && s.Task != "" {
 			task = s.Task
 		}
-		workers = append(workers, supervisor.Worker{Task: task, Branch: branch, Worktree: t.worktree, PaneID: t.paneID})
+		workers = append(workers, supervisor.Worker{Task: task, Branch: branch, RepoRoot: repoRoot, Worktree: t.worktree, PaneID: t.paneID})
 	}
 	return workers, nil
 }
