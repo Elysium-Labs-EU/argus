@@ -11,6 +11,17 @@ COVERAGE_THRESHOLD ?= 75
 BINARY_NAME=argus
 GOBIN=./bin
 
+# golangci-lint's cache defaults to one shared directory per user and keys
+# entries on file content. Two worktrees of this repo hold identical sources,
+# so their keys collide and one tree is served the other's stored findings,
+# carrying the paths recorded when they were first analysed. argus runs
+# several worktrees at once by design, which is exactly the condition that
+# triggers it. Keeping the cache in the worktree makes collision impossible
+# and needs no reaping, since it is removed with the tree that owns it.
+# lefthook sets this inline too - it invokes golangci-lint directly, so this
+# export never reaches it. Must be absolute; $(CURDIR) is.
+export GOLANGCI_LINT_CACHE := $(CURDIR)/.cache/golangci-lint
+
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_DATE ?= $(shell date -u '+%Y-%m-%d %H:%M:%S UTC')
@@ -159,5 +170,5 @@ changelog-preview: ## Preview unreleased changes (does not write to file)
 	git cliff --unreleased
 
 clean: ## Remove build artifacts
-	rm -rf $(GOBIN) dist/ coverage.out
+	rm -rf $(GOBIN) dist/ coverage.out $(GOLANGCI_LINT_CACHE)
 	go clean
