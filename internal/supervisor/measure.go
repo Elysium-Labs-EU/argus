@@ -71,6 +71,10 @@ func MeasureDiff(ctx context.Context, worktree, base string) (protocol.DiffStat,
 		stat.Files++
 		stat.Insertions += r.insertions
 		stat.Deletions += r.deletions
+		if !isTestOrDocPath(r.path) {
+			stat.CodeInsertions += r.insertions
+			stat.CodeDeletions += r.deletions
+		}
 		files = append(files, r.path)
 	}
 
@@ -82,9 +86,31 @@ func MeasureDiff(ctx context.Context, worktree, base string) (protocol.DiffStat,
 		lines := countLines(filepath.Join(worktree, rel))
 		stat.Files++
 		stat.Insertions += lines
+		if !isTestOrDocPath(rel) {
+			stat.CodeInsertions += lines
+		}
 		files = append(files, rel)
 	}
 	return stat, files, nil
+}
+
+// isTestOrDocPath reports whether path is a Go test file, a testdata
+// fixture, or documentation — the classes the review gate's max_diff_lines
+// ceiling excludes from its code-line count (see DiffStat.CodeInsertions'
+// doc comment): TEST is `*_test.go` or anything under a `testdata/`
+// directory; DOCS is a `.md`/`.txt` file or anything under a `docs/`
+// directory.
+func isTestOrDocPath(path string) bool {
+	slash := filepath.ToSlash(path)
+	if strings.HasSuffix(slash, "_test.go") || strings.HasSuffix(slash, ".md") || strings.HasSuffix(slash, ".txt") {
+		return true
+	}
+	for seg := range strings.SplitSeq(slash, "/") {
+		if seg == "testdata" || seg == "docs" {
+			return true
+		}
+	}
+	return false
 }
 
 // ContentHash returns a deterministic digest of files' current on-disk bytes

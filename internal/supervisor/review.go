@@ -26,7 +26,7 @@ import (
 type ReviewPolicy struct {
 	ProofRequiredPaths []string // paths whose change needs real-world proof
 	AlwaysReviewPaths  []string // behavior-critical paths that always escalate, even for a small clean diff — also covers what was once the separate SharedGlobs (shared/prod-path) field, see the consolidation note above
-	MaxDiffLines       int      // insertions+deletions above this escalate; 0 = no limit
+	MaxDiffLines       int      // code-only insertions+deletions above this escalate (test/doc lines excluded, see DiffStat.CodeInsertions); 0 = no limit
 }
 
 // DefaultReviewPolicy is a conservative starting gate: modest diff ceiling, the
@@ -117,8 +117,9 @@ func Assess(s *protocol.Status, policy *ReviewPolicy) Verdict {
 		reasons = append(reasons, "intentional failure(s) reported with no clean-state passing test to confirm the revert")
 	}
 
-	if lines := s.DiffStat.Insertions + s.DiffStat.Deletions; p.MaxDiffLines > 0 && lines > p.MaxDiffLines {
-		reasons = append(reasons, fmt.Sprintf("diff %d lines exceeds max %d", lines, p.MaxDiffLines))
+	if code := s.DiffStat.CodeInsertions + s.DiffStat.CodeDeletions; p.MaxDiffLines > 0 && code > p.MaxDiffLines {
+		total := s.DiffStat.Insertions + s.DiffStat.Deletions
+		reasons = append(reasons, fmt.Sprintf("diff %d code lines (%d total) exceeds max %d", code, total, p.MaxDiffLines))
 	}
 
 	for _, f := range s.FilesTouched {
