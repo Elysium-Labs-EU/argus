@@ -245,9 +245,16 @@ func prCell(r *supervisor.FleetRow) string {
 	return fmt.Sprintf("#%d", r.Lifecycle.PRNumber)
 }
 
+// heartbeatCell renders "-" for an owner.json whose heartbeat_at was never
+// written (zero time.Time) instead of formatting now-minus-zero as a huge,
+// nonsensical duration — matches fleetField's own convention for an
+// absent/empty value (see nullableTime's JSON-side equivalent).
 func heartbeatCell(r *supervisor.FleetRow) string {
 	if r.OwnerFile != supervisor.FileOK {
 		return fleetField(r.OwnerFile, "")
+	}
+	if r.Owner.HeartbeatAt.IsZero() {
+		return "-"
 	}
 	return r.HeartbeatAge.Round(time.Second).String() + " ago"
 }
@@ -262,6 +269,9 @@ func heartbeatCell(r *supervisor.FleetRow) string {
 func phaseAgeCell(r *supervisor.FleetRow, now time.Time) string {
 	if r.StatusFile != supervisor.FileOK {
 		return fleetField(r.StatusFile, "")
+	}
+	if r.Status.UpdatedAt.IsZero() {
+		return "-"
 	}
 	return now.Sub(r.Status.UpdatedAt).Round(time.Second).String() + " ago"
 }
