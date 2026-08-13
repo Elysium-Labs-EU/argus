@@ -187,13 +187,45 @@ type reworkOpts struct {
 // defaults it. "" (task carries no ticket-key prefix) leaves relabelFreshPane
 // a no-op, so herdr's own default label stands rather than re-deriving a
 // branch-slug fallback here.
-func (o *reworkOpts) dispatchTarget(task string) *dispatchTarget {
+// cfg is the round's already-resolved supervisor.Config (see
+// buildReworkConfig), which carries the repo's own .argus/config.yml — read
+// from the trusted main checkout, never the worktree itself — through to the
+// dispatch site so dispatchIntoPane's spawn-new-agent branch can re-render
+// settings.local.json instead of running the respawned worker under whatever
+// permission set its original spawn baked in. rebaseAllow is the caller's
+// own pre-dispatch snapshot (see respawnRebaseAllow) — not recomputed here —
+// since dispatchReworkRound's own InvalidateStatus call, right after this
+// target is built, erases the status.json a live re-read would otherwise
+// need.
+func (o *reworkOpts) dispatchTarget(task string, cfg *supervisor.Config, rebaseAllow []string) *dispatchTarget {
 	return &dispatchTarget{
 		worktree: o.worktree, launcher: o.launcher, workerRuntime: o.workerRuntime,
 		noCredProxy: o.noCredProxy, credentialEnv: o.credentialEnv,
 		livenessTimeout: o.livenessTimeout, livenessInterval: o.livenessInterval,
-		label: supervisor.TicketKey(task),
+		label:               supervisor.TicketKey(task),
+		repoPhases:          cfg.RepoPhases,
+		repoAllow:           cfg.RepoAllow,
+		rebaseAllow:         rebaseAllow,
+		experimentalSandbox: cfg.ExperimentalSandbox,
+		sandboxAllowWrite:   cfg.SandboxAllowWrite,
 	}
+}
+
+// respawnRebaseAllow computes the rebase-phase git fetch/merge grant a
+// worktree's own spawn baked into settings.local.json (see
+// provisionWorktree, internal/supervisor/loop.go), for baseBranch — the
+// worktree's own persisted spawn base (protocol.Status.Base, read by the
+// caller before InvalidateStatus erases it), not opts.base, which is the
+// gate/review diff ref, not the worktree's own spawn base. A rework respawn
+// has no explicit dispatch base of its own the way rebase's dispatch does,
+// so without this the settings re-render would silently drop the grant.
+// baseBranch == "" (no status.json yet, or no Base recorded) means nothing
+// to preserve.
+func respawnRebaseAllow(baseBranch string, cfg *supervisor.Config) []string {
+	if baseBranch == "" {
+		return nil
+	}
+	return supervisor.RebasePhaseAllow(baseBranch, "", cfg.GateVerifyCommand)
 }
 
 // runRework is newReworkCmd's RunE body. It resolves round 1's findings from
@@ -446,6 +478,14 @@ func buildReworkConfig(ctx context.Context, out io.Writer, opts *reworkOpts, rev
 		Reviewer:          reviewer,
 		ReviewNote:        resolveReviewNote(opts.reviewNoteExplicit, opts.reviewNote, &rc),
 		GateVerifyCommand: resolveGateVerifyCommand(opts.gateVerifyCmdExplicit, opts.gateVerifyCmd, &rc),
+		// Carried only so a respawn dispatch (see dispatchReworkRound ->
+		// reworkOpts.dispatchTarget) can re-render settings.local.json from
+		// this same trusted, main-checkout-resolved rc — not consulted by
+		// the gate/review pipeline itself.
+		RepoPhases:          rc.Phases,
+		RepoAllow:           rc.Allow,
+		ExperimentalSandbox: rc.ExperimentalWorkerSandbox,
+		SandboxAllowWrite:   rc.SandboxAllowWrite,
 	}
 	budget := resolveMaxReworkBudget(opts.maxReworkBudgetExplicit, opts.maxReworkBudget, &rc)
 
@@ -518,7 +558,7 @@ func runReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger,
 	// unchanged-HEAD case rather than blocking the round.
 	priorHeadSHA, _ := supervisor.HeadSHA(ctx, opts.worktree)
 
-	status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, out, logger, client, repoRoot, branch, task, findings, round, opts)
+	status, paneID, dispatchedAt, derr := dispatchReworkRound(ctx, out, logger, client, cfg, repoRoot, branch, task, findings, round, opts)
 	if derr != nil {
 		return reworkRoundOutcome{}, derr
 	}
@@ -665,7 +705,7 @@ func preRoundContentHash(ctx context.Context, base, worktree string, prior *prot
 // dispatchReworkRound writes one round's brief, re-dispatches the worktree's
 // worker (reusing dispatchIntoPane's live-agent-vs-spawn logic), and waits for
 // its next terminal status.
-func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger, client herdr.Client, repoRoot, branch, task string, findings []string, round int, opts *reworkOpts) (protocol.Status, string, time.Time, error) {
+func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Logger, client herdr.Client, cfg *supervisor.Config, repoRoot, branch, task string, findings []string, round int, opts *reworkOpts) (protocol.Status, string, time.Time, error) {
 	// Captured before the worktree is touched, so WaitForStatus rejects any
 	// status.json left over from a prior round or dispatch (see
 	// InvalidateStatus) even if invalidation below races with a
@@ -679,6 +719,14 @@ func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Lo
 	if wt.RootPaneID == "" {
 		return protocol.Status{}, "", dispatchedAt, &ui.UserError{Err: fmt.Errorf("herdr opened no pane for %s", opts.worktree)}
 	}
+	// Read before InvalidateStatus below removes status.json entirely, so the
+	// worktree's own recorded spawn base (see respawnRebaseAllow) is still
+	// there to preserve across this round's settings.local.json re-render —
+	// a live re-read at dispatchTarget-build time would otherwise always see
+	// it already gone. Best-effort: a worktree InvalidateStatus has nothing
+	// to remove (no status.json yet) simply has no spawn base to preserve.
+	priorSpawnBase, _ := protocol.Load(protocol.StatusPath(opts.worktree))
+	rebaseAllow := respawnRebaseAllow(priorSpawnBase.Base, cfg)
 	if ierr := supervisor.InvalidateStatus(opts.worktree); ierr != nil {
 		return protocol.Status{}, "", dispatchedAt, fmt.Errorf("invalidating stale status before rework dispatch: %w", ierr)
 	}
@@ -687,7 +735,7 @@ func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Lo
 		return protocol.Status{}, "", dispatchedAt, werr
 	}
 
-	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget(task)); err != nil {
+	if err := dispatchIntoPane(ctx, logger, client, wt.RootPaneID, branch, opts.dispatchTarget(task, cfg, rebaseAllow)); err != nil {
 		return protocol.Status{}, "", dispatchedAt, err
 	}
 

@@ -614,6 +614,99 @@ func TestDispatchRebaseWorkerGrantsRebaseAllowForDispatchBase(t *testing.T) {
 	}
 }
 
+// TestDispatchRebaseWorkerRespawnPicksUpConfigGrantAddedSinceSpawn is the
+// regression test for argus #586/#601: dispatchIntoPane's spawn-new-agent
+// branch — the shared respawn primitive rebase and rework both use for a
+// worktree whose pane has no live agent — used to type the launcher into the
+// pane and trust whatever settings.local.json was already on disk, so a
+// grant added to the repo's own .argus/config.yml after this worktree's
+// original spawn never reached a respawned worker. Settings.local.json is
+// seeded here the way provisionWorktree would at the worktree's original
+// spawn (before the config grant below exists), confirmed genuinely absent,
+// and only then does the repo config gain the new grant — mirroring an
+// operator editing .argus/config.yml between a worker's first spawn and this
+// later `argus rebase` respawn.
+func TestDispatchRebaseWorkerRespawnPicksUpConfigGrantAddedSinceSpawn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	worktree := t.TempDir()
+	initGitDirAt(t, worktree)
+	if err := supervisor.WriteSettings(worktree, nil, nil, nil, nil, false, nil); err != nil {
+		t.Fatalf("seeding settings.local.json as provisionWorktree would at the original spawn: %v", err)
+	}
+	settingsPath := filepath.Join(worktree, ".claude", "settings.local.json")
+	const newGrant = "Bash(npm run lint*)"
+
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("reading settings.local.json before dispatch: %v", err)
+	}
+	if strings.Contains(string(before), newGrant) {
+		t.Fatalf("test setup: grant %q should not be present before the respawn re-render, got:\n%s", newGrant, before)
+	}
+
+	if serr := repoconfig.Save(repoconfig.Path(worktree), &repoconfig.Config{Allow: []string{newGrant}}); serr != nil {
+		t.Fatalf("seeding repo config with the new grant, added since spawn: %v", serr)
+	}
+
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := fakeRebaseClient("w1:p1", nil, nil)
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		fresh := &protocol.Status{Phase: protocol.PhaseAwaitingReview, UpdatedAt: time.Now()}
+		_ = protocol.Write(protocol.StatusPath(worktree), fresh)
+	}()
+
+	err = dispatchRebaseWorker(context.Background(), logger, client, &bytes.Buffer{}, "/repo", "feat-x", &rebaseOpts{
+		worktree: worktree, base: "main", launcher: "claude", interval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("dispatchRebaseWorker: %v", err)
+	}
+
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("reading settings.local.json after dispatch: %v", err)
+	}
+	if !strings.Contains(string(after), newGrant) {
+		t.Errorf("settings.local.json should carry the config grant added since spawn once dispatchIntoPane's spawn-new-agent branch re-renders it, missing %q:\n%s", newGrant, after)
+	}
+}
+
+// TestDispatchIntoPaneSpawnSettingsReRenderErrorAborts confirms a
+// WriteSettings failure during the pre-PaneRun settings re-render aborts the
+// dispatch before ever reaching PaneRun, instead of spawning a worker under a
+// settings file argus failed to update.
+func TestDispatchIntoPaneSpawnSettingsReRenderErrorAborts(t *testing.T) {
+	logger := eventlog.New(nil, "rebase", "test-run", nil)
+	client := herdr.NewWithRunner(func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "agent" && args[1] == "get":
+			return nil, fmt.Errorf("herdr agent get: %w", herdr.ErrAgentNotFound)
+		default:
+			t.Fatalf("unexpected call: %v", args)
+			return nil, nil
+		}
+	})
+
+	// A worktree whose parent path segment is a regular file: MkdirAll for
+	// <worktree>/.claude can never succeed, so WriteSettings fails.
+	base := t.TempDir()
+	blocker := filepath.Join(base, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := &dispatchTarget{worktree: filepath.Join(blocker, "wt"), launcher: "claude"}
+
+	err := dispatchIntoPane(context.Background(), logger, client, "w1:p1", "feat-x", target)
+	if err == nil {
+		t.Fatal("want an error when the settings re-render fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "re-rendering settings") {
+		t.Errorf("error = %v, want it to name the re-render step", err)
+	}
+}
+
 // setupRebaseUncommittedResolution builds a bare origin, publishes feat-x to
 // it, then leaves an uncommitted file change in the worktree — the shape
 // RebaseBrief now asks a worker to leave behind (conflict resolved, merge

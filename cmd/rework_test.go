@@ -1204,7 +1204,12 @@ func TestReworkOptsDispatchTargetCopiesFields(t *testing.T) {
 		credentialEnv:   map[string]string{"github.com": "MY_TOKEN"},
 		livenessTimeout: time.Second, livenessInterval: time.Millisecond,
 	}
-	target := o.dispatchTarget("AP-1207: fix DELETE endpoint")
+	cfg := &supervisor.Config{
+		RepoPhases: protocol.PhaseConfig{protocol.PhaseWorking: protocol.PhasePolicy{Allow: []string{"Bash(make test*)"}}},
+		RepoAllow:  []string{"Bash(make build*)"}, ExperimentalSandbox: true, SandboxAllowWrite: []string{"/tmp/cache"},
+	}
+	rebaseAllow := []string{"Bash(git fetch origin main)"}
+	target := o.dispatchTarget("AP-1207: fix DELETE endpoint", cfg, rebaseAllow)
 	if target.worktree != o.worktree || target.launcher != o.launcher || target.workerRuntime != o.workerRuntime ||
 		target.noCredProxy != o.noCredProxy || target.livenessTimeout != o.livenessTimeout || target.livenessInterval != o.livenessInterval {
 		t.Errorf("dispatchTarget() = %+v, want it to mirror reworkOpts %+v", target, o)
@@ -1215,6 +1220,13 @@ func TestReworkOptsDispatchTargetCopiesFields(t *testing.T) {
 	if target.label != "AP-1207" {
 		t.Errorf("dispatchTarget() label = %q, want the ticket key extracted from task", target.label)
 	}
+	if !slices.Equal(target.repoAllow, cfg.RepoAllow) || !slices.Equal(target.sandboxAllowWrite, cfg.SandboxAllowWrite) ||
+		target.experimentalSandbox != cfg.ExperimentalSandbox || !slices.Equal(target.rebaseAllow, rebaseAllow) {
+		t.Errorf("dispatchTarget() = %+v, want it to carry cfg's settings-render fields and the caller's own rebaseAllow", target)
+	}
+	if len(target.repoPhases[protocol.PhaseWorking].Allow) != 1 || target.repoPhases[protocol.PhaseWorking].Allow[0] != "Bash(make test*)" {
+		t.Errorf("dispatchTarget() repoPhases = %+v, want cfg.RepoPhases carried through", target.repoPhases)
+	}
 }
 
 // TestReworkOptsDispatchTargetLabelEmptyWithoutTicketKey covers a task with
@@ -1223,9 +1235,75 @@ func TestReworkOptsDispatchTargetCopiesFields(t *testing.T) {
 // re-deriving a branch-slug fallback here.
 func TestReworkOptsDispatchTargetLabelEmptyWithoutTicketKey(t *testing.T) {
 	o := &reworkOpts{worktree: "/wt"}
-	target := o.dispatchTarget("fix the DELETE endpoint, no ticket prefix")
+	target := o.dispatchTarget("fix the DELETE endpoint, no ticket prefix", &supervisor.Config{}, nil)
 	if target.label != "" {
 		t.Errorf("dispatchTarget() label = %q, want \"\" for a task with no ticket-key prefix", target.label)
+	}
+}
+
+// TestRespawnRebaseAllowEmptyBaseReturnsNil covers a worktree with no
+// recorded spawn base (no status.json yet, or one predating this field) —
+// nothing to preserve, so no grant is computed.
+func TestRespawnRebaseAllowEmptyBaseReturnsNil(t *testing.T) {
+	if got := respawnRebaseAllow("", &supervisor.Config{GateVerifyCommand: "make verify"}); got != nil {
+		t.Errorf("respawnRebaseAllow(\"\", ...) = %v, want nil", got)
+	}
+}
+
+// TestRespawnRebaseAllowMirrorsProvisionWorktree confirms respawnRebaseAllow
+// computes the identical grant provisionWorktree bakes in at spawn time
+// (RebasePhaseAllow(baseBranch, "", cfg.GateVerifyCommand) — see
+// internal/supervisor/loop.go) for the worktree's own recorded base, not
+// opts.base.
+func TestRespawnRebaseAllowMirrorsProvisionWorktree(t *testing.T) {
+	got := respawnRebaseAllow("main", &supervisor.Config{GateVerifyCommand: "make verify"})
+	want := supervisor.RebasePhaseAllow("main", "", "make verify")
+	if !slices.Equal(got, want) {
+		t.Errorf("respawnRebaseAllow() = %v, want %v", got, want)
+	}
+}
+
+// TestRunReworkRespawnPreservesRebasePhaseGitGrant is the regression test for
+// rework's own respawn re-render: without threading the worktree's persisted
+// spawn base through dispatchReworkRound (see respawnRebaseAllow),
+// dispatchIntoPane's own WriteSettings call would silently drop the
+// rebase-phase git fetch/merge grant provisionWorktree originally baked into
+// settings.local.json — a worktree respawned via rework, not rebase, must
+// still keep it, since it's the same worktree provisionWorktree provisioned.
+func TestRunReworkRespawnPreservesRebasePhaseGitGrant(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := initGitDirWithDiff(t)
+	if err := protocol.WriteApproval(dir, &protocol.Approval{Approved: false, Source: "review", Reasons: []string{"missing nil check"}}); err != nil {
+		t.Fatalf("seeding approval: %v", err)
+	}
+	if err := protocol.Write(protocol.StatusPath(dir), &protocol.Status{Base: "feat-x"}); err != nil {
+		t.Fatalf("seeding status.json with a spawn base: %v", err)
+	}
+	rebaseGrant := supervisor.RebasePhaseAllow("feat-x", "", "")
+	if err := supervisor.WriteSettings(dir, nil, nil, nil, rebaseGrant, false, nil); err != nil {
+		t.Fatalf("seeding settings.local.json as provisionWorktree would at spawn: %v", err)
+	}
+
+	cmd, _ := testCmd()
+	client := fakeReworkClient(dir, reworkStatus())
+	reviewer := &sequenceReviewer{results: []supervisor.ReviewResult{{Decision: "approve", Summary: "fixed"}}}
+
+	err := runRework(cmd, client, reviewer, reworkLogger(), &reworkOpts{
+		worktree: dir, base: "feat-x", maxRounds: 3, interval: 5 * time.Millisecond,
+		gate: gateFlags{},
+	})
+	if err != nil {
+		t.Fatalf("runRework: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("reading settings.local.json: %v", err)
+	}
+	for _, want := range rebaseGrant {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("settings.local.json should still carry the rebase-phase grant %q after rework's own respawn re-render, missing it:\n%s", want, data)
+		}
 	}
 }
 
