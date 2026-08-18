@@ -1,4 +1,4 @@
-.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus adr-find eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface verify-deps govulncheck secrets fix setup ci clean release pre-release changelog changelog-preview
+.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus adr-find eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface check-golangci-pin verify-deps govulncheck secrets fix setup ci clean release pre-release changelog changelog-preview
 
 # git exports these into every hook's environment so the hook's own git
 # invocations resolve to the repo/worktree that triggered it. If a recipe
@@ -21,6 +21,12 @@ GOBIN=./bin
 # lefthook sets this inline too - it invokes golangci-lint directly, so this
 # export never reaches it. Must be absolute; $(CURDIR) is.
 export GOLANGCI_LINT_CACHE := $(CURDIR)/.cache/golangci-lint
+
+# Single source of truth for the golangci-lint version, read from a plain
+# text file instead of duplicated across lint/fix/setup so bumping it is a
+# one-line change. lefthook.yml reads the same file independently, since it
+# invokes golangci-lint outside this Makefile.
+GOLANGCI_LINT_VERSION := $(shell cat .golangci-lint-version)
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
@@ -50,8 +56,7 @@ test-coverage-check: ## Fail if total coverage is below COVERAGE_THRESHOLD
 		'BEGIN { if (total+0 < threshold+0) { print "Coverage " total "% below threshold " threshold "%"; exit 1 } }'
 
 lint: ## Run all linters
-	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not found. Run: make setup"; exit 1; }
-	golangci-lint run --timeout=5m
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m
 
 nilcheck: ## Static nil-pointer safety analysis
 	@command -v nilaway >/dev/null 2>&1 || { echo "nilaway not found. Run: make setup"; exit 1; }
@@ -126,12 +131,15 @@ crap-report: ## Full whole-repo go-crap debt report (informational, no gate)
 	go-crap scan . --exclude '.*_test\.go'
 
 fix: ## Fix go formatting and struct field alignment
-	golangci-lint fmt
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) fmt
 	go tool fieldalignment -fix ./...
 
+check-golangci-pin: ## Fail if any consumer resolves golangci-lint's version from somewhere other than .golangci-lint-version
+	bash scripts/check-golangci-pin.sh .
+
 setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same versions as eos/themis
-	@echo "Installing golangci-lint v2.11.0..."
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(shell go env GOPATH)/bin v2.11.0
+	@echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..."
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(shell go env GOPATH)/bin $(GOLANGCI_LINT_VERSION)
 	@echo "Installing nilaway..."
 	go install go.uber.org/nilaway/cmd/nilaway@latest
 	@echo "Installing go-crap (change-risk analysis)..."
@@ -143,7 +151,7 @@ setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same
 	@command -v ast-grep >/dev/null 2>&1 || echo "ast-grep not found — install with: brew install ast-grep (or see https://ast-grep.github.io/guide/quick-start.html)"
 	@echo "Setup complete."
 
-ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface verify-deps govulncheck secrets ## Run all CI checks locally
+ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface check-golangci-pin verify-deps govulncheck secrets ## Run all CI checks locally
 	@echo "All CI checks passed!"
 
 release: ## Update changelog, tag and push a release (requires TAG=v1.2.0)
