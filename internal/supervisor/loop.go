@@ -545,6 +545,8 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 		return perr
 	}
 
+	warnIfTodoToolsDisabled(cfg.Out)
+
 	if dryRun {
 		renderPlan(cfg.Out, cfg.Base, cfg.Launcher, cfg.WorkerRuntime, cfg.ScrubEnv, plans)
 		return nil
@@ -555,6 +557,19 @@ func Run(ctx context.Context, cfg *Config, workers []Worker, dryRun bool) error 
 		return err
 	}
 	return superviseStates(ctx, cfg, states)
+}
+
+// warnIfTodoToolsDisabled prints a one-time advisory before any worker spawns
+// when CLAUDE_CODE_ENABLE_TODO_TOOLS isn't "1". The plan-evidence gate also
+// accepts a typed task list in place of the todo tool, so this never blocks
+// the run — it only flags that a worker's todo-tool calls may silently not
+// register as plan evidence.
+func warnIfTodoToolsDisabled(out io.Writer) {
+	if os.Getenv("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "1" {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "%s CLAUDE_CODE_ENABLE_TODO_TOOLS is not set to 1 — a worker's todo-tool calls may not register as plan evidence (run `argus doctor` for details).\n",
+		ui.LabelWarning.Render("!"))
 }
 
 // superviseStates runs the observe→judge→report tail shared by a fresh spawn

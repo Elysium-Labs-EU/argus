@@ -57,6 +57,25 @@ const twoPaneList = `{"result":{"panes":[
 {"pane_id":"1-3","cwd":"/repo-b","agent":"claude","agent_status":"idle"}
 ]}}`
 
+// TestWarnIfTodoToolsDisabled covers the advisory Run prints before spawning
+// any worker: silent when the env var is "1", a warning naming the var
+// otherwise.
+func TestWarnIfTodoToolsDisabled(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
+	buf := &bytes.Buffer{}
+	warnIfTodoToolsDisabled(buf)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output when set to 1, got %q", buf.String())
+	}
+
+	t.Setenv("CLAUDE_CODE_ENABLE_TODO_TOOLS", "")
+	buf.Reset()
+	warnIfTodoToolsDisabled(buf)
+	if !strings.Contains(buf.String(), "CLAUDE_CODE_ENABLE_TODO_TOOLS") {
+		t.Errorf("expected a warning naming the env var when unset, got %q", buf.String())
+	}
+}
+
 func TestTaskLabel(t *testing.T) {
 	cases := []struct {
 		name string

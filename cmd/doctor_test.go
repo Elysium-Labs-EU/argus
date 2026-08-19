@@ -59,6 +59,8 @@ func TestDoctorAllChecksPass(t *testing.T) {
 	writeAllowlist(t, repo)
 	writeRepoConfig(t, repo)
 
+	t.Setenv("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
+
 	out, err := runDoctorArgs(t, &doctorArgs{
 		repo:           repo,
 		lookPath:       found,
@@ -69,13 +71,13 @@ func TestDoctorAllChecksPass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error when every check passes, got %v", err)
 	}
-	if n := strings.Count(out, "✓"); n != 5 {
-		t.Errorf("expected 5 passing checks, got %d in:\n%s", n, out)
+	if n := strings.Count(out, "✓"); n != 6 {
+		t.Errorf("expected 6 passing checks, got %d in:\n%s", n, out)
 	}
 	if strings.Contains(out, "fix:") {
 		t.Errorf("expected no fix hints when all pass, got:\n%s", out)
 	}
-	for _, want := range []string{"herdr on PATH", "claude on PATH", "forge token resolvable (github.com)", "allowlisted", "config.yml present"} {
+	for _, want := range []string{"herdr on PATH", "claude on PATH", "forge token resolvable (github.com)", "allowlisted", "config.yml present", "CLAUDE_CODE_ENABLE_TODO_TOOLS=1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
@@ -323,6 +325,25 @@ func TestDoctorJiraNotConfiguredNoLine(t *testing.T) {
 	// passing detail line below would false-positive on that.
 	if strings.Contains(out, "Jira credentials") {
 		t.Errorf("expected no Jira credentials line when unconfigured, got:\n%s", out)
+	}
+}
+
+// TestDoctorTodoToolsEnv covers checkTodoToolsEnv's three outcomes directly:
+// enabled, unset, and set to something other than "1".
+func TestDoctorTodoToolsEnv(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
+	if r := checkTodoToolsEnv(); !r.ok {
+		t.Errorf("expected CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to pass, got %+v", r)
+	}
+
+	t.Setenv("CLAUDE_CODE_ENABLE_TODO_TOOLS", "")
+	if r := checkTodoToolsEnv(); r.ok || r.hard || r.detail != "unset" {
+		t.Errorf("expected an unset var to fail soft with detail \"unset\", got %+v", r)
+	}
+
+	t.Setenv("CLAUDE_CODE_ENABLE_TODO_TOOLS", "0")
+	if r := checkTodoToolsEnv(); r.ok || r.hard || r.detail != "0" {
+		t.Errorf("expected CLAUDE_CODE_ENABLE_TODO_TOOLS=0 to fail soft with detail \"0\", got %+v", r)
 	}
 }
 

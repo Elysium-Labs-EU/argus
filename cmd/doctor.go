@@ -117,6 +117,7 @@ func runDoctor(cmd *cobra.Command, a *doctorArgs) error {
 		checkForgeToken(cmd.Context(), a, repoRoot),
 		checkAllowlist(repoRoot),
 		checkRepoConfig(repoRoot),
+		checkTodoToolsEnv(),
 	}
 	if a.jiraConfigured() {
 		results = append(results, checkJiraCredential(cmd.Context(), a.jiraNewClient))
@@ -219,6 +220,25 @@ func checkRepoConfig(repoRoot string) checkResult {
 		r.ok = true
 		r.detail = path
 	}
+	return r
+}
+
+// checkTodoToolsEnv reports whether CLAUDE_CODE_ENABLE_TODO_TOOLS is set to 1.
+// Soft: a worker's plan-evidence gate also accepts a typed task list in place
+// of the todo tool, so an unset/0 value degrades a worker silently rather
+// than breaking it outright — this only surfaces that degradation.
+func checkTodoToolsEnv() checkResult {
+	const envVar = "CLAUDE_CODE_ENABLE_TODO_TOOLS"
+	r := checkResult{name: envVar + "=1", hint: "export " + envVar + "=1"}
+	v := os.Getenv(envVar)
+	if v == "1" {
+		r.ok = true
+		return r
+	}
+	if v == "" {
+		v = "unset"
+	}
+	r.detail = v
 	return r
 }
 
