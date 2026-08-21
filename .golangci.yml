@@ -84,6 +84,15 @@ linters:
           - misspell
         path: internal/forge/gitlab(_test)?\.go
         text: '`cancelled` is a misspelling of `canceled`'
+      # modernize's embedlit suggests dropping the embedded field's type name
+      # from WorkerPlan{Worker: Worker{...}}-shaped literals, but Go only
+      # allows that elision inside array/slice/map literals, never for a
+      # struct field's value — applying it produces "unknown field" compile
+      # errors whenever the struct (like WorkerPlan) has sibling fields
+      # beside the embedded one. A genuine false positive for this shape.
+      - linters:
+          - modernize
+        text: 'embedlit:'
     paths:
       - third_party$
       - builtin$

@@ -261,15 +261,15 @@ func (p *Proxy) Revoke(agent string) int {
 func (p *Proxy) handlerFor(u *Upstream) http.Handler {
 	prefix := "/" + u.Name
 	rp := &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
-			r.URL.Scheme = u.Target.Scheme
-			r.URL.Host = u.Target.Host
-			r.Host = u.Target.Host
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = u.Target.Scheme
+			pr.Out.URL.Host = u.Target.Host
+			pr.Out.Host = u.Target.Host
 			// path.Clean collapses any ".." the caller's decoded path carries (e.g.
 			// GET /anthropic/%2e%2e/secret) before it is forwarded, so a traversal
 			// segment can never survive into the request sent upstream.
-			r.URL.Path = path.Clean(singleJoiningSlash(u.Target.Path, strings.TrimPrefix(r.URL.Path, prefix)))
-			u.inject(r)
+			pr.Out.URL.Path = path.Clean(singleJoiningSlash(u.Target.Path, strings.TrimPrefix(pr.In.URL.Path, prefix)))
+			u.inject(pr.Out)
 		},
 	}
 	return p.gate(u, rp)
