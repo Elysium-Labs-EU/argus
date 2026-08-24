@@ -139,7 +139,7 @@ check-golangci-pin: ## Fail if any consumer resolves golangci-lint's version fro
 
 setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same versions as eos/themis
 	@echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..."
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(shell go env GOPATH)/bin $(GOLANGCI_LINT_VERSION)
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	@echo "Installing nilaway..."
 	go install go.uber.org/nilaway/cmd/nilaway@latest
 	@echo "Installing go-crap (change-risk analysis)..."
