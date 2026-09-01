@@ -95,10 +95,10 @@ Enforced in code, not conventions the worker is merely asked to follow.
   three land in `Verdict.HardReasons` (`internal/supervisor/review.go`); even a
   `--review` "approve" on one of these is recorded as *not approved*
   (`reviewEscalations` in `internal/supervisor/loop.go` overrides it):
-  1. Unmeasurable diff → escalates.
-  2. Material under-report (claimed size vs. git-measured size) → escalates.
+  1. Unmeasurable diff then escalates.
+  2. Material under-report (claimed size vs. git-measured size) then escalates.
   3. **Zero measured files changed despite a claimed terminal phase**
-     (`awaiting_review`/`done`) → escalates (`internal/supervisor/review.go:129-133`).
+     (`awaiting_review`/`done`) then escalates (`internal/supervisor/review.go:129-133`).
      Added after a headless (non-herdr) `supervise` spawn let a fresh worktree
      pick up a *stale, unrelated session's* `status.json` and got auto-approved
      with a fabricated verdict for zero real changes. Catches that symptom only
@@ -109,7 +109,7 @@ Enforced in code, not conventions the worker is merely asked to follow.
   the global Stop hook can't catch "never wrote a plan" on its own, since it
   only tracks tasks that were actually created:
   - `argus worker report` (`cmd/worker_report.go`, `runWorkerReport`) rejects the
-    `planning → working` transition outright if the reported `plan` array is
+    `planning` then `working` transition outright if the reported `plan` array is
     empty — immediate, at report time.
   - The gate (`internal/supervisor/planevidence.go`, `HasPlanEvidence`, called
     from `gateVerdict`) separately greps the worker's session transcript for a
@@ -125,13 +125,13 @@ Enforced in code, not conventions the worker is merely asked to follow.
   `supervise` re-stamps `heartbeat_at` every poll tick. `rework`, `rebase`,
   `ship`, `worker answer` each check the caller's resolved identity against the
   lease before touching an existing worktree. Identity resolves: `--owner` flag
-  > `$ARGUS_OWNER_ID` > `$HERDR_WORKSPACE_ID` > generated id.
-  - Live mismatch → refuses, names the actual owner.
+  then `$ARGUS_OWNER_ID` then `$HERDR_WORKSPACE_ID` then generated id.
+  - Live mismatch then refuses, names the actual owner.
   - Mismatch with `heartbeat_at` stale longer than `--owner-stale-after`
-    (default 30m) → logs notice, proceeds.
-  - `--force-foreign-owner` → explicit human override for anything else.
+    (default 30m) then logs notice, proceeds.
+  - `--force-foreign-owner` then explicit human override for anything else.
   - No lease at all (predates this feature, or never went through `supervise`
-    spawn) → treated as unowned, never refused.
+    spawn) then treated as unowned, never refused.
   - **Does not reap/clean a stale-lease worktree** — that's `argus worktree
     prune` (section 6). A stale lease only changes whether a mismatched caller
     may proceed.
@@ -264,7 +264,7 @@ set` touch two *different* files, and neither is the `.argus/config.yml` that
 |---|---|---|---|---|
 | `.argus/config.yml` | `argus init` | YAML | Per-repo defaults: base branch, toolchain, gate/ship keys (docs/repo-config.md) | Per repo, committed |
 | `.claude/settings.json` | `argus config check --write` | JSON | Bash allow/deny entries argus needs | Per clone, untracked |
-| `~/.argus/config.toml` | `argus config set` | TOML | Credential name → env-var overrides only | Per user |
+| `~/.argus/config.toml` | `argus config set` | TOML | Credential name to env-var overrides only | Per user |
 
 **Bash-permission allowlist and herdr-pane denylist — do this once per clone**,
 or every `argus` call prompts for manual approval and raw herdr pane mutation
@@ -480,7 +480,7 @@ verdict (does not persist):
 argus review --worktree <path> --base origin/main --task "issue 142" --reasons "touches sink dispatch"
 ```
 
-Request-changes verdict → get a fresh, persisted verdict with `argus rework`
+Request-changes verdict then get a fresh, persisted verdict with `argus rework`
 (section 4), not manual pane messaging.
 
 ## 3. Ship
@@ -544,7 +544,7 @@ argus rework --worktree <path> --base origin/main
 restart budget for the worktree itself — total rework rounds it may ever be
 dispatched for, across every separate `rework` call. `0` disables it. Without
 the flag: `.argus/config.yml` `rework_budget` key, then the built-in default.
-Exhausted budget → `rework` refuses regardless of `--max-rounds`.
+Exhausted budget then `rework` refuses regardless of `--max-rounds`.
 
 Sanity-check with `argus ship --worktree <path> --issue <N> --dry-run` before
 shipping for real. An approve doesn't mean every prior finding was fixed —

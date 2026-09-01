@@ -1,4 +1,4 @@
-.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus adr-find eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface verify-deps govulncheck secrets fix setup ci clean release pre-release changelog changelog-preview
+.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus adr-find eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface check-arrow-notation verify-deps govulncheck secrets fix setup ci clean release pre-release changelog changelog-preview
 
 # git exports these into every hook's environment so the hook's own git
 # invocations resolve to the repo/worktree that triggered it. If a recipe
@@ -109,6 +109,9 @@ check-file-size: ## Fail if a diff vs origin/main adds/modifies a file above the
 check-any-not-interface: ## Fail if tracked Go source uses interface{} instead of any
 	bash scripts/check-any-not-interface.sh .
 
+check-arrow-notation: ## Fail if markdown prose uses arrow notation (ASCII, unicode, or HTML entity)
+	bash scripts/check-arrow-notation.sh
+
 govulncheck: ## Reachability-aware vulnerability scan (complements OSV-Scanner's lockfile-only scan)
 	@command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck not found. Run: make setup"; exit 1; }
 	govulncheck ./...
@@ -143,7 +146,7 @@ setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same
 	@command -v ast-grep >/dev/null 2>&1 || echo "ast-grep not found — install with: brew install ast-grep (or see https://ast-grep.github.io/guide/quick-start.html)"
 	@echo "Setup complete."
 
-ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface verify-deps govulncheck secrets ## Run all CI checks locally
+ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface check-arrow-notation verify-deps govulncheck secrets ## Run all CI checks locally
 	@echo "All CI checks passed!"
 
 release: ## Update changelog, tag and push a release (requires TAG=v1.2.0)
