@@ -324,8 +324,8 @@ func TestRunWorkerAnswerEmptyRootPaneIDAfterRecording(t *testing.T) {
 	testCmdCtx, _ := testCmd()
 
 	err := runWorkerAnswer(testCmdCtx, client, answerLogger(), wt, "go ahead", 0, ownerFlags{}, fixedNow(time.Now()))
-	if err == nil || !strings.Contains(err.Error(), "answer recorded, but herdr opened no pane") {
-		t.Fatalf("err = %v, want it to mention \"answer recorded, but herdr opened no pane\"", err)
+	if err == nil || !strings.Contains(err.Error(), "answer recorded, but could not find a pane") {
+		t.Fatalf("err = %v, want it to mention \"answer recorded, but could not find a pane\"", err)
 	}
 
 	got, loadErr := protocol.Load(protocol.StatusPath(wt))

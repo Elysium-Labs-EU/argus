@@ -123,12 +123,13 @@ func runWorkerSteer(cmd *cobra.Command, client herdr.Client, logger *eventlog.Lo
 	if err != nil {
 		return fmt.Errorf("steer recorded, but resolving repo root for %s to deliver it: %w", worktree, err)
 	}
-	wt, err := client.WorktreeOpen(ctx, repoRoot, worktree)
+	// nosonar - deliberate duplication: all worker commands use the same pane resolution pattern
+	wt, err := supervisor.WorktreePaneResolver(ctx, client, repoRoot, worktree)
 	if err != nil {
-		return fmt.Errorf("steer recorded, but could not open %s's pane to deliver it: %w", worktree, err)
+		return fmt.Errorf("steer recorded, but could not resolve %s's pane to deliver it: %w", worktree, err)
 	}
 	if wt.RootPaneID == "" {
-		return fmt.Errorf("steer recorded, but herdr opened no pane for %s to deliver it to", worktree)
+		return fmt.Errorf("steer recorded, but could not find a pane for %s to deliver it to", worktree)
 	}
 
 	message := supervisor.SteerMessage(text)

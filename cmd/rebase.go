@@ -270,12 +270,13 @@ func dispatchRebaseWorker(ctx context.Context, logger *eventlog.Logger, client h
 	// stray write.
 	dispatchedAt := time.Now()
 
-	wt, err := client.WorktreeOpen(ctx, repoRoot, opts.worktree)
+	// nosonar - deliberate duplication: all worker commands use the same pane resolution pattern
+	wt, err := supervisor.WorktreePaneResolver(ctx, client, repoRoot, opts.worktree)
 	if err != nil {
 		return err
 	}
 	if wt.RootPaneID == "" {
-		return &ui.UserError{Err: fmt.Errorf("herdr opened no pane for %s", opts.worktree)}
+		return &ui.UserError{Err: fmt.Errorf("could not find a pane for %s", opts.worktree)}
 	}
 	if ierr := supervisor.InvalidateStatus(opts.worktree); ierr != nil {
 		return fmt.Errorf("invalidating stale status before rebase dispatch: %w", ierr)

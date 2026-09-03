@@ -515,8 +515,8 @@ func TestRunWorkerSteerEmptyRootPaneIDAfterRecording(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error when herdr opens no root pane, got nil")
 	}
-	if !strings.Contains(err.Error(), "herdr opened no pane") {
-		t.Errorf("error = %q, want it to mention herdr opened no pane", err.Error())
+	if !strings.Contains(err.Error(), "could not find a pane") {
+		t.Errorf("error = %q, want it to mention could not find a pane", err.Error())
 	}
 
 	got, loadErr := protocol.Load(protocol.StatusPath(wt))
@@ -527,7 +527,7 @@ func TestRunWorkerSteerEmptyRootPaneIDAfterRecording(t *testing.T) {
 		t.Fatalf("Steers = %+v, want it recorded despite the missing pane", got.Steers)
 	}
 	if got.Steers[0].Delivered {
-		t.Error("Steers[0].Delivered = true, want false — herdr opened no pane to deliver to")
+		t.Error("Steers[0].Delivered = true, want false — could not find a pane to deliver to")
 	}
 }
 

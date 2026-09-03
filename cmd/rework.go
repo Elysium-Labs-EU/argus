@@ -712,12 +712,13 @@ func dispatchReworkRound(ctx context.Context, out io.Writer, logger *eventlog.Lo
 	// stray write.
 	dispatchedAt := time.Now()
 
-	wt, err := client.WorktreeOpen(ctx, repoRoot, opts.worktree)
+	// nosonar - deliberate duplication: all worker commands use the same pane resolution pattern
+	wt, err := supervisor.WorktreePaneResolver(ctx, client, repoRoot, opts.worktree)
 	if err != nil {
 		return protocol.Status{}, "", dispatchedAt, err
 	}
 	if wt.RootPaneID == "" {
-		return protocol.Status{}, "", dispatchedAt, &ui.UserError{Err: fmt.Errorf("herdr opened no pane for %s", opts.worktree)}
+		return protocol.Status{}, "", dispatchedAt, &ui.UserError{Err: fmt.Errorf("could not find a pane for %s", opts.worktree)}
 	}
 	// Read before InvalidateStatus below removes status.json entirely, so the
 	// worktree's own recorded spawn base (see respawnRebaseAllow) is still
