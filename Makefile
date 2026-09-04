@@ -1,4 +1,4 @@
-.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus adr-find eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface check-golangci-pin verify-deps govulncheck secrets fix setup ci clean release pre-release changelog changelog-preview
+.PHONY: help build test test-coverage-check lint nilcheck sg gitnexus adr-find eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface check-golangci-pin check-arrow-notation verify-deps govulncheck secrets fix setup ci clean release pre-release changelog changelog-preview
 
 # git exports these into every hook's environment so the hook's own git
 # invocations resolve to the repo/worktree that triggered it. If a recipe
@@ -137,6 +137,9 @@ fix: ## Fix go formatting and struct field alignment
 check-golangci-pin: ## Fail if any consumer resolves golangci-lint's version from somewhere other than .golangci-lint-version
 	bash scripts/check-golangci-pin.sh .
 
+check-arrow-notation: ## Fail if markdown prose contains arrow notation (->, <-, →, ←, &rarr;, &larr;)
+	bash scripts/check-arrow-notation.sh
+
 setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same versions as eos/themis
 	@echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..."
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
@@ -151,7 +154,7 @@ setup: ## Install dev tools (golangci-lint, nilaway, go-crap, ast-grep) — same
 	@command -v ast-grep >/dev/null 2>&1 || echo "ast-grep not found — install with: brew install ast-grep (or see https://ast-grep.github.io/guide/quick-start.html)"
 	@echo "Setup complete."
 
-ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface check-golangci-pin verify-deps govulncheck secrets ## Run all CI checks locally
+ci: test lint sg nilcheck test-coverage-check crap eventlog-gate check-pubkey-sync check-schema-sync check-file-size check-any-not-interface check-golangci-pin check-arrow-notation verify-deps govulncheck secrets ## Run all CI checks locally
 	@echo "All CI checks passed!"
 
 release: ## Update changelog, tag and push a release (requires TAG=v1.2.0)
