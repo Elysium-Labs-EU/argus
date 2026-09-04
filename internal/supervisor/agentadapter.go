@@ -331,6 +331,13 @@ func settingsFor(worktree string, project protocol.PhaseConfig, baseAllow, extra
 		"Bash(git reset --hard*)",
 		"Bash(trash *)",
 		"Bash(sudo *)",
+		// A spawned sub-agent is invisible to argus's phase tracking and has
+		// no dispatch path if it hits its own approval prompt (worker steer/
+		// answer only reach the parent session) — closing the spawn path
+		// itself, rather than extending phase tracking and pane dispatch to
+		// child sessions, is a structural deny like the entries above it, not
+		// a phase-scoped one.
+		"Task",
 		// .claude/argus/ holds status.json/verdict.json/lifecycle.json —
 		// argus's own control plane, mutated only by its in-process writers
 		// and by `argus worker report` (a Bash subprocess this deny does not

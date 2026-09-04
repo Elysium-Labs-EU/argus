@@ -67,6 +67,20 @@ func TestSettingsForDeniesSelfEditOfOwnPermissionFiles(t *testing.T) {
 	}
 }
 
+// TestSettingsForDeniesTaskTool confirms settingsFor denies Claude Code's own
+// Task tool outright: a worker that can spawn a sub-agent is invisible to
+// argus's phase tracking and the pane/registry dispatch worker
+// steer/answer use, and a concurrent sub-agent write races the parent
+// worker's own edits with no single-writer enforcement — see
+// docs/adr for the decision to close the spawn path itself rather than
+// extend phase tracking and dispatch to child sessions.
+func TestSettingsForDeniesTaskTool(t *testing.T) {
+	settings := settingsFor("/repo/.claude/worktrees/feat-x", nil, nil, nil, nil, false, nil)
+	if !slices.Contains(settings.Permissions.Deny, "Task") {
+		t.Errorf("deny list missing %q; got %v", "Task", settings.Permissions.Deny)
+	}
+}
+
 // TestSettingsForEnablesAllProjectMcpServers guards against a headless
 // worker hanging forever on Claude Code's one-time MCP-server consent gate:
 // with no human present to answer it, every project MCP server must already
