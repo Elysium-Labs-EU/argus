@@ -129,7 +129,7 @@ argus config check                                                      # read-o
 |---|---|---|---|---|
 | `.argus/config.yml` | `argus init` | YAML | Per-repo defaults: base branch, toolchain, gate/ship keys | Once per repo; committed so the whole team shares it |
 | `.claude/settings.json` | `argus config check --write` | JSON | Bash allow/deny entries argus itself needs | Once per clone; untracked, so every checkout runs it |
-| `~/.argus/config.toml` | `argus config set` | TOML | Credential name → env-var overrides only | Only to redirect a credential; otherwise never |
+| `~/.argus/config.toml` | `argus config set` | TOML | Credential name to env-var overrides only | Only to redirect a credential; otherwise never |
 
 **Run**
 
